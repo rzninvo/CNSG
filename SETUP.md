@@ -134,5 +134,5 @@ In the Habitat conda environment (`conda activate habitat`, if not active):
 
 ```bash
 cd habitat-sim
-python examples/mr_viewer.py   --dataset "data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"   --scene "data/scene_datasets/hm3d/minival/00800-TEEsavR23oF/TEEsavR23oF.basis.glb"
+python examples/mr_viewer.py  # you can specify --dataset and --scene, otherwise the default is selected 
 ```

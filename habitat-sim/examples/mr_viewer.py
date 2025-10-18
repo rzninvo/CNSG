@@ -12,6 +12,9 @@ import sys
 import time
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import matplotlib.pyplot as plt
+from PIL import Image
+import shutil
 
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
@@ -22,10 +25,16 @@ from magnum import shaders, text
 from magnum.platform.glfw import Application
 
 import habitat_sim
+from habitat_sim.utils import common as utils
+
 from habitat_sim import ReplayRenderer, ReplayRendererConfiguration, physics
 from habitat_sim.logging import LoggingContext, logger
 from habitat_sim.utils.common import quat_from_angle_axis
 from habitat_sim.utils.settings import default_sim_settings, make_cfg
+
+
+from habitat.utils.visualizations import maps
+from habitat_sim.utils.common import d3_40_colors_rgb
 
 
 class HabitatSimInteractiveViewer(Application):
@@ -200,7 +209,216 @@ class HabitatSimInteractiveViewer(Application):
         logger.setLevel("INFO")
         self.print_help_text()
 
-        self.print_scene_semantic_info()
+        # self.print_scene_semantic_info()
+
+        # Demonstrate shortest path functionality
+        self.shortest_path(self.sim)
+
+    # display a topdown map with matplotlib
+    def display_map(self,topdown_map, key_points=None):
+        plt.figure(figsize=(36, 24))
+        ax = plt.subplot(1, 1, 1)
+        ax.axis("off")
+        plt.imshow(topdown_map)
+        # plot points on map
+        if key_points is not None:
+            for point in key_points:
+                plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
+        # plt.show(block=False)
+        
+        output_dir = "output"
+        if os.path.exists(output_dir):
+            # cancella tutto il contenuto della cartella
+            shutil.rmtree(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        plt.savefig("output/topdown_map.png", bbox_inches="tight")
+        print(f"✅ Saved: output/topdown_map.png")
+
+    def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
+        rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
+
+        arr = [rgb_img]
+        titles = ["rgb"]
+        if semantic_obs.size != 0:
+            semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
+            semantic_img.putpalette(d3_40_colors_rgb.flatten())
+            semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
+            semantic_img = semantic_img.convert("RGBA")
+            arr.append(semantic_img)
+            titles.append("semantic")
+
+        if depth_obs.size != 0:
+            depth_img = Image.fromarray((depth_obs / 10 * 255).astype(np.uint8), mode="L")
+            arr.append(depth_img)
+            titles.append("depth")
+
+        plt.figure(figsize=(36, 24))
+        for i, data in enumerate(arr):
+            ax = plt.subplot(1, 3, i + 1)
+            ax.axis("off")
+            ax.set_title(titles[i])
+            plt.imshow(data)
+        
+
+
+        # Inizializza contatore e cartella output solo la prima volta
+        if not hasattr(self, "output_counter"):
+            self.output_counter = 0
+
+        # incrementa contatore
+        self.output_counter += 1
+        filename = f"output/sample_output_{self.output_counter}.png"
+
+        plt.savefig(filename, bbox_inches="tight")
+        print(f"✅ Saved: {filename}")
+
+
+    def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
+        points = np.array(path_points)
+
+        new_points = [points[0]]   
+        for i in range(1, len(points)):
+            p0, p1 = points[i - 1], points[i]
+            segment = p1 - p0  
+            dist = np.linalg.norm(segment)
+            if dist == 0:
+                continue
+            if dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size:
+                new_points.append(p1)
+                continue
+            direction = segment / dist
+            n_steps = int(dist / step_size)
+            for s in range(1, n_steps + 1):
+                new_point = p0 + direction * step_size * s
+                new_points.append(new_point)
+        if np.linalg.norm(new_points[-1] - points[-1]) > 1e-3:
+            new_points.append(points[-1])
+        return np.array(new_points)
+
+
+
+    def shortest_path(self, sim):
+        if not sim.pathfinder.is_loaded:
+            print("Pathfinder not initialized, aborting.")
+        else:
+            seed = 4 #4  # @param {type:"integer"}
+            sim.pathfinder.seed(seed)
+
+            # fmt off
+            # @markdown 1. Sample valid points on the NavMesh for agent spawn location and pathfinding goal.
+            # fmt on
+            sample1 = sim.pathfinder.get_random_navigable_point()
+            sample2 = sim.pathfinder.get_random_navigable_point()
+
+            # @markdown 2. Use ShortestPath module to compute path between samples.
+            path = habitat_sim.ShortestPath()
+            path.requested_start = sample1
+            path.requested_end = sample2
+            found_path = sim.pathfinder.find_path(path)
+            geodesic_distance = path.geodesic_distance
+            path_points = path.points
+            
+            # @markdown - Success, geodesic path length, and 3D points can be queried.
+            print("found_path : " + str(found_path))
+            print("geodesic_distance : " + str(geodesic_distance))
+            print("path_points : " + str(path_points))
+
+            densified_path_points = self.densify_path(path_points, step_size=1.0)
+            print("densified_path_points : " + str(densified_path_points))
+
+            for i in range(len(densified_path_points)-1):
+                p1 = densified_path_points[i]
+                p2 = densified_path_points[i + 1]
+                segment_length = np.linalg.norm(p2 - p1)
+                print(f"Segment {i} length: {segment_length:.4f} meters")
+
+            path_points = densified_path_points
+
+            
+
+
+            # @markdown 3. Display trajectory (if found) on a topdown map of ground floor
+            if found_path:
+                
+                meters_per_pixel = 0.025
+                height = sim.scene_aabb.y().min
+               
+                top_down_map = maps.get_topdown_map(
+                    sim.pathfinder, height, meters_per_pixel=meters_per_pixel
+                )
+                recolor_map = np.array(
+                    [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
+                )
+                top_down_map = recolor_map[top_down_map]
+                grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
+                # convert world trajectory points to maps module grid points
+                trajectory = [
+                    maps.to_grid(
+                        path_point[2],
+                        path_point[0],
+                        grid_dimensions,
+                        pathfinder=sim.pathfinder,
+                    )
+                    for path_point in path_points
+                ]
+                grid_tangent = mn.Vector2(
+                    trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0]
+                )
+                path_initial_tangent = grid_tangent / grid_tangent.length()
+                initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
+                # draw the agent and trajectory on the map
+                maps.draw_path(top_down_map, trajectory)
+                maps.draw_agent(
+                    top_down_map, trajectory[0], initial_angle, agent_radius_px=8
+                )
+                print("\nDisplay the map with agent and path overlay:")
+                self.display_map(top_down_map)
+
+                # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
+                display_path_agent_renders = True  # @param{type:"boolean"}
+                if display_path_agent_renders:
+                    print("Rendering observations at path points:")
+                    tangent = path_points[1] - path_points[0]
+                    agent_state = habitat_sim.AgentState()
+                    for ix, point in enumerate(path_points):
+                        if ix < len(path_points) - 1:
+                            tangent = path_points[ix + 1] - point
+                            agent_state.position = point
+                            tangent_orientation_matrix = mn.Matrix4.look_at(
+                                point, point + tangent, np.array([0, 1.0, 0])
+                            )
+                            tangent_orientation_q = mn.Quaternion.from_matrix(
+                                tangent_orientation_matrix.rotation()
+                            )
+                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
+                            
+                            agent = sim.get_agent(self.agent_id)
+                            agent.set_state(agent_state)
+
+                            # observations = sim.get_sensor_observations()
+                            # rgb = observations["color_sensor"]
+                            # semantic = observations["semantic_sensor"]
+                            # depth = observations["depth_sensor"]
+
+
+                            observations = sim.get_sensor_observations()
+
+                            # use get with default None to safely handle missing sensors
+                            rgb = observations.get("color_sensor", None)
+                            semantic = observations.get("semantic_sensor", None)
+                            depth = observations.get("depth_sensor", None)
+
+
+                            if rgb is not None:
+                                if semantic is not None and depth is not None:
+                                    self.display_sample(rgb_obs=rgb, semantic_obs=semantic, depth_obs=depth)
+                                elif depth is not None:
+                                    self.display_sample(rgb_obs=rgb, depth_obs=depth)
+                                else:
+                                    self.display_sample(rgb_obs=rgb)
+                            else:
+                                print("⚠️ No color sensor found in observations.")
 
 
 
@@ -410,6 +628,18 @@ class HabitatSimInteractiveViewer(Application):
         """
         # configure our sim_settings but then set the agent to our default
         self.cfg = make_cfg(self.sim_settings)
+
+        # # Add semantic sensor to default agent if missing # TODO remove
+        # for agent_cfg in self.cfg.agents:
+        #     sensor_types = [s.uuid for s in agent_cfg.sensor_specifications]
+        #     if "semantic_sensor" not in sensor_types:
+        #         semantic_spec = habitat_sim.SensorSpec()
+        #         semantic_spec.uuid = "semantic_sensor"
+        #         semantic_spec.sensor_type = habitat_sim.SensorType.SEMANTIC
+        #         semantic_spec.resolution = [self.sim_settings["height"], self.sim_settings["width"]]
+        #         agent_cfg.sensor_specifications.append(semantic_spec)
+
+
         self.agent_id: int = self.sim_settings["default_agent"]
         self.cfg.agents[self.agent_id] = self.default_agent_config()
 
@@ -1195,13 +1425,13 @@ if __name__ == "__main__":
     # optional arguments
     parser.add_argument(
         "--scene",
-        default="./data/test_assets/scenes/simple_room.glb",
+        default="./data/scene_datasets/hm3d/minival/00800-TEEsavR23oF/TEEsavR23oF.basis.glb",
         type=str,
         help='scene/stage file to load (default: "./data/test_assets/scenes/simple_room.glb")',
     )
     parser.add_argument(
         "--dataset",
-        default="default",
+        default="./data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json",
         type=str,
         metavar="DATASET",
         help='dataset configuration file to use (default: "default")',
