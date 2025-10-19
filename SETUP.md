@@ -33,6 +33,13 @@ conda activate habitat
 
 > The `withbullet` parameter is optional (but recommended).
 
+## 3. Install habitat-lab
+- **pip install habitat-lab**
+    ```bash
+    cd habitat-lab
+    pip install -e habitat-lab  # install habitat_lab
+    ```
+
 ---
 
 ## Testing
