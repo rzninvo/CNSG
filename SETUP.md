@@ -63,7 +63,7 @@ Use the interactive viewer included with Habitat-Sim in either C++ or Python:
 # NOTE: depending on your choice of installation, you may need to add '/path/to/habitat-sim' to your PYTHONPATH.
 # e.g. from 'habitat-sim/' directory run 'export PYTHONPATH=$(pwd)'
 # inside 'habitat-sim/' folder
-export PYTHONPATH=$(pwd)
+export PYTHONPATH=PYTHONPATH:$(pwd)
 python examples/viewer.py --scene ./data/scene_datasets/habitat-test-scenes/skokloster-castle.glb
 ```
 

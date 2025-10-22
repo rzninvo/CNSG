@@ -15,6 +15,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 from PIL import Image
 import shutil
+import json
+
+
+
 
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
@@ -60,6 +64,7 @@ class HabitatSimInteractiveViewer(Application):
         self.cnt = 0
 
         self.sim_settings: Dict[str:Any] = sim_settings
+        scene_path = self.sim_settings["scene"]
 
         self.enable_batch_renderer: bool = self.sim_settings["enable_batch_renderer"]
         self.num_env: int = (
@@ -209,10 +214,42 @@ class HabitatSimInteractiveViewer(Application):
         logger.setLevel("INFO")
         self.print_help_text()
 
+
+
+
+        #########################################
+        base_path = os.path.dirname(scene_path)
+        scene_name = os.path.splitext(os.path.basename(scene_path))[0]
+        semantic_path = os.path.join(base_path, f"{scene_name.split('.')[0]}.semantic.txt")
+        map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+
+        print(f"Base path: {base_path}")
+        print(f"Semantic path: {semantic_path}")
+        print(f"Map file path: {map_file_path}")
+
+
+        if os.path.exists(map_file_path):
+            with open(map_file_path, "r", encoding="utf-8") as f:
+                map_room_id_to_name = json.load(f)
+        else:
+            raise FileNotFoundError(f"File di mappa non trovato: {map_file_path}")
+
+
+        ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
+        semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=map_room_id_to_name, ignore_categories=ignore_categories)
+
+        print("\nSemantic information of the scene:")
+        print(semantic_info)
+
+
         # self.print_scene_semantic_info()
 
         # Demonstrate shortest path functionality
         self.shortest_path(self.sim)
+
+
+    
+
 
     # display a topdown map with matplotlib
     def display_map(self,topdown_map, key_points=None):
@@ -295,6 +332,26 @@ class HabitatSimInteractiveViewer(Application):
         if np.linalg.norm(new_points[-1] - points[-1]) > 1e-3:
             new_points.append(points[-1])
         return np.array(new_points)
+    
+    def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
+        semantic_info = {}
+        with open(file_path, 'r') as f:
+            for line in f:
+                line_parts = line.strip().split(",")
+                if len(line_parts) != 4:
+                    continue
+                room_id = map_room_id_to_name[line_parts[3]] if line_parts[3] in map_room_id_to_name else "unknown_room"
+                category_id = line_parts[2].strip('"')
+
+                if room_id not in semantic_info:
+                    semantic_info[room_id] = {}
+                
+                if category_id not in ignore_categories:
+                    if category_id not in semantic_info[room_id]:
+                        semantic_info[room_id][category_id] = 1
+                    else:
+                        semantic_info[room_id][category_id] += 1
+        return semantic_info
 
 
 
