@@ -834,6 +834,12 @@ class HabitatSimInteractiveViewer(Application):
         agent_state = agent.get_state()
         print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
 
+    def get_object_position(self, obj_name) -> mn.Vector3:
+        """
+        Get the position of an object from its name.
+        """
+        print("TODO: To be implemented")
+
 
         
 
@@ -1458,6 +1464,9 @@ class MouseGrabber:
         self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
 
 
+        
+
+
 class Timer:
     """
     Timer class used to keep track of time between buffer swaps
@@ -1507,9 +1516,11 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
         try:
             user_input = input("User Input: ")
             if user_input.strip():
-                viewer.print_agent_state() # TODO modify this with the function you want to call
+                viewer.get_object_position(user_input) # TODO modify this with the function you want to call
         except EOFError:
             break
+
+
 
 if __name__ == "__main__":
     import argparse
