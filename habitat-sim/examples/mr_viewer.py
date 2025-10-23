@@ -17,6 +17,8 @@ from PIL import Image
 import shutil
 import json
 
+import threading
+
 
 
 flags = sys.getdlopenflags()
@@ -234,34 +236,39 @@ class HabitatSimInteractiveViewer(Application):
 
 
         #########################################
-        base_path = os.path.dirname(scene_path)
-        scene_name = os.path.splitext(os.path.basename(scene_path))[0]
-        semantic_path = os.path.join(base_path, f"{scene_name.split('.')[0]}.semantic.txt")
-        map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
 
-        print(f"Base path: {base_path}")
-        print(f"Semantic path: {semantic_path}")
-        print(f"Map file path: {map_file_path}")
+        if False:
+            base_path = os.path.dirname(scene_path)
+            scene_name = os.path.splitext(os.path.basename(scene_path))[0]
+            semantic_path = os.path.join(base_path, f"{scene_name.split('.')[0]}.semantic.txt")
+            map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
 
-
-        if os.path.exists(map_file_path):
-            with open(map_file_path, "r", encoding="utf-8") as f:
-                map_room_id_to_name = json.load(f)
-        else:
-            raise FileNotFoundError(f"File di mappa non trovato: {map_file_path}")
+            print(f"Base path: {base_path}")
+            print(f"Semantic path: {semantic_path}")
+            print(f"Map file path: {map_file_path}")
 
 
-        ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
-        semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=map_room_id_to_name, ignore_categories=ignore_categories)
+            if os.path.exists(map_file_path):
+                with open(map_file_path, "r", encoding="utf-8") as f:
+                    map_room_id_to_name = json.load(f)
+            else:
+                raise FileNotFoundError(f"File di mappa non trovato: {map_file_path}")
 
-        print("\nSemantic information of the scene:")
-        print(semantic_info)
+
+            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
+            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=map_room_id_to_name, ignore_categories=ignore_categories)
+
+            print("\nSemantic information of the scene:")
+            print(semantic_info)
 
 
-        # self.print_scene_semantic_info()
+            self.print_scene_semantic_info()
 
-        # Demonstrate shortest path functionality
-        self.shortest_path(self.sim)
+            # Demonstrate shortest path functionality
+            self.shortest_path(self.sim)
+
+        ###########################################
+
 
 
     
@@ -814,14 +821,18 @@ class HabitatSimInteractiveViewer(Application):
             # update location of grabbed object
             self.update_grab_position(self.previous_mouse_point)
 
-        
+    
+        # if self.cnt % 60 == 0:
+        #     self.print_agent_state()
+        # self.cnt += 1
+
+    def print_agent_state(self) -> None:
+        """
+        Logs the current agent's position and rotation in the simulator.
+        """
         agent = self.sim.get_agent(self.agent_id)
-        if self.cnt % 60 == 0:
-            agent_state = agent.get_state()
-            logger.info(
-                f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}"
-            )
-        self.cnt += 1
+        agent_state = agent.get_state()
+        print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
 
 
         
@@ -1490,6 +1501,16 @@ class Timer:
         Timer.prev_frame_time = time.time()
 
 
+
+def user_input_loop(viewer: HabitatSimInteractiveViewer):
+    while True:
+        try:
+            user_input = input("User Input: ")
+            if user_input.strip():
+                viewer.print_agent_state() # TODO modify this with the function you want to call
+        except EOFError:
+            break
+
 if __name__ == "__main__":
     import argparse
 
@@ -1578,4 +1599,11 @@ if __name__ == "__main__":
     sim_settings["enable_hbao"] = args.hbao
 
     # start the application
-    HabitatSimInteractiveViewer(sim_settings).exec()
+    # HabitatSimInteractiveViewer(sim_settings).exec()
+
+    viewer = HabitatSimInteractiveViewer(sim_settings)
+
+    input_thread = threading.Thread(target=user_input_loop, args=(viewer,), daemon=True)
+    input_thread.start()
+
+    viewer.exec()
