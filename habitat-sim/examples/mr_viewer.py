@@ -19,7 +19,6 @@ import json
 
 
 
-
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
 
@@ -39,6 +38,23 @@ from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
+
+
+
+
+
+
+# Initialize OpenAI client
+try:
+    from dotenv import load_dotenv
+    import os
+    from openai import OpenAI
+    load_dotenv()
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+except Exception as e:
+    print("[WARNING] OpenAI API key not found or error loading .env file. ChatGPT features will be disabled.")
+    client = None  
+
 
 
 class HabitatSimInteractiveViewer(Application):
