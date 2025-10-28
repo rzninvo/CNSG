@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import shutil
 import json
+import datetime
 
 import threading
 
@@ -285,7 +286,7 @@ class HabitatSimInteractiveViewer(Application):
 
         #########################################
 
-        if False:
+        if True:
             base_path = os.path.dirname(scene_path)
             scene_name = os.path.splitext(os.path.basename(scene_path))[0]
             semantic_path = os.path.join(base_path, f"{scene_name.split('.')[0]}.semantic.txt")
@@ -341,7 +342,7 @@ class HabitatSimInteractiveViewer(Application):
         os.makedirs(output_dir, exist_ok=True)
 
         plt.savefig("output/topdown_map.png", bbox_inches="tight")
-        print(f"✅ Saved: output/topdown_map.png")
+        logger.info(f"Saved: output/topdown_map.png")
 
     def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
@@ -379,7 +380,7 @@ class HabitatSimInteractiveViewer(Application):
         filename = f"output/sample_output_{self.output_counter}.png"
 
         plt.savefig(filename, bbox_inches="tight")
-        print(f"✅ Saved: {filename}")
+        logger.info(f"Saved: {filename}")
 
 
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
@@ -424,7 +425,96 @@ class HabitatSimInteractiveViewer(Application):
                         semantic_info[room_id][category_id] += 1
         return semantic_info
 
+    def extract_visible_objects(self, sim, observations) -> Optional[Dict[str, Any]]:
+        """
+        Given current sim and observations (must include semantic sensor),
+        returns a dict of visible objects and spatial relations between them.
+        """
+        if "semantic_sensor" not in observations:
+            logger.warning("No semantic sensor found; skipping visible object extraction.")
+            return None
 
+        semantic = observations["semantic_sensor"]
+        total_pixels = semantic.size
+        ids, counts = np.unique(semantic, return_counts=True)
+
+        visible_objects = {}
+        for obj_id, pixel_count in zip(ids, counts):
+            if obj_id == 0 or pixel_count < 50:
+                continue  # skip background/noise/small fragments
+
+            try:
+                obj = sim.semantic_scene.objects[obj_id]
+            except IndexError:
+                continue
+
+            label = obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            aabb = obj.aabb
+            vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
+            vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
+            bbox_world = [[float(vmin[0]), float(vmin[1]), float(vmin[2])],
+                        [float(vmax[0]), float(vmax[1]), float(vmax[2])]]
+            centroid_world = [float(x) for x in aabb.center()]
+
+            # Convert centroid to camera coordinates
+            sensor_state = sim.get_agent(0).get_state().sensor_states["color_sensor"]
+            rot_mn = utils.quat_to_magnum(sensor_state.rotation)
+            T_world_cam = mn.Matrix4.from_(
+                rot_mn.inverted().to_matrix(),
+                -rot_mn.inverted().transform_vector(sensor_state.position),
+            )
+            centroid_cam = T_world_cam.transform_point(mn.Vector3(*centroid_world))
+            centroid_cam = np.array([centroid_cam.x, centroid_cam.y, centroid_cam.z])
+            dist = float(np.linalg.norm(centroid_cam))
+
+            visible_objects[str(obj_id)] = {
+                "label": label,
+                "pixel_count": int(pixel_count),
+                "pixel_percent": float(100 * pixel_count / total_pixels),
+                "centroid_world": centroid_world,
+                "bbox_world": bbox_world,
+                "centroid_cam": centroid_cam.tolist(),
+                "distance_from_camera": dist,
+            }
+
+        # Compute spatial relations
+        relations = self.compute_spatial_relations(visible_objects)
+
+        return {
+            "visible_objects": visible_objects,
+            "spatial_relations": relations,
+        }
+
+
+    def compute_spatial_relations(self, visible_objects):
+        """
+        Compute basic spatial relations ('left_of', 'right_of', 'in_front_of', 'behind')
+        between visible objects using their camera-space centroids.
+        """
+        relations = []
+        keys = list(visible_objects.keys())
+
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                obj_a = visible_objects[keys[i]]
+                obj_b = visible_objects[keys[j]]
+
+                ca = np.array(obj_a["centroid_cam"])
+                cb = np.array(obj_b["centroid_cam"])
+                diff = cb - ca
+
+                # Basic heuristic
+                if abs(diff[0]) > abs(diff[2]):
+                    rel_ab = "left_of" if diff[0] > 0 else "right_of"
+                else:
+                    rel_ab = "in_front_of" if diff[2] < 0 else "behind"
+
+                relations.append({
+                    "subject": obj_a["label"],
+                    "object": obj_b["label"],
+                    "relation": rel_ab
+                })
+        return relations
 
     def shortest_path(self, sim):
         if not sim.pathfinder.is_loaded:
@@ -539,12 +629,32 @@ class HabitatSimInteractiveViewer(Application):
 
 
                             if rgb is not None:
+                                # Save RGB/depth/semantic preview as before
                                 if semantic is not None and depth is not None:
                                     self.display_sample(rgb_obs=rgb, semantic_obs=semantic, depth_obs=depth)
                                 elif depth is not None:
                                     self.display_sample(rgb_obs=rgb, depth_obs=depth)
                                 else:
                                     self.display_sample(rgb_obs=rgb)
+
+                                # 🔍 Extract visible objects + relations
+                                frame_meta = self.extract_visible_objects(sim, observations)
+                                if frame_meta is not None:
+                                    sensor_state = sim.get_agent(0).get_state().sensor_states["color_sensor"]
+                                    rot_mn = utils.quat_to_magnum(sensor_state.rotation)
+                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
+                                    frame_data = {
+                                        "scene_index": sim.curr_scene_name,
+                                        "image_index": f"frame-{ix:06d}",
+                                        "scene_pose": np.array(T_world_sensor).tolist(),
+                                        "visible_objects": frame_meta["visible_objects"],
+                                        "spatial_relations": frame_meta["spatial_relations"],
+                                        "timestamp": datetime.datetime.now().isoformat()
+                                    }
+
+                                    with open(f"output/frame_{ix:06d}.json", "w") as f:
+                                        json.dump(frame_data, f, indent=2)
+                                    print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
                                 print("⚠️ No color sensor found in observations.")
 
@@ -1657,6 +1767,7 @@ if __name__ == "__main__":
     sim_settings["window_height"] = args.height
     sim_settings["default_agent_navmesh"] = False
     sim_settings["enable_hbao"] = args.hbao
+    sim_settings["semantic_sensor"] = True
 
     # start the application
     # HabitatSimInteractiveViewer(sim_settings).exec()
