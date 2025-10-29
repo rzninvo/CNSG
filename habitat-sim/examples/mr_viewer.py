@@ -486,35 +486,262 @@ class HabitatSimInteractiveViewer(Application):
         }
 
 
-    def compute_spatial_relations(self, visible_objects):
+    def compute_spatial_relations(
+        self,
+        visible_objects,
+        max_distance=1.5,
+        vertical_thresh=0.25,
+        horizontal_bias=1.2
+    ):
         """
-        Compute basic spatial relations ('left_of', 'right_of', 'in_front_of', 'behind')
-        between visible objects using their camera-space centroids.
+        Compute spatial relations between nearby objects.
+
+        Relations:
+        - 'left_of' / 'right_of'
+        - 'in_front_of' / 'behind'
+        - 'on_top_of' / 'beneath_of'
+
+        Args:
+            visible_objects: dict of objects (either raw or deduped)
+            max_distance: max Euclidean distance (m) in camera-space to consider
+            vertical_thresh: minimum vertical offset (m) to count as top/bottom
+            horizontal_bias: factor to slightly favor horizontal relations when
+                            x/z differences are much larger than y.
+
+        Returns:
+            A list of spatial relation dictionaries.
         """
         relations = []
         keys = list(visible_objects.keys())
+        if len(keys) <= 1:
+            return relations
+
+        # Precompute camera-space centroids
+        centroids = {
+            k: np.array(visible_objects[k]["centroid_cam"], dtype=float)
+            for k in keys
+        }
 
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
                 obj_a = visible_objects[keys[i]]
                 obj_b = visible_objects[keys[j]]
+                ca, cb = centroids[keys[i]], centroids[keys[j]]
 
-                ca = np.array(obj_a["centroid_cam"])
-                cb = np.array(obj_b["centroid_cam"])
                 diff = cb - ca
+                dist = np.linalg.norm(diff)
+                if dist > max_distance:
+                    # too far apart - skip
+                    continue
 
-                # Basic heuristic
-                if abs(diff[0]) > abs(diff[2]):
-                    rel_ab = "left_of" if diff[0] > 0 else "right_of"
+                dx, dy, dz = diff
+                abs_dx, abs_dy, abs_dz = abs(dx), abs(dy), abs(dz)
+
+                # default relation: None until we find a dominant axis
+                rel_ab = None
+
+                # check vertical relation first
+                if abs_dy > vertical_thresh and abs_dy > (abs_dx + abs_dz) / horizontal_bias:
+                    rel_ab = "on_top_of" if dy > 0 else "beneath_of"
+
+                # otherwise, check horizontal plane
+                elif abs_dx > abs_dz:
+                    rel_ab = "left_of" if dx > 0 else "right_of"
                 else:
-                    rel_ab = "in_front_of" if diff[2] < 0 else "behind"
+                    rel_ab = "in_front_of" if dz < 0 else "behind"
 
                 relations.append({
                     "subject": obj_a["label"],
                     "object": obj_b["label"],
-                    "relation": rel_ab
+                    "relation": rel_ab,
+                    "distance_m": round(float(dist), 3)
                 })
+
         return relations
+    
+    def _normalize_label(self, label: str) -> str:
+        """Normalize object labels to handle synonyms and groupings."""
+        l = label.strip().lower()
+        if l in {"wall", "ceiling", "floor", "window frame", "door frame", "frame", "unknown"}:
+            return l
+
+        if l in {"door", "doorway", "door frame", "attic door"}:
+            return "doorway"
+        
+        if l in {"stairs", "stair", "step", "stairway"}:
+            return "staircase"
+
+        return l
+
+    def _is_informative(self, label_norm: str, *,
+                        mode: str = "blacklist",
+                        blacklist=None,
+                        whitelist=None) -> bool:
+        """
+        mode="blacklist": keep everything except the blacklist
+        mode="whitelist": keep only the whitelist
+        """
+        if mode not in {"blacklist", "whitelist"}:
+            mode = "blacklist"
+        if mode == "blacklist":
+            blacklist = set(blacklist or [
+                "wall", "floor", "ceiling", "frame", "window frame", "unknown",
+                "ceiling_light", "light", "lamp"
+            ])
+            return label_norm not in blacklist
+        else:
+            whitelist = set(whitelist or [
+                "doorway", "staircase", "elevator", "escalator", "corridor",
+                "intersection", "railing", "exit_sign", "sign", "sofa",
+                "table", "wardrobe", "balcony", "bridge"
+            ])
+            return label_norm in whitelist
+        
+    def _xy_dist(self, a, b):
+        # ground-plane distance using world x,z (index 0 and 2)
+        return math.hypot(a[0] - b[0], a[2] - b[2])
+
+    def _merge_aabbs(self, aabb_a, aabb_b):
+        # each aabb: [[xmin,ymin,zmin],[xmax,ymax,zmax]]
+        return [
+            [min(aabb_a[0][0], aabb_b[0][0]),
+            min(aabb_a[0][1], aabb_b[0][1]),
+            min(aabb_a[0][2], aabb_b[0][2])],
+            [max(aabb_a[1][0], aabb_b[1][0]),
+            max(aabb_a[1][1], aabb_b[1][1]),
+            max(aabb_a[1][2], aabb_b[1][2])]
+        ]
+    
+    def _cluster_same_label(self, instances, distance_thresh=1.0):
+        """
+        Greedy clustering per label on ground plane.
+        - instances: list of dicts with keys:
+            label_norm, centroid_world, bbox_world, pixel_count, pixel_percent, distance_from_camera, raw_ids (set)
+        - distance_thresh: meters (tune per scene scale; 0.8~1.5 works well)
+
+        Returns list of merged clusters for that label.
+        """
+        clusters = []  # each: dict like instances, aggregated
+
+        # Sort big to small so large areas seed clusters
+        instances_sorted = sorted(instances, key=lambda x: x["pixel_count"], reverse=True)
+
+        for inst in instances_sorted:
+            assigned = False
+            for cl in clusters:
+                if self._xy_dist(inst["centroid_world"], cl["centroid_world"]) <= distance_thresh:
+                    # merge into cluster (weighted by pixel_count)
+                    w_old = cl["pixel_count"]
+                    w_new = inst["pixel_count"]
+                    w_sum = w_old + w_new
+
+                    # weighted centroid (world)
+                    cx = (cl["centroid_world"][0] * w_old + inst["centroid_world"][0] * w_new) / w_sum
+                    cy = (cl["centroid_world"][1] * w_old + inst["centroid_world"][1] * w_new) / w_sum
+                    cz = (cl["centroid_world"][2] * w_old + inst["centroid_world"][2] * w_new) / w_sum
+                    cl["centroid_world"] = [cx, cy, cz]
+
+                    # choose min distance to camera (useful for narration)
+                    cl["distance_from_camera"] = min(cl["distance_from_camera"], inst["distance_from_camera"])
+
+                    # union bbox
+                    cl["bbox_world"] = self._merge_aabbs(cl["bbox_world"], inst["bbox_world"])
+
+                    # accumulate pixels
+                    cl["pixel_count"] = w_sum
+                    cl["pixel_percent"] += inst["pixel_percent"]
+
+                    # track raw semantic ids merged
+                    cl["raw_ids"].update(inst["raw_ids"])
+                    assigned = True
+                    break
+
+            if not assigned:
+                clusters.append({
+                    **inst,
+                    "raw_ids": set(inst["raw_ids"]),  # ensure it’s a fresh set
+                })
+
+        return clusters
+    
+    def postprocess_visible_objects(self, visible_objects: dict,
+                                *,
+                                pixel_percent_min=0.02,
+                                mode="blacklist",
+                                blacklist=None,
+                                whitelist=None,
+                                per_label_cluster_thresh_m=1.0,
+                                top_k_per_label=None,
+                                recompute_relations=True):
+        """
+        - visible_objects: the dict produced by extract_visible_objects()["visible_objects"]
+        Returns:
+            {
+            "objects": { "<uid>": {...} },
+            "spatial_relations": [ ... ]   # recomputed on deduped set (if requested)
+            }
+        """
+        # normalizing the labels + filtering them based on blacklist/whitelist + pixel area threshold
+        buckets = {}  # label_norm -> list[instance]
+        for raw_id, inst in visible_objects.items():
+            label_norm = self._normalize_label(inst["label"])
+            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
+                continue
+            if inst.get("pixel_percent", 0.0) < pixel_percent_min:
+                continue
+
+            buckets.setdefault(label_norm, []).append({
+                "label": inst["label"],
+                "label_norm": label_norm,
+                "pixel_count": inst["pixel_count"],
+                "pixel_percent": inst.get("pixel_percent", 0.0),
+                "centroid_world": inst["centroid_world"],
+                "bbox_world": inst["bbox_world"],
+                "centroid_cam": inst["centroid_cam"],
+                "distance_from_camera": inst["distance_from_camera"],
+                "raw_ids": {raw_id},
+            })
+
+        # clustering per label
+        dedup_list = []
+        for label_norm, insts in buckets.items():
+            clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
+
+            # (optional) keep only top-K largest clusters per label by pixel area
+            if top_k_per_label is not None and len(clusters) > top_k_per_label:
+                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
+
+            dedup_list.extend(clusters)
+
+        # building an objects dict with stable uids
+        objects = {}
+        per_label_counts = {}
+        for cl in dedup_list:
+            cnt = per_label_counts.get(cl["label_norm"], 0) + 1
+            per_label_counts[cl["label_norm"]] = cnt
+            uid = f"{cl['label_norm']}_{cnt:02d}"
+
+            objects[uid] = {
+                "label": cl["label_norm"],
+                "pixel_count": int(cl["pixel_count"]),
+                "pixel_percent": float(cl["pixel_percent"]),
+                "centroid_world": [float(v) for v in cl["centroid_world"]],
+                "bbox_world": cl["bbox_world"],
+                "centroid_cam": cl["centroid_cam"],
+                "distance_from_camera": float(cl["distance_from_camera"]),
+                "merged_raw_ids": sorted(list(cl["raw_ids"])),  # traceability to original instances
+            }
+
+        # recompute relations on the deduped set (camera-space centroids)
+        if recompute_relations:
+            relations = self.compute_spatial_relations(objects)
+        else:
+            relations = []
+
+        # sort objects by pixel_count descending for salience
+        objects = dict(sorted(objects.items(), key=lambda item: item[1]["pixel_count"], reverse=True))
+
+        return {"objects": objects, "spatial_relations": relations}
 
     def shortest_path(self, sim):
         if not sim.pathfinder.is_loaded:
@@ -637,19 +864,29 @@ class HabitatSimInteractiveViewer(Application):
                                 else:
                                     self.display_sample(rgb_obs=rgb)
 
-                                # 🔍 Extract visible objects + relations
+                                # Extract visible objects + relations
                                 frame_meta = self.extract_visible_objects(sim, observations)
                                 if frame_meta is not None:
+                                    dedup = self.postprocess_visible_objects(
+                                        frame_meta["visible_objects"],
+                                        pixel_percent_min=0.02,
+                                        mode="blacklist",
+                                        per_label_cluster_thresh_m=1.2,
+                                        top_k_per_label=3,
+                                        recompute_relations=True,
+                                    )
+
                                     sensor_state = sim.get_agent(0).get_state().sensor_states["color_sensor"]
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
                                     T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
+
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{ix:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "visible_objects": frame_meta["visible_objects"],
-                                        "spatial_relations": frame_meta["spatial_relations"],
-                                        "timestamp": datetime.datetime.now().isoformat()
+                                        "objects": dedup["objects"],  # ✅ deduped version
+                                        "spatial_relations": dedup["spatial_relations"],
+                                        "timestamp": datetime.datetime.now().isoformat(),
                                     }
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
@@ -657,8 +894,6 @@ class HabitatSimInteractiveViewer(Application):
                                     print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
                                 print("⚠️ No color sensor found in observations.")
-
-
 
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
@@ -1768,6 +2003,7 @@ if __name__ == "__main__":
     sim_settings["default_agent_navmesh"] = False
     sim_settings["enable_hbao"] = args.hbao
     sim_settings["semantic_sensor"] = True
+    sim_settings["depth_sensor"] = True
 
     # start the application
     # HabitatSimInteractiveViewer(sim_settings).exec()
