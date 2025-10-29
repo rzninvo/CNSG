@@ -17,7 +17,7 @@ from PIL import Image
 import shutil
 import json
 import datetime
-
+import re
 import threading
 
 
@@ -56,7 +56,12 @@ try:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 except Exception as e:
     print("[WARNING] OpenAI API key not found or error loading .env file. ChatGPT features will be disabled.")
-    client = None  
+    client = None 
+
+def get_landmark_room_manually(user_input):
+    # Fallback function to get landmark/room information manually
+    res = re.findall(r'"(.*?)"', user_input.lower().strip())
+    return res[0] if len(res) > 0 else ""
 
 def get_landmark_room(user_input):
     # This function calls an LLM to retrieve the landmark / room information from the Human Request
@@ -285,6 +290,7 @@ class HabitatSimInteractiveViewer(Application):
 
 
         #########################################
+        self.map_room_id_to_name = {}
 
         if True:
             base_path = os.path.dirname(scene_path)
@@ -299,19 +305,19 @@ class HabitatSimInteractiveViewer(Application):
 
             if os.path.exists(map_file_path):
                 with open(map_file_path, "r", encoding="utf-8") as f:
-                    map_room_id_to_name = json.load(f)
+                    self.map_room_id_to_name = json.load(f)
             else:
-                raise FileNotFoundError(f"File di mappa non trovato: {map_file_path}")
+                raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
 
-            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
-            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=map_room_id_to_name, ignore_categories=ignore_categories)
+            # ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
+            # semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
 
-            print("\nSemantic information of the scene:")
-            print(semantic_info)
+            # print("\nSemantic information of the scene:")
+            # print(semantic_info)
 
 
-            self.print_scene_semantic_info()
+            # self.print_scene_semantic_info()
 
             # Demonstrate shortest path functionality
             self.shortest_path(self.sim)
@@ -412,7 +418,14 @@ class HabitatSimInteractiveViewer(Application):
                 line_parts = line.strip().split(",")
                 if len(line_parts) != 4:
                     continue
-                room_id = map_room_id_to_name[line_parts[3]] if line_parts[3] in map_room_id_to_name else "unknown_room"
+                
+                room_info = map_room_id_to_name.get(line_parts[3])
+                if room_info and "name" in room_info:
+                    room_id = room_info["name"] 
+                else:
+                    room_id = "unknown_room"
+
+
                 category_id = line_parts[2].strip('"')
 
                 if room_id not in semantic_info:
@@ -423,6 +436,7 @@ class HabitatSimInteractiveViewer(Application):
                         semantic_info[room_id][category_id] = 1
                     else:
                         semantic_info[room_id][category_id] += 1
+                        
         return semantic_info
 
     def extract_visible_objects(self, sim, observations) -> Optional[Dict[str, Any]]:
@@ -754,6 +768,7 @@ class HabitatSimInteractiveViewer(Application):
             # @markdown 1. Sample valid points on the NavMesh for agent spawn location and pathfinding goal.
             # fmt on
             sample1 = sim.pathfinder.get_random_navigable_point()
+            print("\n\nsample1 : ", sample1)
             sample2 = sim.pathfinder.get_random_navigable_point()
 
             # @markdown 2. Use ShortestPath module to compute path between samples.
@@ -908,10 +923,10 @@ class HabitatSimInteractiveViewer(Application):
                 for obj in region.objects:
                     print(
                         f"\tObject id:{obj.id}, category:{obj.category.name()},"
-                        f" center:{self.compute_xyz_obj_center(obj.aabb)}"
+                        f" center:{self.compute_xyz_center(obj.aabb)}"
                     )
 
-    def compute_xyz_obj_center(self, obj_aabb):
+    def compute_xyz_center(self, obj_aabb):
         # ottieni i vertici min e max dell'AABB
         vmin = obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min
         vmax = obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max
@@ -1227,11 +1242,40 @@ class HabitatSimInteractiveViewer(Application):
         agent_state = agent.get_state()
         print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
 
-    def get_object_position(self, obj_name) -> mn.Vector3:
+    def get_object_position(self, name: str) -> Optional[mn.Vector3]:
         """
-        Get the position of an object from its name.
+        Get the centroid position of an object or region from its category name.
         """
-        print("TODO: To be implemented")
+        scene = self.sim.semantic_scene
+        if scene is None:
+            print("Error: Semantic scene is not loaded.")
+            return None
+
+        for region in scene.regions:
+            region_name = ""
+            if region and region.id:
+                reg = self.map_room_id_to_name[region.id.strip("_").lower()] if region.id.strip("_").lower() in self.map_room_id_to_name else region.id
+                if reg is None:
+                    return None
+                region_name = reg["name"] if "name" in reg else region.id
+                region_pos = mn.Vector3(reg["position"]) if "position" in reg else mn.Vector3((-1,-1,-1))            
+            if region_name.lower() == name.lower():
+                # print(
+                #     f"\nRegion category:{region_name},"
+                #     f" center:{region_pos}"
+                # )
+                return region_pos
+            for obj in region.objects:
+                if obj and obj.category and obj.category.name().lower() == name.lower():
+                    center = mn.Vector3(self.compute_xyz_center(obj.aabb))
+                    # print(
+                    #     f"\nObject category:{obj.category.name()},"
+                    #     f" center:{center}"
+                    # )
+                    return center
+
+        print(f"Warning: Item with name '{name}' not found in objects or rooms.")
+        return None
 
 
         
@@ -1907,10 +1951,19 @@ class Timer:
 def user_input_loop(viewer: HabitatSimInteractiveViewer):
     while True:
         try:
-            user_input = input("User Input: ")
-            if user_input.strip():
-                # viewer.get_object_position(user_input) # TODO modify this with the function you want to call
-                response = get_landmark_room(user_input)
+            user_input = input("User Input: ").lower().strip()
+
+            if user_input:
+               
+                # response = get_landmark_room(user_input)
+                response = None
+                if response is None:
+                    # response = get_landmark_room_manually(user_input)
+                    response = response if response else user_input
+                    pos = viewer.get_object_position(response)
+                    print(f"Position of '{response}': {pos}")
+
+                
         except EOFError:
             break
 
