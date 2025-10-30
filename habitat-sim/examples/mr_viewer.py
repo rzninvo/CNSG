@@ -19,6 +19,7 @@ import json
 import datetime
 import re
 import threading
+import queue
 
 
 
@@ -134,6 +135,7 @@ class HabitatSimInteractiveViewer(Application):
     def __init__(self, sim_settings: Dict[str, Any]) -> None:
 
         self.cnt = 0
+        self.action_queue = queue.Queue()
 
         self.sim_settings: Dict[str:Any] = sim_settings
         scene_path = self.sim_settings["scene"]
@@ -320,12 +322,29 @@ class HabitatSimInteractiveViewer(Application):
             # self.print_scene_semantic_info()
 
             # Demonstrate shortest path functionality
-            self.shortest_path(self.sim)
+            # dummy_goal = mn.Vector3(-1.6096749, 3.163378, -7.154511)
+            # self.shortest_path(self.sim, dummy_goal)
 
         ###########################################
 
 
-
+    def _process_queued_actions(self):
+        """Execute actions enqueued from other threads."""
+        try:
+            while True:
+                action, args, kwargs = self.action_queue.get_nowait()
+                try:
+                    action(*args, **kwargs)
+                except Exception as e:
+                    print(f"Error executing queued action {action}: {e}")
+            
+                self.action_queue.task_done()
+                
+        except queue.Empty:
+            pass
+    
+    def enqueue_shortest_path(self, goal_pos):
+        self.action_queue.put((self.shortest_path, (self.sim, goal_pos), {}))
     
 
 
@@ -348,7 +367,7 @@ class HabitatSimInteractiveViewer(Application):
         os.makedirs(output_dir, exist_ok=True)
 
         plt.savefig("output/topdown_map.png", bbox_inches="tight")
-        logger.info(f"Saved: output/topdown_map.png")
+        # logger.info(f"Saved: output/topdown_map.png")
 
     def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
@@ -386,7 +405,7 @@ class HabitatSimInteractiveViewer(Application):
         filename = f"output/sample_output_{self.output_counter}.png"
 
         plt.savefig(filename, bbox_inches="tight")
-        logger.info(f"Saved: {filename}")
+        # logger.info(f"Saved: {filename}")
 
 
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
@@ -757,7 +776,8 @@ class HabitatSimInteractiveViewer(Application):
 
         return {"objects": objects, "spatial_relations": relations}
 
-    def shortest_path(self, sim):
+
+    def shortest_path(self, sim, goal: mn.Vector3): # TODO REMOVE ALL THE PRINTS
         if not sim.pathfinder.is_loaded:
             print("Pathfinder not initialized, aborting.")
         else:
@@ -767,36 +787,27 @@ class HabitatSimInteractiveViewer(Application):
             # fmt off
             # @markdown 1. Sample valid points on the NavMesh for agent spawn location and pathfinding goal.
             # fmt on
-            sample1 = sim.pathfinder.get_random_navigable_point()
-            print("\n\nsample1 : ", sample1)
-            sample2 = sim.pathfinder.get_random_navigable_point()
+            agent_state_pos = mn.Vector3(self.sim.get_agent(self.agent_id).get_state().position)
+
+            # sample1 = sim.pathfinder.get_random_navigable_point()
+            # print("\n\nsample1 : ", sample1)
+            # sample2 = sim.pathfinder.get_random_navigable_point()
 
             # @markdown 2. Use ShortestPath module to compute path between samples.
             path = habitat_sim.ShortestPath()
-            path.requested_start = sample1
-            path.requested_end = sample2
+            path.requested_start = agent_state_pos
+            path.requested_end = goal
             found_path = sim.pathfinder.find_path(path)
-            geodesic_distance = path.geodesic_distance
             path_points = path.points
             
             # @markdown - Success, geodesic path length, and 3D points can be queried.
-            print("found_path : " + str(found_path))
-            print("geodesic_distance : " + str(geodesic_distance))
-            print("path_points : " + str(path_points))
+            print("Path found : " + str(found_path))  
+            print("Start : " + str(path.requested_start))
+            print("Goal : " + str(path.requested_end))          
+            print("Path points : " + str(path_points))
 
-            densified_path_points = self.densify_path(path_points, step_size=1.0)
-            print("densified_path_points : " + str(densified_path_points))
-
-            for i in range(len(densified_path_points)-1):
-                p1 = densified_path_points[i]
-                p2 = densified_path_points[i + 1]
-                segment_length = np.linalg.norm(p2 - p1)
-                print(f"Segment {i} length: {segment_length:.4f} meters")
-
-            path_points = densified_path_points
-
+            path_points = self.densify_path(path_points, step_size=1.0)
             
-
 
             # @markdown 3. Display trajectory (if found) on a topdown map of ground floor
             if found_path:
@@ -832,13 +843,13 @@ class HabitatSimInteractiveViewer(Application):
                 maps.draw_agent(
                     top_down_map, trajectory[0], initial_angle, agent_radius_px=8
                 )
-                print("\nDisplay the map with agent and path overlay:")
+                # print("\nDisplay the map with agent and path overlay:")
                 self.display_map(top_down_map)
 
                 # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
                 display_path_agent_renders = True  # @param{type:"boolean"}
                 if display_path_agent_renders:
-                    print("Rendering observations at path points:")
+                    # print("Rendering observations at path points:")
                     tangent = path_points[1] - path_points[0]
                     agent_state = habitat_sim.AgentState()
                     for ix, point in enumerate(path_points):
@@ -899,16 +910,20 @@ class HabitatSimInteractiveViewer(Application):
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{ix:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "objects": dedup["objects"],  # ✅ deduped version
+                                        "objects": dedup["objects"],  # deduped version
                                         "spatial_relations": dedup["spatial_relations"],
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                    print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
+                                    # print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
-                                print("⚠️ No color sensor found in observations.")
+                                print("No color sensor found in observations.")
+
+            agent_state_pos = mn.Vector3(self.sim.get_agent(self.agent_id).get_state().position)
+            print("Agent position after shortest path: " + str(agent_state_pos))
+
 
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
@@ -1229,7 +1244,8 @@ class HabitatSimInteractiveViewer(Application):
             # update location of grabbed object
             self.update_grab_position(self.previous_mouse_point)
 
-    
+
+        self._process_queued_actions() # process any queued actions from the other thread
         # if self.cnt % 60 == 0:
         #     self.print_agent_state()
         # self.cnt += 1
@@ -1255,26 +1271,15 @@ class HabitatSimInteractiveViewer(Application):
             region_name = ""
             if region and region.id:
                 reg = self.map_room_id_to_name[region.id.strip("_").lower()] if region.id.strip("_").lower() in self.map_room_id_to_name else region.id
-                if reg is None:
-                    return None
                 region_name = reg["name"] if "name" in reg else region.id
                 region_pos = mn.Vector3(reg["position"]) if "position" in reg else mn.Vector3((-1,-1,-1))            
             if region_name.lower() == name.lower():
-                # print(
-                #     f"\nRegion category:{region_name},"
-                #     f" center:{region_pos}"
-                # )
                 return region_pos
             for obj in region.objects:
                 if obj and obj.category and obj.category.name().lower() == name.lower():
                     center = mn.Vector3(self.compute_xyz_center(obj.aabb))
-                    # print(
-                    #     f"\nObject category:{obj.category.name()},"
-                    #     f" center:{center}"
-                    # )
                     return center
 
-        print(f"Warning: Item with name '{name}' not found in objects or rooms.")
         return None
 
 
@@ -1955,14 +1960,22 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
 
             if user_input:
                
-                # response = get_landmark_room(user_input)
-                response = None
-                if response is None:
+                # goal_name = get_landmark_room(user_input)
+                goal_name = None
+                if goal_name is None:
                     # response = get_landmark_room_manually(user_input)
-                    response = response if response else user_input
-                    pos = viewer.get_object_position(response)
-                    print(f"Position of '{response}': {pos}")
-
+                    goal_name = goal_name if goal_name else user_input
+                    goal_pos = viewer.get_object_position(goal_name)
+                    print(f"Position of '{goal_name}': {goal_pos}")
+                    if goal_pos is None: 
+                        print(f"Warning: Item with name '{goal_name}' not found in objects or rooms.")
+                        continue
+                    else:
+                        # goal_pos = mn.Vector3((-5.44895, 0.163378, -1.18292))
+                        if goal_pos.y < 2.0:
+                            goal_pos.y = 0.163378  # raise goal position to be above ground
+                        viewer.enqueue_shortest_path(goal_pos)
+                        time.sleep(2.0)
                 
         except EOFError:
             break
