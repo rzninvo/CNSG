@@ -249,14 +249,12 @@ class HabitatSimInteractiveViewer(Application):
                 base_path, f"{scene_name.split('.')[0]}.semantic.txt"
             )
             map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
-            room_object_file_path = os.path.join(
-                base_path, "scene_room_object_occurences.json"
-            )
+            # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
 
             print(f"Base path: {base_path}")
             print(f"Semantic path: {semantic_path}")
             print(f"Map file path: {map_file_path}")
-            print(f"Room-object occurences file path: {room_object_file_path}")
+            # print(f"Room-object occurences file path: {room_object_file_path}")
 
             if os.path.exists(map_file_path):
                 with open(map_file_path, "r", encoding="utf-8") as f:
@@ -264,17 +262,16 @@ class HabitatSimInteractiveViewer(Application):
             else:
                 raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
-            if os.path.exists(room_object_file_path):
-                with open(room_object_file_path, "r", encoding="utf-8") as f:
-                    self.room_objects_occurences = json.load(f)
-            else:
-                raise FileNotFoundError(
-                    f"Occurences file not found: {room_object_file_path}"
-                )
+            # if os.path.exists(room_object_file_path):
+            #     with open(room_object_file_path, "r", encoding="utf-8") as f:
+            #         self.room_objects_occurences = json.load(f)
+            # else:
+            #     raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
 
-            # ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
-            # semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
-
+            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
+            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
+            
+            self.room_objects_occurences = semantic_info
             # print("\nSemantic information of the scene:")
             # print(semantic_info)
 
@@ -316,11 +313,7 @@ class HabitatSimInteractiveViewer(Application):
                 plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
         # plt.show(block=False)
 
-        output_dir = "output"
-        if os.path.exists(output_dir):
-            # cancella tutto il contenuto della cartella
-            shutil.rmtree(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+
 
         plt.savefig("output/topdown_map.png", bbox_inches="tight")
         # logger.info(f"Saved: output/topdown_map.png")
@@ -856,45 +849,50 @@ class HabitatSimInteractiveViewer(Application):
 
             path_points = self.densify_path(path_points, step_size=1.0)
 
+            output_dir = "output"
+            if os.path.exists(output_dir):
+                # cancella tutto il contenuto della cartella
+                shutil.rmtree(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
             # @markdown 3. Display trajectory (if found) on a topdown map of ground floor
             if found_path:
 
-                meters_per_pixel = 0.025
-                height = sim.scene_aabb.y().min
+                # meters_per_pixel = 0.025
+                # height = sim.scene_aabb.y().min
 
-                top_down_map = maps.get_topdown_map(
-                    sim.pathfinder, height, meters_per_pixel=meters_per_pixel
-                )
-                recolor_map = np.array(
-                    [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
-                )
-                top_down_map = recolor_map[top_down_map]
-                grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
-                # convert world trajectory points to maps module grid points
-                trajectory = [
-                    maps.to_grid(
-                        path_point[2],
-                        path_point[0],
-                        grid_dimensions,
-                        pathfinder=sim.pathfinder,
-                    )
-                    for path_point in path_points
-                ]
-                grid_tangent = mn.Vector2(
-                    trajectory[1][1] - trajectory[0][1],
-                    trajectory[1][0] - trajectory[0][0],
-                )
-                path_initial_tangent = grid_tangent / grid_tangent.length()
-                initial_angle = math.atan2(
-                    path_initial_tangent[0], path_initial_tangent[1]
-                )
-                # draw the agent and trajectory on the map
-                maps.draw_path(top_down_map, trajectory)
-                maps.draw_agent(
-                    top_down_map, trajectory[0], initial_angle, agent_radius_px=8
-                )
-                # print("\nDisplay the map with agent and path overlay:")
-                self.display_map(top_down_map)
+                # top_down_map = maps.get_topdown_map(
+                #     sim.pathfinder, height, meters_per_pixel=meters_per_pixel
+                # )
+                # recolor_map = np.array(
+                #     [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
+                # )
+                # top_down_map = recolor_map[top_down_map]
+                # grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
+                # # convert world trajectory points to maps module grid points
+                # trajectory = [
+                #     maps.to_grid(
+                #         path_point[2],
+                #         path_point[0],
+                #         grid_dimensions,
+                #         pathfinder=sim.pathfinder,
+                #     )
+                #     for path_point in path_points
+                # ]
+                # grid_tangent = mn.Vector2(
+                #     trajectory[1][1] - trajectory[0][1],
+                #     trajectory[1][0] - trajectory[0][0],
+                # )
+                # path_initial_tangent = grid_tangent / grid_tangent.length()
+                # initial_angle = math.atan2(
+                #     path_initial_tangent[0], path_initial_tangent[1]
+                # )
+                # # draw the agent and trajectory on the map
+                # maps.draw_path(top_down_map, trajectory)
+                # maps.draw_agent(
+                #     top_down_map, trajectory[0], initial_angle, agent_radius_px=8
+                # )
+                # # print("\nDisplay the map with agent and path overlay:")
+                # self.display_map(top_down_map)
 
                 # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
                 display_path_agent_renders = True  # @param{type:"boolean"}
@@ -933,16 +931,16 @@ class HabitatSimInteractiveViewer(Application):
 
                             if rgb is not None:
                                 # Save RGB/depth/semantic preview as before
-                                if semantic is not None and depth is not None:
-                                    self.display_sample(
-                                        rgb_obs=rgb,
-                                        semantic_obs=semantic,
-                                        depth_obs=depth,
-                                    )
-                                elif depth is not None:
-                                    self.display_sample(rgb_obs=rgb, depth_obs=depth)
-                                else:
-                                    self.display_sample(rgb_obs=rgb)
+                                # if semantic is not None and depth is not None:
+                                #     self.display_sample(
+                                #         rgb_obs=rgb,
+                                #         semantic_obs=semantic,
+                                #         depth_obs=depth,
+                                #     )
+                                # elif depth is not None:
+                                #     self.display_sample(rgb_obs=rgb, depth_obs=depth)
+                                # else:
+                                #     self.display_sample(rgb_obs=rgb)
 
                                 # Extract visible objects + relations
                                 frame_meta = self.extract_visible_objects(
@@ -1975,8 +1973,8 @@ Key Commands:
         6. If the user mentions a room and an object that appears multiple times in the room, respond with the name of the room.
         Example: "6. laundry_room"
 
-        7. If no match or synonym is found, say you couldn’t find the object and ask for more details.
-        Example: "7. I couldn’t find the object. Can you describe it or specify where it might be located?"
+        7. If no match or synonym is found, say you couldn't find the object and ask for more details.
+        Example: "7. I couldn't find the object. Can you describe it or specify where it might be located?"
 
         Output format rule: Always respond in the format
         <rule number>. <response text>
@@ -1985,8 +1983,7 @@ Key Commands:
 
         messages = [
             {"role": "system", "content": prompt},
-            self.room_objects_occurences,
-            {"role": "user", "content": user_input},
+            {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
         ]
 
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
