@@ -359,12 +359,6 @@ class HabitatSimInteractiveViewer(Application):
             for point in key_points:
                 plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
         # plt.show(block=False)
-        
-        output_dir = "output"
-        if os.path.exists(output_dir):
-            # cancella tutto il contenuto della cartella
-            shutil.rmtree(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
 
         plt.savefig("output/topdown_map.png", bbox_inches="tight")
         # logger.info(f"Saved: output/topdown_map.png")
@@ -490,7 +484,7 @@ class HabitatSimInteractiveViewer(Application):
             centroid_world = [float(x) for x in aabb.center()]
 
             # Convert centroid to camera coordinates
-            sensor_state = sim.get_agent(0).get_state().sensor_states["color_sensor"]
+            sensor_state = sim.get_agent(self.agent_id).get_state().sensor_states["color_sensor"]
             rot_mn = utils.quat_to_magnum(sensor_state.rotation)
             T_world_cam = mn.Matrix4.from_(
                 rot_mn.inverted().to_matrix(),
@@ -784,67 +778,67 @@ class HabitatSimInteractiveViewer(Application):
             seed = 4 #4  # @param {type:"integer"}
             sim.pathfinder.seed(seed)
 
-            # fmt off
-            # @markdown 1. Sample valid points on the NavMesh for agent spawn location and pathfinding goal.
-            # fmt on
-            agent_state_pos = mn.Vector3(self.sim.get_agent(self.agent_id).get_state().position)
+            agent_state = sim.get_agent(self.agent_id).get_state()
+            initial_agent_state_position = agent_state.position
+            initial_agent_state_rotation = agent_state.rotation
 
-            # sample1 = sim.pathfinder.get_random_navigable_point()
-            # print("\n\nsample1 : ", sample1)
-            # sample2 = sim.pathfinder.get_random_navigable_point()
 
-            # @markdown 2. Use ShortestPath module to compute path between samples.
             path = habitat_sim.ShortestPath()
-            path.requested_start = agent_state_pos
+            path.requested_start = mn.Vector3(initial_agent_state_position)
             path.requested_end = goal
             found_path = sim.pathfinder.find_path(path)
             path_points = path.points
             
-            # @markdown - Success, geodesic path length, and 3D points can be queried.
             print("Path found : " + str(found_path))  
             print("Start : " + str(path.requested_start))
             print("Goal : " + str(path.requested_end))          
             print("Path points : " + str(path_points))
 
             path_points = self.densify_path(path_points, step_size=1.0)
-            
 
-            # @markdown 3. Display trajectory (if found) on a topdown map of ground floor
+            save_images = False
+
+            output_dir = "output"
+            if os.path.exists(output_dir):
+                # cancella tutto il contenuto della cartella
+                shutil.rmtree(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+            
             if found_path:
+                if save_images:
+                    meters_per_pixel = 0.025
+                    height = sim.scene_aabb.y().min
                 
-                meters_per_pixel = 0.025
-                height = sim.scene_aabb.y().min
-               
-                top_down_map = maps.get_topdown_map(
-                    sim.pathfinder, height, meters_per_pixel=meters_per_pixel
-                )
-                recolor_map = np.array(
-                    [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
-                )
-                top_down_map = recolor_map[top_down_map]
-                grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
-                # convert world trajectory points to maps module grid points
-                trajectory = [
-                    maps.to_grid(
-                        path_point[2],
-                        path_point[0],
-                        grid_dimensions,
-                        pathfinder=sim.pathfinder,
+                    top_down_map = maps.get_topdown_map(
+                        sim.pathfinder, height, meters_per_pixel=meters_per_pixel
                     )
-                    for path_point in path_points
-                ]
-                grid_tangent = mn.Vector2(
-                    trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0]
-                )
-                path_initial_tangent = grid_tangent / grid_tangent.length()
-                initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
-                # draw the agent and trajectory on the map
-                maps.draw_path(top_down_map, trajectory)
-                maps.draw_agent(
-                    top_down_map, trajectory[0], initial_angle, agent_radius_px=8
-                )
-                # print("\nDisplay the map with agent and path overlay:")
-                self.display_map(top_down_map)
+                    recolor_map = np.array(
+                        [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
+                    )
+                    top_down_map = recolor_map[top_down_map]
+                    grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
+                    # convert world trajectory points to maps module grid points
+                    trajectory = [
+                        maps.to_grid(
+                            path_point[2],
+                            path_point[0],
+                            grid_dimensions,
+                            pathfinder=sim.pathfinder,
+                        )
+                        for path_point in path_points
+                    ]
+                    grid_tangent = mn.Vector2(
+                        trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0]
+                    )
+                    path_initial_tangent = grid_tangent / grid_tangent.length()
+                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
+                    # draw the agent and trajectory on the map
+                    maps.draw_path(top_down_map, trajectory)
+                    maps.draw_agent(
+                        top_down_map, trajectory[0], initial_angle, agent_radius_px=8
+                    )
+                    # print("\nDisplay the map with agent and path overlay:")
+                    self.display_map(top_down_map)
 
                 # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
                 display_path_agent_renders = True  # @param{type:"boolean"}
@@ -867,11 +861,6 @@ class HabitatSimInteractiveViewer(Application):
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
 
-                            # observations = sim.get_sensor_observations()
-                            # rgb = observations["color_sensor"]
-                            # semantic = observations["semantic_sensor"]
-                            # depth = observations["depth_sensor"]
-
 
                             observations = sim.get_sensor_observations()
 
@@ -882,13 +871,14 @@ class HabitatSimInteractiveViewer(Application):
 
 
                             if rgb is not None:
-                                # Save RGB/depth/semantic preview as before
-                                if semantic is not None and depth is not None:
-                                    self.display_sample(rgb_obs=rgb, semantic_obs=semantic, depth_obs=depth)
-                                elif depth is not None:
-                                    self.display_sample(rgb_obs=rgb, depth_obs=depth)
-                                else:
-                                    self.display_sample(rgb_obs=rgb)
+                                if save_images:
+                                    # Save RGB/depth/semantic preview as before
+                                    if semantic is not None and depth is not None:
+                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic, depth_obs=depth)
+                                    elif depth is not None:
+                                        self.display_sample(rgb_obs=rgb, depth_obs=depth)
+                                    else:
+                                        self.display_sample(rgb_obs=rgb)
 
                                 # Extract visible objects + relations
                                 frame_meta = self.extract_visible_objects(sim, observations)
@@ -914,15 +904,19 @@ class HabitatSimInteractiveViewer(Application):
                                         "spatial_relations": dedup["spatial_relations"],
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
+                                    
+
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                    # print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
+                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
 
-            agent_state_pos = mn.Vector3(self.sim.get_agent(self.agent_id).get_state().position)
-            print("Agent position after shortest path: " + str(agent_state_pos))
+            agent_state.position = initial_agent_state_position
+            agent_state.rotation = initial_agent_state_rotation
+            agent = sim.get_agent(self.agent_id)
+            agent.set_state(agent_state)
 
 
     def print_scene_semantic_info(self) -> None:
