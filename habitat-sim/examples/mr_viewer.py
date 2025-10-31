@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and its affiliates.
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+from __future__ import annotations
 import ctypes
 import math
 import os
@@ -20,6 +20,17 @@ import datetime
 import re
 import threading
 import queue
+
+
+
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Iterable, Sequence
+from dataclasses import dataclass
+import textwrap
+from openai import OpenAI
 
 
 flags = sys.getdlopenflags()
@@ -65,8 +76,6 @@ IGNORE_BBOX_CATEGORIES = {
 # Initialize OpenAI client
 try:
     from dotenv import load_dotenv
-    import os
-    from openai import OpenAI
 
     load_dotenv()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -291,8 +300,7 @@ class HabitatSimInteractiveViewer(Application):
             # else:
             #     raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
 
-            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
-            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
+            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=IGNORE_BBOX_CATEGORIES)
             
             self.room_objects_occurences = semantic_info
             # print("\nSemantic information of the scene:")
@@ -1573,7 +1581,7 @@ class HabitatSimInteractiveViewer(Application):
                         and obj.category
                         and obj.category.name().lower() == object_name.lower()
                     ):
-                        return mn.Vector3(self.compute_xyz_center(obj.aabb))
+                        return mn.Vector3(obj.obb.center)
 
         return None
 
@@ -2438,8 +2446,127 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
                 viewer.enqueue_shortest_path(goal_pos)
                 time.sleep(2.0)
 
+
+                ############ Generate Instruction ###############
+                # print("Current working dir:", os.getcwd())
+                instructions = generate_path_description(os.getcwd()+"/output/")
+                print(instructions)
+
+
         except EOFError:
             break
+
+
+
+
+
+IGNORED_LABELS = {"ceiling", "floor", "wall", "walls", "ceiling trim", "wall trim", "railing"}
+
+
+@dataclass
+class FrameSummary:
+    name: str
+    objects: Sequence[str]
+    relationships: Sequence[str]
+
+    def to_prompt_line(self) -> str:
+        parts = []
+        if self.objects:
+            parts.append("Key objects: " + ", ".join(self.objects))
+        if self.relationships:
+            parts.append("Relations: " + "; ".join(self.relationships))
+        return f"{self.name}: " + (" | ".join(parts) if parts else "Limited landmarks visible.")
+
+
+def generate_path_description(folder: str, model: str = "gpt-4o") -> str:
+    """Reads all json in the folder and elaborate the instruction."""
+    folder_path = Path(folder)
+    json_paths = sorted(folder_path.glob("*.json"))
+    if not json_paths:
+        raise ValueError(f"No JSON file found in the folder: {folder}")
+
+    # ---- UTILITIES ----------------------------------------------------------
+    def distance_bucket(d: float | None) -> str | None:
+        if d is None or d <= 0: return None
+        if d < 1: return "very close"
+        if d < 3: return "near"
+        if d <= 5: return "mid-range"
+        if d <= 6: return "slightly far"
+        return "far"
+
+    def format_obj(o: Dict[str, Any]) -> str | None:
+        label = str(o.get("label", "")).strip()
+        if not label or label.lower() in IGNORED_LABELS:
+            return None
+        details = []
+        if (p := o.get("pixel_percent")): details.append(f"{float(p):.2f}% area")
+        if (d := o.get("distance_from_camera")):
+            d = float(d)
+            if d > 0:
+                details.append(f"{d:.1f}m away")
+                if (b := distance_bucket(d)): details.append(b)
+        return f"{label} ({', '.join(details)})" if details else label
+
+    def object_priority(o: Dict[str, Any]) -> tuple:
+        percent = float(o.get("pixel_percent") or 0)
+        dist = float(o.get("distance_from_camera") or 0)
+        pref = (
+            1.0 if 3 <= dist <= 5 else
+            0.75 if 2 <= dist < 6 else
+            0.3
+        )
+        return (percent * pref, pref, percent, -dist)
+
+    def extract_objects(objs: Dict[str, Any]) -> List[str]:
+        filtered = [o for o in objs.values() if str(o.get("label", "")).lower() not in IGNORED_LABELS]
+        filtered.sort(key=object_priority, reverse=True)
+        return [x for x in (format_obj(o) for o in filtered[:6]) if x]
+
+    def extract_relationships(rel: Iterable[Dict[str, Any]]) -> List[str]:
+        results = []
+        for r in rel:
+            s, reln, o = r.get("subject"), r.get("relation"), r.get("object")
+            if not (s and reln and o): continue
+            if s.lower() in IGNORED_LABELS or o.lower() in IGNORED_LABELS: continue
+            results.append(f"{s} {reln} {o}")
+            if len(results) >= 6: break
+        return results
+
+    # ---- LOAD & SUMMARIZE FRAMES -------------------------------------------
+    frames = [json.loads(p.read_text()) for p in json_paths]
+    summaries = [
+        FrameSummary(
+            name=str(f.get("image_index", i)),
+            objects=extract_objects(f.get("objects") or f.get("visible_objects") or {}),
+            relationships=extract_relationships(f.get("spatial_relations") or f.get("relationships") or []),
+        )
+        for i, f in enumerate(frames)
+    ]
+
+    # ---- BUILD PROMPT -------------------------------------------------------
+    prompt = textwrap.dedent(
+        f"""
+        You are a navigation assistant analysing a sequence of snapshots along a path.
+        Prioritise landmarks at mid-range distance (3–5m).
+        Produce a concise path description (<180 words). Don't invent objects.
+
+        Observations:
+        {chr(10).join(f"- {s.to_prompt_line()}" for s in summaries)}
+        """
+    ).strip()
+
+    # ---- CALL OPENAI --------------------------------------------------------
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Precise navigation. Only reference observed landmarks."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=400,
+    )
+    return response.choices[0].message.content.strip()
 
 
 if __name__ == "__main__":
