@@ -43,6 +43,25 @@ from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
 
+IGNORE_BBOX_CATEGORIES = {
+    "ceiling",
+    "floor",
+    "wall",
+    "handle",
+    "window frame",
+    "door frame",
+    "frame",
+    "unknown",
+    "stairs",
+    "staircase",
+    "stair",
+    "stairway",
+}
+
+
+
+
+
 # Initialize OpenAI client
 try:
     from dotenv import load_dotenv
@@ -121,6 +140,10 @@ class HabitatSimInteractiveViewer(Application):
         self.contact_debug_draw = False
         # draw semantic region debug visualizations if present
         self.semantic_region_debug_draw = False
+        # draw object bounding boxes when enabled
+        self.show_object_bboxes = False
+        self._object_bbox_colors: Dict[int, mn.Color4] = {}
+        self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
 
         # cache most recently loaded URDF file for quick-reload
         self.cached_urdf = ""
@@ -437,17 +460,41 @@ class HabitatSimInteractiveViewer(Application):
             except IndexError:
                 continue
 
-            label = (
-                obj.category.name() if obj.category is not None else f"object_{obj_id}"
-            )
-            aabb = obj.aabb
-            vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
-            vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
-            bbox_world = [
-                [float(vmin[0]), float(vmin[1]), float(vmin[2])],
-                [float(vmax[0]), float(vmax[1]), float(vmax[2])],
-            ]
-            centroid_world = [float(x) for x in aabb.center()]
+            label = obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            # Prefer oriented bounding box if available
+            obb = getattr(obj, "obb", None)
+            if obb is not None:
+                center = mn.Vector3(obb.center)
+                half_extents = mn.Vector3(obb.half_extents)
+                rot_vec = mn.Vector4(obb.rotation)
+                rotation = mn.Quaternion(mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3])
+
+                # Compute oriented corners
+                corner_offsets = [
+                    mn.Vector3(-half_extents.x, -half_extents.y, -half_extents.z),
+                    mn.Vector3(half_extents.x, -half_extents.y, -half_extents.z),
+                    mn.Vector3(-half_extents.x, half_extents.y, -half_extents.z),
+                    mn.Vector3(half_extents.x, half_extents.y, -half_extents.z),
+                    mn.Vector3(-half_extents.x, -half_extents.y, half_extents.z),
+                    mn.Vector3(half_extents.x, -half_extents.y, half_extents.z),
+                    mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
+                    mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
+                ]
+                corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
+
+                bbox_world = [
+                    [float(min(v.x for v in corners_world)), float(min(v.y for v in corners_world)), float(min(v.z for v in corners_world))],
+                    [float(max(v.x for v in corners_world)), float(max(v.y for v in corners_world)), float(max(v.z for v in corners_world))]
+                ]
+                centroid_world = [float(center.x), float(center.y), float(center.z)]
+            else:
+                # fallback to aabb if obb missing
+                aabb = obj.aabb
+                vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
+                vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
+                bbox_world = [[float(vmin[0]), float(vmin[1]), float(vmin[2])],
+                            [float(vmax[0]), float(vmax[1]), float(vmax[2])]]
+                centroid_world = [float(x) for x in aabb.center()]
 
             # Convert centroid to camera coordinates
             sensor_state = sim.get_agent(self.agent_id).get_state().sensor_states["color_sensor"]
@@ -1050,6 +1097,167 @@ class HabitatSimInteractiveViewer(Application):
                     color,
                 )
 
+    def _get_bbox_color(self, obj_id: int) -> mn.Color4:
+        """
+        Returns a consistent color for the given semantic object id.
+        """
+        if obj_id in self._object_bbox_colors:
+            return self._object_bbox_colors[obj_id]
+
+        palette = d3_40_colors_rgb
+        palette_len = len(palette)
+        if palette_len == 0:
+            color = mn.Color4(1.0, 0.0, 0.0, 1.0)
+            self._object_bbox_colors[obj_id] = color
+            return color
+        try:
+            idx = int(obj_id) % palette_len
+        except (ValueError, TypeError):
+            idx = hash(str(obj_id)) % palette_len
+        rgb = palette[idx] / 255.0
+        color = mn.Color4(float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+        self._object_bbox_colors[obj_id] = color
+        return color
+
+    def _project_to_screen(self, world_point: mn.Vector3) -> Optional[mn.Vector2]:
+        """
+        Project a world-space point to screen pixel coordinates.
+        """
+        if self.render_camera is None:
+            return None
+
+        cam = self.render_camera.render_camera
+        proj = cam.projection_matrix
+        cam_mat = cam.camera_matrix
+
+        # Transform point from world -> camera -> clip space
+        clip = proj.transform_point(cam_mat.transform_point(world_point))
+
+        # clip is already divided by w; no need to access clip.w
+        ndc = clip  # Normalized device coordinates (-1..1)
+
+        if not (-1.0 <= ndc.x <= 1.0 and -1.0 <= ndc.y <= 1.0 and -1.0 <= ndc.z <= 1.0):
+            return None
+
+        framebuffer = mn.Vector2(self.framebuffer_size)
+        x = (ndc.x * 0.5 + 0.5) * framebuffer[0]
+        y = (1.0 - (ndc.y * 0.5 + 0.5)) * framebuffer[1]
+        return mn.Vector2(x, y)
+
+    def _draw_bbox_label_overlay(self) -> None:
+        if not self._bbox_label_screen_positions:
+            return
+
+        mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
+        self.shader.bind_vector_texture(self.glyph_cache.texture)
+
+        framebuffer = mn.Vector2(self.framebuffer_size)
+        for label, screen_pos in self._bbox_label_screen_positions:
+            if not label:
+                continue
+
+            label_renderer = text.Renderer2D(
+                self.display_font,
+                self.glyph_cache,
+                HabitatSimInteractiveViewer.DISPLAY_FONT_SIZE,
+                text.Alignment.TOP_CENTER,
+            )
+            label_renderer.reserve(len(label))
+            label_renderer.render(label)
+
+            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(
+                screen_pos
+            )
+            self.shader.transformation_projection_matrix = transform
+            self.shader.color = mn.Color4(1.0, 1.0, 1.0, 1.0)
+            self.shader.draw(label_renderer.mesh)
+
+        mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
+
+    def _draw_object_bboxes(self, debug_line_render: Any) -> None:
+        """
+        Draw axis-aligned bounding boxes for every semantic object.
+        """
+        scene = self.sim.semantic_scene
+        if scene is None:
+            return
+
+        self._bbox_label_screen_positions.clear()
+        debug_line_render.set_line_width(2.5)
+        max_boxes = 20
+        target_labels = {"wall clock", "sofa", "armchair", "couch"}
+        candidates = []
+
+        for obj in scene.objects:
+            label = ""
+            if obj.category is not None and hasattr(obj.category, "name"):
+                label = obj.category.name()
+            label_norm = label.strip().lower()
+            if label_norm not in target_labels:
+                continue
+
+            if not label:
+                label = f"object_{obj.id}"
+
+            obb = getattr(obj, "obb", None)
+            if obb is None:
+                continue
+
+            center = mn.Vector3(obb.center)
+            half_extents = mn.Vector3(obb.half_extents)
+            rot_vec = mn.Vector4(obb.rotation)
+            rotation = mn.Quaternion(mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3])
+
+            # Precompute the eight OBB corners in world space.
+            corner_offsets = [
+                mn.Vector3(-half_extents[0], -half_extents[1], -half_extents[2]),
+                mn.Vector3(half_extents[0], -half_extents[1], -half_extents[2]),
+                mn.Vector3(-half_extents[0], half_extents[1], -half_extents[2]),
+                mn.Vector3(half_extents[0], half_extents[1], -half_extents[2]),
+                mn.Vector3(-half_extents[0], -half_extents[1], half_extents[2]),
+                mn.Vector3(half_extents[0], -half_extents[1], half_extents[2]),
+                mn.Vector3(-half_extents[0], half_extents[1], half_extents[2]),
+                mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
+            ]
+            corners = [
+                rotation.transform_vector(offset) + center
+                for offset in corner_offsets
+            ]
+
+            volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
+            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        edges = [
+            (0, 1), (0, 2), (0, 4),
+            (1, 3), (1, 5),
+            (2, 3), (2, 6),
+            (3, 7),
+            (4, 5), (4, 6),
+            (5, 7),
+            (6, 7),
+        ]
+
+        for volume, obj_id, label, corners, center, rotation, half_extents in candidates[:max_boxes]:
+            color = self._get_bbox_color(obj_id)
+
+            for edge in edges:
+                start = corners[edge[0]]
+                end = corners[edge[1]]
+                debug_line_render.draw_transformed_line(
+                    start,
+                    end,
+                    color,
+                )
+
+            top_center = center + rotation.transform_vector(
+                mn.Vector3(0.0, half_extents[1], 0.0)
+            ) + mn.Vector3(0.0, 0.05, 0.0)
+            screen_pos = self._project_to_screen(top_center)
+            if screen_pos is not None:
+                self._bbox_label_screen_positions.append((label, screen_pos))
+
     def debug_draw(self):
         """
         Additional draw commands to be called during draw_event.
@@ -1070,6 +1278,10 @@ class HabitatSimInteractiveViewer(Application):
                         mn.Vector3(np.random.random(3))
                     )
             self.draw_region_debug(debug_line_render)
+        if self.show_object_bboxes:
+            self._draw_object_bboxes(debug_line_render)
+        else:
+            self._bbox_label_screen_positions.clear()
 
     def draw_event(
         self,
@@ -1107,20 +1319,40 @@ class HabitatSimInteractiveViewer(Application):
                 self.time_since_last_simulation, 1.0 / self.fps
             )
 
-        keys = active_agent_id_and_sensor_name
-
         if self.enable_batch_renderer:
             self.render_batch()
         else:
-            self.sim._Simulator__sensors[keys[0]][keys[1]].draw_observation()
-            agent = self.sim.get_agent(keys[0])
-            self.render_camera = agent.scene_node.node_sensor_suite.get(keys[1])
+            agent_sensors = self.sim._Simulator__sensors[self.agent_id]
+            color_sensor = None
+            if isinstance(agent_sensors, dict):
+                color_sensor = agent_sensors.get("color_sensor")
+            else:
+                try:
+                    color_sensor = agent_sensors["color_sensor"]  # type: ignore[index]
+                except Exception:
+                    if isinstance(agent_sensors, (list, tuple)):
+                        for sensor in agent_sensors:
+                            spec_fn = getattr(sensor, "specification", None)
+                            spec = spec_fn() if callable(spec_fn) else None
+                            if spec is not None and getattr(spec, "sensor_type", None) == habitat_sim.SensorType.COLOR:
+                                color_sensor = sensor
+                                break
+            if color_sensor is None:
+                logger.error("Color sensor not available; skipping draw.")
+                return
+            color_sensor.draw_observation()
+            agent = self.sim.get_agent(self.agent_id)
+            self.render_camera = agent.scene_node.node_sensor_suite.get(
+                "color_sensor"
+            )
             self.debug_draw()
             self.render_camera.render_target.blit_rgba_to_default()
+
 
         # draw CPU/GPU usage data and other info to the app window
         mn.gl.default_framebuffer.bind()
         self.draw_text(self.render_camera.specification())
+        self._draw_bbox_label_overlay()
 
         self.swap_buffers()
         Timer.next_frame()
@@ -1220,6 +1452,7 @@ class HabitatSimInteractiveViewer(Application):
 
         # post reconfigure
         self.default_agent = self.sim.get_agent(self.agent_id)
+        self._object_bbox_colors.clear()
         self.render_camera = self.default_agent.scene_node.node_sensor_suite.get(
             "color_sensor"
         )
@@ -1407,6 +1640,10 @@ class HabitatSimInteractiveViewer(Application):
             )
             # Toggle visualize semantic bboxes. Currently only regions supported
             self.semantic_region_debug_draw = not self.semantic_region_debug_draw
+        elif key == pressed.B:
+            self.show_object_bboxes = not self.show_object_bboxes
+            state = "enabled" if self.show_object_bboxes else "disabled"
+            logger.info(f"Object bounding boxes {state}.")
 
         elif key == pressed.TAB:
             # NOTE: (+ALT) - reconfigure without cycling scenes
@@ -2293,7 +2530,6 @@ if __name__ == "__main__":
     sim_settings["enable_hbao"] = args.hbao
     sim_settings["semantic_sensor"] = True
     sim_settings["depth_sensor"] = True
-
     # start the application
     # HabitatSimInteractiveViewer(sim_settings).exec()
 
