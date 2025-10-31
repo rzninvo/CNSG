@@ -64,63 +64,6 @@ def get_landmark_room_manually(user_input):
     return res[0] if len(res) > 0 else ""
 
 
-def get_response_LLM(user_input):
-    # This function calls an LLM to retrieve the landmark / room information from the Human Request
-    if client is None:
-        print("OpenAI client not initialized. Cannot get landmark room.")
-        return None
-
-    # OpenAI is loaded
-    prompt = """
-    You are an assistant for a home navigation system.
-    You are given a dictionary describing the house structure: each key is a room name, and each value is a dictionary of landmarks (objects) with their number of occurrences in that room.
-
-    Your task is to interpret natural language queries from the user who might:
-    - ask to go to a room, or
-    - ask where to find an object.
-
-    Users may use synonyms or similar terms (for example: "clock" = "wall clock", "toy" = "plush toy", etc.). You must identify such equivalences before deciding your answer.
-
-    When responding, follow these rules strictly:
-
-    1. If the user mentions an object inside a room and there is one occurrence of that object in that room, respond with the name of the room and the object.
-    Example: "1. bathroom_4, door"
-
-    2. If the user requests a room and it exists in the dictionary, respond only with the exact name of the room.
-    Example: "2. kitchen"
-
-    3. If the object appears in multiple rooms, ask in which room it is located, listing all rooms that contain it.
-    Example: "3. The object appears in multiple rooms, do you mean the one in kitchen or in dining_room?"
-
-    4. If the user mentions a room, but there are multiple rooms of that type (e.g. "bedroom", "bathroom"), ask in which room to go, listing all possible candidates.
-    Example: "4. There are multiple bathrooms, do you mean bathroom_1, bathroom_2, bathroom_3 or bathroom_4?"
-
-    5. If an object appears multiple times in the same room but not in other rooms, respond with the name of the room.
-    Example: "5. bedroom_1"
-
-    6. If the user mentions a room and an object that appears multiple times in the room, respond with the name of the room.
-    Example: "6. laundry_room"
-
-    7. If no match or synonym is found, say you couldn’t find the object and ask for more details.
-    Example: "7. I couldn’t find the object. Can you describe it or specify where it might be located?"
-
-    Output format rule: Always respond in the format
-    <rule number>. <response text>
-    and nothing else.
-    """
-
-    messages = [
-        {"role": "system", "content": prompt},
-        # TODO insert the current dictionary of rooms and landmarks
-        {"role": "user", "content": user_input},
-    ]
-
-    response = client.chat.completions.create(model="gpt-4o", messages=messages)
-    print("Response from GPT:")
-    print(response.choices[0].message.content)
-    return response.choices[0].message.content
-
-
 class HabitatSimInteractiveViewer(Application):
     # the maximum number of chars displayable in the app window
     # using the magnum text module. These chars are used to
@@ -306,7 +249,9 @@ class HabitatSimInteractiveViewer(Application):
                 base_path, f"{scene_name.split('.')[0]}.semantic.txt"
             )
             map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
-            room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
+            room_object_file_path = os.path.join(
+                base_path, "scene_room_object_occurences.json"
+            )
 
             print(f"Base path: {base_path}")
             print(f"Semantic path: {semantic_path}")
@@ -323,7 +268,9 @@ class HabitatSimInteractiveViewer(Application):
                 with open(room_object_file_path, "r", encoding="utf-8") as f:
                     self.room_objects_occurences = json.load(f)
             else:
-                raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
+                raise FileNotFoundError(
+                    f"Occurences file not found: {room_object_file_path}"
+                )
 
             # ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
             # semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
@@ -1412,8 +1359,10 @@ class HabitatSimInteractiveViewer(Application):
                         return mn.Vector3(self.compute_xyz_center(obj.aabb))
 
         return None
-    
-    def check_object_in_room(self, object_name: Optional[str], room_name: Optional[str]) -> bool:
+
+    def check_object_in_room(
+        self, object_name: Optional[str], room_name: Optional[str]
+    ) -> bool:
         """
         Verifies whether the given object exists in the given room.
         If room_name is None, always returns False.
@@ -1989,6 +1938,62 @@ Key Commands:
 """
         )
 
+    def get_response_LLM(self, user_input):
+        # This function calls an LLM to retrieve the landmark / room information from the Human Request
+        if client is None:
+            print("OpenAI client not initialized. Cannot get landmark room.")
+            return None
+
+        # OpenAI is loaded
+        prompt = """
+        You are an assistant for a home navigation system.
+        You are given a dictionary describing the house structure: each key is a room name, and each value is a dictionary of landmarks (objects) with their number of occurrences in that room.
+
+        Your task is to interpret natural language queries from the user who might:
+        - ask to go to a room, or
+        - ask where to find an object.
+
+        Users may use synonyms or similar terms (for example: "clock" = "wall clock", "toy" = "plush toy", etc.). You must identify such equivalences before deciding your answer.
+
+        When responding, follow these rules strictly:
+
+        1. If the user mentions an object inside a room and there is one occurrence of that object in that room, respond with the name of the room and the object.
+        Example: "1. bathroom_4, door"
+
+        2. If the user requests a room and it exists in the dictionary, respond only with the exact name of the room.
+        Example: "2. kitchen"
+
+        3. If the object appears in multiple rooms, ask in which room it is located, listing all rooms that contain it.
+        Example: "3. The object appears in multiple rooms, do you mean the one in kitchen or in dining_room?"
+
+        4. If the user mentions a room, but there are multiple rooms of that type (e.g. "bedroom", "bathroom"), ask in which room to go, listing all possible candidates.
+        Example: "4. There are multiple bathrooms, do you mean bathroom_1, bathroom_2, bathroom_3 or bathroom_4?"
+
+        5. If an object appears multiple times in the same room but not in other rooms, respond with the name of the room.
+        Example: "5. bedroom_1"
+
+        6. If the user mentions a room and an object that appears multiple times in the room, respond with the name of the room.
+        Example: "6. laundry_room"
+
+        7. If no match or synonym is found, say you couldn’t find the object and ask for more details.
+        Example: "7. I couldn’t find the object. Can you describe it or specify where it might be located?"
+
+        Output format rule: Always respond in the format
+        <rule number>. <response text>
+        and nothing else.
+        """
+
+        messages = [
+            {"role": "system", "content": prompt},
+            self.room_objects_occurences,
+            {"role": "user", "content": user_input},
+        ]
+
+        response = client.chat.completions.create(model="gpt-4o", messages=messages)
+        print("Response from GPT:")
+        print(response.choices[0].message.content)
+        return response.choices[0].message.content
+
 
 class MouseMode(Enum):
     LOOK = 0
@@ -2153,7 +2158,7 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
 
             if user_input:
 
-                response = get_response_LLM(user_input)  # * API Call to ChatGPT
+                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
                 print("Response from ChatGPT: ", response)
                 goal_info = get_goal_from_response(
                     response
