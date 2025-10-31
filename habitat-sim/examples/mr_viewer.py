@@ -22,7 +22,6 @@ import threading
 import queue
 
 
-
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
 
@@ -44,75 +43,26 @@ from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
 
-
-
-
-
 # Initialize OpenAI client
 try:
     from dotenv import load_dotenv
     import os
     from openai import OpenAI
+
     load_dotenv()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 except Exception as e:
-    print("[WARNING] OpenAI API key not found or error loading .env file. ChatGPT features will be disabled.")
-    client = None 
+    print(
+        "[WARNING] OpenAI API key not found or error loading .env file. ChatGPT features will be disabled."
+    )
+    client = None
+
 
 def get_landmark_room_manually(user_input):
     # Fallback function to get landmark/room information manually
     res = re.findall(r'"(.*?)"', user_input.lower().strip())
     return res[0] if len(res) > 0 else ""
 
-def get_landmark_room(user_input):
-    # This function calls an LLM to retrieve the landmark / room information from the Human Request
-    if client is None:
-        print("OpenAI client not initialized. Cannot get landmark room.")
-        return None
-
-    # OpenAI is loaded
-    prompt = """
-    You are an assistant for a home navigation system.
-    You are given a dictionary describing the house structure: each key is a room name, and each value is a dictionary of landmarks (objects) with their number of occurrences in that room.
-
-    Your task is to interpret natural language queries from the user who might:
-    - ask to go to a room, or
-    - ask where to find an object.
-
-    Users may use synonyms or similar terms (for example: "clock" = "wall clock", "toy" = "plush toy", etc.). You must identify such equivalences before deciding your answer.
-
-    When responding, follow these rules strictly:
-
-    1. If the user requests a room and it exists in the dictionary, respond only with the exact name of the room.
-    Example: "1. kitchen"
-
-    2. If the user mentions an object that exists in only one room, respond only with the exact name of the object.
-    Example: "2. wall clock"
-
-    3. If the object appears in multiple rooms, ask in which room it is located, listing all rooms that contain it.
-    Example: "3. The object appears in multiple rooms, do you mean the one in kitchen or in dining_room?"
-
-    4. If an object appears multiple times in the same room but not in other rooms, respond with the name of the room.
-    Example: "4. bedroom_1"
-
-    5. If no match or synonym is found, say you couldn’t find the object and ask for more details.
-    Example: "5. I couldn’t find the object. Can you describe it or specify where it might be located?"
-
-    Output format rule: Always respond in the format
-    <rule number>. <response text>
-    and nothing else.
-    """
-
-    messages = [
-        {"role": "system", "content": prompt},
-        # TODO insert the current dictionary of rooms and landmarks
-        {"role": "user", "content": user_input},
-    ]
-
-    response = client.chat.completions.create(model="gpt-4o", messages=messages)
-    print("Response from GPT:")
-    print(response.choices[0].message.content)
-    return response.choices[0].message.content
 
 class HabitatSimInteractiveViewer(Application):
     # the maximum number of chars displayable in the app window
@@ -288,22 +238,23 @@ class HabitatSimInteractiveViewer(Application):
         logger.setLevel("INFO")
         self.print_help_text()
 
-
-
-
         #########################################
         self.map_room_id_to_name = {}
+        self.room_objects_occurences = {}
 
         if True:
             base_path = os.path.dirname(scene_path)
             scene_name = os.path.splitext(os.path.basename(scene_path))[0]
-            semantic_path = os.path.join(base_path, f"{scene_name.split('.')[0]}.semantic.txt")
+            semantic_path = os.path.join(
+                base_path, f"{scene_name.split('.')[0]}.semantic.txt"
+            )
             map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+            # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
 
             print(f"Base path: {base_path}")
             print(f"Semantic path: {semantic_path}")
             print(f"Map file path: {map_file_path}")
-
+            # print(f"Room-object occurences file path: {room_object_file_path}")
 
             if os.path.exists(map_file_path):
                 with open(map_file_path, "r", encoding="utf-8") as f:
@@ -311,13 +262,18 @@ class HabitatSimInteractiveViewer(Application):
             else:
                 raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
+            # if os.path.exists(room_object_file_path):
+            #     with open(room_object_file_path, "r", encoding="utf-8") as f:
+            #         self.room_objects_occurences = json.load(f)
+            # else:
+            #     raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
 
-            # ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
-            # semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
-
+            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
+            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
+            
+            self.room_objects_occurences = semantic_info
             # print("\nSemantic information of the scene:")
             # print(semantic_info)
-
 
             # self.print_scene_semantic_info()
 
@@ -326,7 +282,6 @@ class HabitatSimInteractiveViewer(Application):
             # self.shortest_path(self.sim, dummy_goal)
 
         ###########################################
-
 
     def _process_queued_actions(self):
         """Execute actions enqueued from other threads."""
@@ -337,19 +292,17 @@ class HabitatSimInteractiveViewer(Application):
                     action(*args, **kwargs)
                 except Exception as e:
                     print(f"Error executing queued action {action}: {e}")
-            
+
                 self.action_queue.task_done()
-                
+
         except queue.Empty:
             pass
-    
+
     def enqueue_shortest_path(self, goal_pos):
         self.action_queue.put((self.shortest_path, (self.sim, goal_pos), {}))
-    
-
 
     # display a topdown map with matplotlib
-    def display_map(self,topdown_map, key_points=None):
+    def display_map(self, topdown_map, key_points=None):
         plt.figure(figsize=(36, 24))
         ax = plt.subplot(1, 1, 1)
         ax.axis("off")
@@ -360,16 +313,22 @@ class HabitatSimInteractiveViewer(Application):
                 plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
         # plt.show(block=False)
 
+
+
         plt.savefig("output/topdown_map.png", bbox_inches="tight")
         # logger.info(f"Saved: output/topdown_map.png")
 
-    def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
+    def display_sample(
+        self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])
+    ):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
 
         arr = [rgb_img]
         titles = ["rgb"]
         if semantic_obs.size != 0:
-            semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
+            semantic_img = Image.new(
+                "P", (semantic_obs.shape[1], semantic_obs.shape[0])
+            )
             semantic_img.putpalette(d3_40_colors_rgb.flatten())
             semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
             semantic_img = semantic_img.convert("RGBA")
@@ -377,7 +336,9 @@ class HabitatSimInteractiveViewer(Application):
             titles.append("semantic")
 
         if depth_obs.size != 0:
-            depth_img = Image.fromarray((depth_obs / 10 * 255).astype(np.uint8), mode="L")
+            depth_img = Image.fromarray(
+                (depth_obs / 10 * 255).astype(np.uint8), mode="L"
+            )
             arr.append(depth_img)
             titles.append("depth")
 
@@ -387,8 +348,6 @@ class HabitatSimInteractiveViewer(Application):
             ax.axis("off")
             ax.set_title(titles[i])
             plt.imshow(data)
-        
-
 
         # Inizializza contatore e cartella output solo la prima volta
         if not hasattr(self, "output_counter"):
@@ -401,18 +360,20 @@ class HabitatSimInteractiveViewer(Application):
         plt.savefig(filename, bbox_inches="tight")
         # logger.info(f"Saved: {filename}")
 
-
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
         points = np.array(path_points)
 
-        new_points = [points[0]]   
+        new_points = [points[0]]
         for i in range(1, len(points)):
             p0, p1 = points[i - 1], points[i]
-            segment = p1 - p0  
+            segment = p1 - p0
             dist = np.linalg.norm(segment)
             if dist == 0:
                 continue
-            if dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size:
+            if (
+                dist <= step_size
+                and np.linalg.norm(new_points[-1] - p1) > min_step_size
+            ):
                 new_points.append(p1)
                 continue
             direction = segment / dist
@@ -423,33 +384,32 @@ class HabitatSimInteractiveViewer(Application):
         if np.linalg.norm(new_points[-1] - points[-1]) > 1e-3:
             new_points.append(points[-1])
         return np.array(new_points)
-    
+
     def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
         semantic_info = {}
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             for line in f:
                 line_parts = line.strip().split(",")
                 if len(line_parts) != 4:
                     continue
-                
+
                 room_info = map_room_id_to_name.get(line_parts[3])
                 if room_info and "name" in room_info:
-                    room_id = room_info["name"] 
+                    room_id = room_info["name"]
                 else:
                     room_id = "unknown_room"
-
 
                 category_id = line_parts[2].strip('"')
 
                 if room_id not in semantic_info:
                     semantic_info[room_id] = {}
-                
+
                 if category_id not in ignore_categories:
                     if category_id not in semantic_info[room_id]:
                         semantic_info[room_id][category_id] = 1
                     else:
                         semantic_info[room_id][category_id] += 1
-                        
+
         return semantic_info
 
     def extract_visible_objects(self, sim, observations) -> Optional[Dict[str, Any]]:
@@ -458,7 +418,9 @@ class HabitatSimInteractiveViewer(Application):
         returns a dict of visible objects and spatial relations between them.
         """
         if "semantic_sensor" not in observations:
-            logger.warning("No semantic sensor found; skipping visible object extraction.")
+            logger.warning(
+                "No semantic sensor found; skipping visible object extraction."
+            )
             return None
 
         semantic = observations["semantic_sensor"]
@@ -475,12 +437,16 @@ class HabitatSimInteractiveViewer(Application):
             except IndexError:
                 continue
 
-            label = obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            label = (
+                obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            )
             aabb = obj.aabb
             vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
             vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
-            bbox_world = [[float(vmin[0]), float(vmin[1]), float(vmin[2])],
-                        [float(vmax[0]), float(vmax[1]), float(vmax[2])]]
+            bbox_world = [
+                [float(vmin[0]), float(vmin[1]), float(vmin[2])],
+                [float(vmax[0]), float(vmax[1]), float(vmax[2])],
+            ]
             centroid_world = [float(x) for x in aabb.center()]
 
             # Convert centroid to camera coordinates
@@ -512,13 +478,12 @@ class HabitatSimInteractiveViewer(Application):
             "spatial_relations": relations,
         }
 
-
     def compute_spatial_relations(
         self,
         visible_objects,
         max_distance=1.5,
         vertical_thresh=0.25,
-        horizontal_bias=1.2
+        horizontal_bias=1.2,
     ):
         """
         Compute spatial relations between nearby objects.
@@ -545,8 +510,7 @@ class HabitatSimInteractiveViewer(Application):
 
         # Precompute camera-space centroids
         centroids = {
-            k: np.array(visible_objects[k]["centroid_cam"], dtype=float)
-            for k in keys
+            k: np.array(visible_objects[k]["centroid_cam"], dtype=float) for k in keys
         }
 
         for i in range(len(keys)):
@@ -568,7 +532,10 @@ class HabitatSimInteractiveViewer(Application):
                 rel_ab = None
 
                 # check vertical relation first
-                if abs_dy > vertical_thresh and abs_dy > (abs_dx + abs_dz) / horizontal_bias:
+                if (
+                    abs_dy > vertical_thresh
+                    and abs_dy > (abs_dx + abs_dz) / horizontal_bias
+                ):
                     rel_ab = "on_top_of" if dy > 0 else "beneath_of"
 
                 # otherwise, check horizontal plane
@@ -577,33 +544,47 @@ class HabitatSimInteractiveViewer(Application):
                 else:
                     rel_ab = "in_front_of" if dz < 0 else "behind"
 
-                relations.append({
-                    "subject": obj_a["label"],
-                    "object": obj_b["label"],
-                    "relation": rel_ab,
-                    "distance_m": round(float(dist), 3)
-                })
+                relations.append(
+                    {
+                        "subject": obj_a["label"],
+                        "object": obj_b["label"],
+                        "relation": rel_ab,
+                        "distance_m": round(float(dist), 3),
+                    }
+                )
 
         return relations
-    
+
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
         l = label.strip().lower()
-        if l in {"wall", "ceiling", "floor", "window frame", "door frame", "frame", "unknown"}:
+        if l in {
+            "wall",
+            "ceiling",
+            "floor",
+            "window frame",
+            "door frame",
+            "frame",
+            "unknown",
+        }:
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
             return "doorway"
-        
+
         if l in {"stairs", "stair", "step", "stairway"}:
             return "staircase"
 
         return l
 
-    def _is_informative(self, label_norm: str, *,
-                        mode: str = "blacklist",
-                        blacklist=None,
-                        whitelist=None) -> bool:
+    def _is_informative(
+        self,
+        label_norm: str,
+        *,
+        mode: str = "blacklist",
+        blacklist=None,
+        whitelist=None,
+    ) -> bool:
         """
         mode="blacklist": keep everything except the blacklist
         mode="whitelist": keep only the whitelist
@@ -611,19 +592,43 @@ class HabitatSimInteractiveViewer(Application):
         if mode not in {"blacklist", "whitelist"}:
             mode = "blacklist"
         if mode == "blacklist":
-            blacklist = set(blacklist or [
-                "wall", "floor", "ceiling", "frame", "window frame", "unknown",
-                "ceiling_light", "light", "lamp"
-            ])
+            blacklist = set(
+                blacklist
+                or [
+                    "wall",
+                    "floor",
+                    "ceiling",
+                    "frame",
+                    "window frame",
+                    "unknown",
+                    "ceiling_light",
+                    "light",
+                    "lamp",
+                ]
+            )
             return label_norm not in blacklist
         else:
-            whitelist = set(whitelist or [
-                "doorway", "staircase", "elevator", "escalator", "corridor",
-                "intersection", "railing", "exit_sign", "sign", "sofa",
-                "table", "wardrobe", "balcony", "bridge"
-            ])
+            whitelist = set(
+                whitelist
+                or [
+                    "doorway",
+                    "staircase",
+                    "elevator",
+                    "escalator",
+                    "corridor",
+                    "intersection",
+                    "railing",
+                    "exit_sign",
+                    "sign",
+                    "sofa",
+                    "table",
+                    "wardrobe",
+                    "balcony",
+                    "bridge",
+                ]
+            )
             return label_norm in whitelist
-        
+
     def _xy_dist(self, a, b):
         # ground-plane distance using world x,z (index 0 and 2)
         return math.hypot(a[0] - b[0], a[2] - b[2])
@@ -631,14 +636,18 @@ class HabitatSimInteractiveViewer(Application):
     def _merge_aabbs(self, aabb_a, aabb_b):
         # each aabb: [[xmin,ymin,zmin],[xmax,ymax,zmax]]
         return [
-            [min(aabb_a[0][0], aabb_b[0][0]),
-            min(aabb_a[0][1], aabb_b[0][1]),
-            min(aabb_a[0][2], aabb_b[0][2])],
-            [max(aabb_a[1][0], aabb_b[1][0]),
-            max(aabb_a[1][1], aabb_b[1][1]),
-            max(aabb_a[1][2], aabb_b[1][2])]
+            [
+                min(aabb_a[0][0], aabb_b[0][0]),
+                min(aabb_a[0][1], aabb_b[0][1]),
+                min(aabb_a[0][2], aabb_b[0][2]),
+            ],
+            [
+                max(aabb_a[1][0], aabb_b[1][0]),
+                max(aabb_a[1][1], aabb_b[1][1]),
+                max(aabb_a[1][2], aabb_b[1][2]),
+            ],
         ]
-    
+
     def _cluster_same_label(self, instances, distance_thresh=1.0):
         """
         Greedy clustering per label on ground plane.
@@ -651,28 +660,46 @@ class HabitatSimInteractiveViewer(Application):
         clusters = []  # each: dict like instances, aggregated
 
         # Sort big to small so large areas seed clusters
-        instances_sorted = sorted(instances, key=lambda x: x["pixel_count"], reverse=True)
+        instances_sorted = sorted(
+            instances, key=lambda x: x["pixel_count"], reverse=True
+        )
 
         for inst in instances_sorted:
             assigned = False
             for cl in clusters:
-                if self._xy_dist(inst["centroid_world"], cl["centroid_world"]) <= distance_thresh:
+                if (
+                    self._xy_dist(inst["centroid_world"], cl["centroid_world"])
+                    <= distance_thresh
+                ):
                     # merge into cluster (weighted by pixel_count)
                     w_old = cl["pixel_count"]
                     w_new = inst["pixel_count"]
                     w_sum = w_old + w_new
 
                     # weighted centroid (world)
-                    cx = (cl["centroid_world"][0] * w_old + inst["centroid_world"][0] * w_new) / w_sum
-                    cy = (cl["centroid_world"][1] * w_old + inst["centroid_world"][1] * w_new) / w_sum
-                    cz = (cl["centroid_world"][2] * w_old + inst["centroid_world"][2] * w_new) / w_sum
+                    cx = (
+                        cl["centroid_world"][0] * w_old
+                        + inst["centroid_world"][0] * w_new
+                    ) / w_sum
+                    cy = (
+                        cl["centroid_world"][1] * w_old
+                        + inst["centroid_world"][1] * w_new
+                    ) / w_sum
+                    cz = (
+                        cl["centroid_world"][2] * w_old
+                        + inst["centroid_world"][2] * w_new
+                    ) / w_sum
                     cl["centroid_world"] = [cx, cy, cz]
 
                     # choose min distance to camera (useful for narration)
-                    cl["distance_from_camera"] = min(cl["distance_from_camera"], inst["distance_from_camera"])
+                    cl["distance_from_camera"] = min(
+                        cl["distance_from_camera"], inst["distance_from_camera"]
+                    )
 
                     # union bbox
-                    cl["bbox_world"] = self._merge_aabbs(cl["bbox_world"], inst["bbox_world"])
+                    cl["bbox_world"] = self._merge_aabbs(
+                        cl["bbox_world"], inst["bbox_world"]
+                    )
 
                     # accumulate pixels
                     cl["pixel_count"] = w_sum
@@ -684,22 +711,27 @@ class HabitatSimInteractiveViewer(Application):
                     break
 
             if not assigned:
-                clusters.append({
-                    **inst,
-                    "raw_ids": set(inst["raw_ids"]),  # ensure it’s a fresh set
-                })
+                clusters.append(
+                    {
+                        **inst,
+                        "raw_ids": set(inst["raw_ids"]),  # ensure it’s a fresh set
+                    }
+                )
 
         return clusters
-    
-    def postprocess_visible_objects(self, visible_objects: dict,
-                                *,
-                                pixel_percent_min=0.02,
-                                mode="blacklist",
-                                blacklist=None,
-                                whitelist=None,
-                                per_label_cluster_thresh_m=1.0,
-                                top_k_per_label=None,
-                                recompute_relations=True):
+
+    def postprocess_visible_objects(
+        self,
+        visible_objects: dict,
+        *,
+        pixel_percent_min=0.02,
+        mode="blacklist",
+        blacklist=None,
+        whitelist=None,
+        per_label_cluster_thresh_m=1.0,
+        top_k_per_label=None,
+        recompute_relations=True,
+    ):
         """
         - visible_objects: the dict produced by extract_visible_objects()["visible_objects"]
         Returns:
@@ -712,31 +744,39 @@ class HabitatSimInteractiveViewer(Application):
         buckets = {}  # label_norm -> list[instance]
         for raw_id, inst in visible_objects.items():
             label_norm = self._normalize_label(inst["label"])
-            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
+            if not self._is_informative(
+                label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist
+            ):
                 continue
             if inst.get("pixel_percent", 0.0) < pixel_percent_min:
                 continue
 
-            buckets.setdefault(label_norm, []).append({
-                "label": inst["label"],
-                "label_norm": label_norm,
-                "pixel_count": inst["pixel_count"],
-                "pixel_percent": inst.get("pixel_percent", 0.0),
-                "centroid_world": inst["centroid_world"],
-                "bbox_world": inst["bbox_world"],
-                "centroid_cam": inst["centroid_cam"],
-                "distance_from_camera": inst["distance_from_camera"],
-                "raw_ids": {raw_id},
-            })
+            buckets.setdefault(label_norm, []).append(
+                {
+                    "label": inst["label"],
+                    "label_norm": label_norm,
+                    "pixel_count": inst["pixel_count"],
+                    "pixel_percent": inst.get("pixel_percent", 0.0),
+                    "centroid_world": inst["centroid_world"],
+                    "bbox_world": inst["bbox_world"],
+                    "centroid_cam": inst["centroid_cam"],
+                    "distance_from_camera": inst["distance_from_camera"],
+                    "raw_ids": {raw_id},
+                }
+            )
 
         # clustering per label
         dedup_list = []
         for label_norm, insts in buckets.items():
-            clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
+            clusters = self._cluster_same_label(
+                insts, distance_thresh=per_label_cluster_thresh_m
+            )
 
             # (optional) keep only top-K largest clusters per label by pixel area
             if top_k_per_label is not None and len(clusters) > top_k_per_label:
-                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
+                clusters = sorted(
+                    clusters, key=lambda x: x["pixel_count"], reverse=True
+                )[:top_k_per_label]
 
             dedup_list.extend(clusters)
 
@@ -756,7 +796,9 @@ class HabitatSimInteractiveViewer(Application):
                 "bbox_world": cl["bbox_world"],
                 "centroid_cam": cl["centroid_cam"],
                 "distance_from_camera": float(cl["distance_from_camera"]),
-                "merged_raw_ids": sorted(list(cl["raw_ids"])),  # traceability to original instances
+                "merged_raw_ids": sorted(
+                    list(cl["raw_ids"])
+                ),  # traceability to original instances
             }
 
         # recompute relations on the deduped set (camera-space centroids)
@@ -766,16 +808,19 @@ class HabitatSimInteractiveViewer(Application):
             relations = []
 
         # sort objects by pixel_count descending for salience
-        objects = dict(sorted(objects.items(), key=lambda item: item[1]["pixel_count"], reverse=True))
+        objects = dict(
+            sorted(
+                objects.items(), key=lambda item: item[1]["pixel_count"], reverse=True
+            )
+        )
 
         return {"objects": objects, "spatial_relations": relations}
 
-
-    def shortest_path(self, sim, goal: mn.Vector3): # TODO REMOVE ALL THE PRINTS
+    def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
         if not sim.pathfinder.is_loaded:
             print("Pathfinder not initialized, aborting.")
         else:
-            seed = 4 #4  # @param {type:"integer"}
+            seed = 4  # 4  # @param {type:"integer"}
             sim.pathfinder.seed(seed)
 
             agent_state = sim.get_agent(self.agent_id).get_state()
@@ -791,7 +836,7 @@ class HabitatSimInteractiveViewer(Application):
             
             print("Path found : " + str(found_path))  
             print("Start : " + str(path.requested_start))
-            print("Goal : " + str(path.requested_end))          
+            print("Goal : " + str(path.requested_end))
             print("Path points : " + str(path_points))
 
             path_points = self.densify_path(path_points, step_size=1.0)
@@ -856,8 +901,10 @@ class HabitatSimInteractiveViewer(Application):
                             tangent_orientation_q = mn.Quaternion.from_matrix(
                                 tangent_orientation_matrix.rotation()
                             )
-                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
-                            
+                            agent_state.rotation = utils.quat_from_magnum(
+                                tangent_orientation_q
+                            )
+
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
 
@@ -868,7 +915,6 @@ class HabitatSimInteractiveViewer(Application):
                             rgb = observations.get("color_sensor", None)
                             semantic = observations.get("semantic_sensor", None)
                             depth = observations.get("depth_sensor", None)
-
 
                             if rgb is not None:
                                 if save_images:
@@ -881,7 +927,9 @@ class HabitatSimInteractiveViewer(Application):
                                         self.display_sample(rgb_obs=rgb)
 
                                 # Extract visible objects + relations
-                                frame_meta = self.extract_visible_objects(sim, observations)
+                                frame_meta = self.extract_visible_objects(
+                                    sim, observations
+                                )
                                 if frame_meta is not None:
                                     dedup = self.postprocess_visible_objects(
                                         frame_meta["visible_objects"],
@@ -892,9 +940,15 @@ class HabitatSimInteractiveViewer(Application):
                                         recompute_relations=True,
                                     )
 
-                                    sensor_state = sim.get_agent(0).get_state().sensor_states["color_sensor"]
+                                    sensor_state = (
+                                        sim.get_agent(0)
+                                        .get_state()
+                                        .sensor_states["color_sensor"]
+                                    )
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
-                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
+                                    T_world_sensor = mn.Matrix4.from_(
+                                        rot_mn.to_matrix(), sensor_state.position
+                                    )
 
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
@@ -918,17 +972,15 @@ class HabitatSimInteractiveViewer(Application):
             agent = sim.get_agent(self.agent_id)
             agent.set_state(agent_state)
 
-
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
         if scene is not None:
-            print(f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects") 
+            print(
+                f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects"
+            )
 
             for region in scene.regions:
-                print(
-                    f"\nRegion id:{region.id}"
-                    f" center:{region.aabb.center}"
-                )
+                print(f"\nRegion id:{region.id}" f" center:{region.aabb.center}")
                 for obj in region.objects:
                     print(
                         f"\tObject id:{obj.id}, category:{obj.category.name()},"
@@ -937,15 +989,19 @@ class HabitatSimInteractiveViewer(Application):
 
     def compute_xyz_center(self, obj_aabb):
         # ottieni i vertici min e max dell'AABB
-        vmin = obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min
-        vmax = obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max
+        vmin = (
+            obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min
+        )
+        vmax = (
+            obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max
+        )
 
         # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
         cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
         cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
         cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
         return cx, cy, cz
-    
+
     def draw_contact_debug(self, debug_line_render: Any):
         """
         This method is called to render a debug line overlay displaying active contact points and normals.
@@ -1070,8 +1126,6 @@ class HabitatSimInteractiveViewer(Application):
         Timer.next_frame()
         self.redraw()
 
-        
-
     def default_agent_config(self) -> habitat_sim.agent.AgentConfiguration:
         """
         Set up our own agent and agent controls
@@ -1135,7 +1189,6 @@ class HabitatSimInteractiveViewer(Application):
         #         semantic_spec.sensor_type = habitat_sim.SensorType.SEMANTIC
         #         semantic_spec.resolution = [self.sim_settings["height"], self.sim_settings["width"]]
         #         agent_cfg.sensor_specifications.append(semantic_spec)
-
 
         self.agent_id: int = self.sim_settings["default_agent"]
         self.cfg.agents[self.agent_id] = self.default_agent_config()
@@ -1238,8 +1291,7 @@ class HabitatSimInteractiveViewer(Application):
             # update location of grabbed object
             self.update_grab_position(self.previous_mouse_point)
 
-
-        self._process_queued_actions() # process any queued actions from the other thread
+        self._process_queued_actions()  # process any queued actions from the other thread
         # if self.cnt % 60 == 0:
         #     self.print_agent_state()
         # self.cnt += 1
@@ -1252,8 +1304,11 @@ class HabitatSimInteractiveViewer(Application):
         agent_state = agent.get_state()
         print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
 
-    def get_object_position(self, name: str) -> Optional[mn.Vector3]:
+    def get_object_position(
+        self, object_name: Optional[str], room_name: Optional[str]
+    ) -> Optional[mn.Vector3]:
         """
+        IMPORTANT: This function uses the data FROM THE SIMULATION! It only takes the name and position for each region inside the json file.
         Get the centroid position of an object or region from its category name.
         """
         scene = self.sim.semantic_scene
@@ -1262,22 +1317,60 @@ class HabitatSimInteractiveViewer(Application):
             return None
 
         for region in scene.regions:
-            region_name = ""
-            if region and region.id:
-                reg = self.map_room_id_to_name[region.id.strip("_").lower()] if region.id.strip("_").lower() in self.map_room_id_to_name else region.id
-                region_name = reg["name"] if "name" in reg else region.id
-                region_pos = mn.Vector3(reg["position"]) if "position" in reg else mn.Vector3((-1,-1,-1))            
-            if region_name.lower() == name.lower():
+            region_id = region.id.strip("_").lower() if region and region.id else ""
+            region_meta = self.map_room_id_to_name.get(region_id, {})
+            region_name = region_meta.get("name", region.id)
+            region_pos = mn.Vector3(region_meta.get("position", (-1, -1, -1)))
+
+            region_name_l = region_name.lower()
+
+            # Case 1: user wants the region (room) position
+            if object_name is None and room_name and region_name_l == room_name.lower():
                 return region_pos
-            for obj in region.objects:
-                if obj and obj.category and obj.category.name().lower() == name.lower():
-                    center = mn.Vector3(self.compute_xyz_center(obj.aabb))
-                    return center
+
+            # Case 2: user wants a specific object in a specific room
+            if object_name and room_name and region_name_l != room_name.lower():
+                continue  # Skip regions not matching the target room
+
+            # Case 3: search for the object (in matching room or in all rooms)
+            if object_name:
+                for obj in region.objects:
+                    if (
+                        obj
+                        and obj.category
+                        and obj.category.name().lower() == object_name.lower()
+                    ):
+                        return mn.Vector3(self.compute_xyz_center(obj.aabb))
 
         return None
 
+    def check_object_in_room(
+        self, object_name: Optional[str], room_name: Optional[str]
+    ) -> bool:
+        """
+        Verifies whether the given object exists in the given room.
+        If room_name is None, always returns False.
+        If object_name is None, returns True if room_name exists.
+        """
 
-        
+        # * JSON already loaded (under self.room_objects_occurences)
+        if room_name is None:
+            return False
+
+        room_name = room_name.strip().lower()
+        object_name = object_name.strip().lower() if object_name else None
+
+        # Check if room exists
+        if room_name not in self.room_objects_occurences:
+            return False
+
+        # Case: only checking if room exists
+        if object_name is None:
+            return True
+
+        # Check if object exists in that room
+        room_objects = self.room_objects_occurences[room_name]
+        return object_name in (obj.lower() for obj in room_objects.keys())
 
     def invert_gravity(self) -> None:
         """
@@ -1829,6 +1922,61 @@ Key Commands:
 """
         )
 
+    def get_response_LLM(self, user_input):
+        # This function calls an LLM to retrieve the landmark / room information from the Human Request
+        if client is None:
+            print("OpenAI client not initialized. Cannot get landmark room.")
+            return None
+
+        # OpenAI is loaded
+        prompt = """
+        You are an assistant for a home navigation system.
+        You are given a dictionary describing the house structure: each key is a room name, and each value is a dictionary of landmarks (objects) with their number of occurrences in that room.
+
+        Your task is to interpret natural language queries from the user who might:
+        - ask to go to a room, or
+        - ask where to find an object.
+
+        Users may use synonyms or similar terms (for example: "clock" = "wall clock", "toy" = "plush toy", etc.). You must identify such equivalences before deciding your answer.
+
+        When responding, follow these rules strictly:
+
+        1. If the user mentions an object inside a room and there is one occurrence of that object in that room, respond with the name of the room and the object.
+        Example: "1. bathroom_4, door"
+
+        2. If the user requests a room and it exists in the dictionary, respond only with the exact name of the room.
+        Example: "2. kitchen"
+
+        3. If the object appears in multiple rooms, ask in which room it is located, listing all rooms that contain it.
+        Example: "3. The object appears in multiple rooms, do you mean the one in kitchen or in dining_room?"
+
+        4. If the user mentions a room, but there are multiple rooms of that type (e.g. "bedroom", "bathroom"), ask in which room to go, listing all possible candidates.
+        Example: "4. There are multiple bathrooms, do you mean bathroom_1, bathroom_2, bathroom_3 or bathroom_4?"
+
+        5. If an object appears multiple times in the same room but not in other rooms, respond with the name of the room.
+        Example: "5. bedroom_1"
+
+        6. If the user mentions a room and an object that appears multiple times in the room, respond with the name of the room.
+        Example: "6. laundry_room"
+
+        7. If no match or synonym is found, say you couldn't find the object and ask for more details.
+        Example: "7. I couldn't find the object. Can you describe it or specify where it might be located?"
+
+        Output format rule: Always respond in the format
+        <rule number>. <response text>
+        and nothing else.
+        """
+
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
+        ]
+
+        response = client.chat.completions.create(model="gpt-4o", messages=messages)
+        print("Response from GPT:")
+        print(response.choices[0].message.content)
+        return response.choices[0].message.content
+
 
 class MouseMode(Enum):
     LOOK = 0
@@ -1900,9 +2048,6 @@ class MouseGrabber:
         self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
 
 
-        
-
-
 class Timer:
     """
     Timer class used to keep track of time between buffer swaps
@@ -1946,6 +2091,48 @@ class Timer:
         Timer.prev_frame_time = time.time()
 
 
+def get_goal_from_response(response: str) -> object:
+    match = re.match(r"^\s*(\d)\.\s*(.+)", response.strip())
+    if not match:
+        raise ValueError(f"Invalid LLM response format: {response}")
+    rule_number = int(match.group(1))
+    content = match.group(2).strip()
+
+    if rule_number == 1:
+        # Format: "room_name, object_name"
+        try:
+            room, obj = map(str.strip, content.split(",", 1))
+            return {"type": "object_in_room", "room": room, "object": obj}
+        except ValueError:
+            raise ValueError(f"Rule 1: Expected format 'room, object'. Got: {content}")
+
+    elif rule_number == 2:
+        # Format: "room_name"
+        return {"type": "room_only", "room": content.strip()}
+
+    elif rule_number == 3:
+        # Object is ambiguous across rooms
+        return {"type": "ambiguous_object_rooms", "message": content}
+
+    elif rule_number == 4:
+        # Room type is ambiguous
+        return {"type": "ambiguous_room", "message": content}
+
+    elif rule_number == 5:
+        # Object repeated in one room only
+        return {"type": "object_in_single_room", "room": content.strip()}
+
+    elif rule_number == 6:
+        # Object repeated in specified room
+        return {"type": "object_repeated_in_room", "room": content.strip()}
+
+    elif rule_number == 7:
+        # No match found
+        return {"type": "not_found", "message": content}
+
+    else:
+        raise ValueError(f"Unexpected rule number: {rule_number}")
+
 
 def user_input_loop(viewer: HabitatSimInteractiveViewer):
     while True:
@@ -1953,27 +2140,69 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
             user_input = input("User Input: ").lower().strip()
 
             if user_input:
-               
-                # goal_name = get_landmark_room(user_input)
-                goal_name = None
-                if goal_name is None:
-                    # response = get_landmark_room_manually(user_input)
-                    goal_name = goal_name if goal_name else user_input
-                    goal_pos = viewer.get_object_position(goal_name)
-                    print(f"Position of '{goal_name}': {goal_pos}")
-                    if goal_pos is None: 
-                        print(f"Warning: Item with name '{goal_name}' not found in objects or rooms.")
-                        continue
-                    else:
-                        # goal_pos = mn.Vector3((-5.44895, 0.163378, -1.18292))
-                        if goal_pos.y < 2.0:
-                            goal_pos.y = 0.163378  # raise goal position to be above ground
-                        viewer.enqueue_shortest_path(goal_pos)
-                        time.sleep(2.0)
-                
+
+                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+                print("Response from ChatGPT: ", response)
+                goal_info = get_goal_from_response(
+                    response
+                )  # * Handle response and distinguish cases
+                print("Handled Response: ", goal_info)
+
+                # Determine search target
+                if goal_info["type"] == "object_in_room":
+                    target_name = goal_info["object"]
+                    room_name = goal_info["room"]
+                elif goal_info["type"] == "room_only":
+                    target_name = None
+                    room_name = goal_info["room"]
+                elif goal_info["type"] == "object_in_single_room":
+                    target_name = None
+                    room_name = goal_info["room"]
+                elif goal_info["type"] == "object_repeated_in_room":
+                    target_name = None
+                    room_name = goal_info["room"]
+                elif goal_info["type"] == "ambiguous_room":
+                    print(goal_info["message"])
+                    continue
+                elif goal_info["type"] == "ambiguous_object_rooms":
+                    print(goal_info["message"])
+                    continue
+                elif goal_info["type"] == "not_found":
+                    print(goal_info["message"])
+                    continue
+                else:
+                    print(f"Unhandled goal type: {goal_info['type']}")
+                    continue
+
+                # * === SANITY CHECK ===
+                if not viewer.check_object_in_room(target_name, room_name):
+                    print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
+                    continue
+                else:
+                    print(f"Sanity check passed: '{target_name}' in '{room_name}'")
+
+                # * Query scene (and retrieve a point in the 3D space)
+                goal_pos = viewer.get_object_position(
+                    object_name=target_name, room_name=room_name
+                )
+                print(
+                    f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}"
+                )
+
+                if goal_pos is None:
+                    print(
+                        f"Warning: '{room_name}/{target_name}' not found in the scene."
+                    )
+                    continue
+
+                if goal_pos.y < 2.0:
+                    goal_pos.y = 0.163378  # Adjust height
+
+                viewer.enqueue_shortest_path(goal_pos)
+                time.sleep(2.0)
+
         except EOFError:
             break
-
 
 
 if __name__ == "__main__":
