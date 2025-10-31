@@ -57,16 +57,6 @@ except Exception as e:
     )
     client = None
 
-# * Open the JSON with rooms => object occurences
-try:
-    with open("scene_room_object_occurences.json", "r", encoding="utf-8") as f:
-        room_object_data = json.load(f)
-except Exception as e:
-    print(
-        "[WARNING] scene_room_object_occurences.json not found. ChatGPT features may not work as expected."
-    )
-    room_object_data = {}
-
 
 def get_landmark_room_manually(user_input):
     # Fallback function to get landmark/room information manually
@@ -307,6 +297,7 @@ class HabitatSimInteractiveViewer(Application):
 
         #########################################
         self.map_room_id_to_name = {}
+        self.room_objects_occurences = {}
 
         if True:
             base_path = os.path.dirname(scene_path)
@@ -315,16 +306,24 @@ class HabitatSimInteractiveViewer(Application):
                 base_path, f"{scene_name.split('.')[0]}.semantic.txt"
             )
             map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+            room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
 
             print(f"Base path: {base_path}")
             print(f"Semantic path: {semantic_path}")
             print(f"Map file path: {map_file_path}")
+            print(f"Room-object occurences file path: {room_object_file_path}")
 
             if os.path.exists(map_file_path):
                 with open(map_file_path, "r", encoding="utf-8") as f:
                     self.map_room_id_to_name = json.load(f)
             else:
                 raise FileNotFoundError(f"Map file not found: {map_file_path}")
+
+            if os.path.exists(room_object_file_path):
+                with open(room_object_file_path, "r", encoding="utf-8") as f:
+                    self.room_objects_occurences = json.load(f)
+            else:
+                raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
 
             # ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", ]
             # semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
@@ -1413,6 +1412,32 @@ class HabitatSimInteractiveViewer(Application):
                         return mn.Vector3(self.compute_xyz_center(obj.aabb))
 
         return None
+    
+    def check_object_in_room(self, object_name: Optional[str], room_name: Optional[str]) -> bool:
+        """
+        Verifies whether the given object exists in the given room.
+        If room_name is None, always returns False.
+        If object_name is None, returns True if room_name exists.
+        """
+
+        # * JSON already loaded (under self.room_objects_occurences)
+        if room_name is None:
+            return False
+
+        room_name = room_name.strip().lower()
+        object_name = object_name.strip().lower() if object_name else None
+
+        # Check if room exists
+        if room_name not in self.room_objects_occurences:
+            return False
+
+        # Case: only checking if room exists
+        if object_name is None:
+            return True
+
+        # Check if object exists in that room
+        room_objects = self.room_objects_occurences[room_name]
+        return object_name in (obj.lower() for obj in room_objects.keys())
 
     def invert_gravity(self) -> None:
         """
@@ -2121,33 +2146,6 @@ def get_goal_from_response(response: str) -> object:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
 
-def check_object_in_room(object_name: Optional[str], room_name: Optional[str]) -> bool:
-    """
-    Verifies whether the given object exists in the given room.
-    If room_name is None, always returns False.
-    If object_name is None, returns True if room_name exists.
-    """
-
-    # * JSON already loaded (under room_object_data)
-    if room_name is None:
-        return False
-
-    room_name = room_name.strip().lower()
-    object_name = object_name.strip().lower() if object_name else None
-
-    # Check if room exists
-    if room_name not in room_object_data:
-        return False
-
-    # Case: only checking if room exists
-    if object_name is None:
-        return True
-
-    # Check if object exists in that room
-    room_objects = room_object_data[room_name]
-    return object_name in (obj.lower() for obj in room_objects.keys())
-
-
 def user_input_loop(viewer: HabitatSimInteractiveViewer):
     while True:
         try:
@@ -2189,7 +2187,7 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
                     continue
 
                 # * === SANITY CHECK ===
-                if not check_object_in_room(target_name, room_name):
+                if not viewer.check_object_in_room(target_name, room_name):
                     print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
                     continue
                 else:
