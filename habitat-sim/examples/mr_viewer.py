@@ -2459,7 +2459,8 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
 
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
-            instructions = generate_path_description(os.getcwd()+"/output/", user_input=user_input, model="gpt-4o", dry_run=False)
+            input_dir = Path(os.getcwd()) / "output"
+            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False)
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)
@@ -2470,7 +2471,7 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
 
 
 
-
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QLineEdit, QPushButton
 from PySide6.QtCore import Qt, Slot, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat
