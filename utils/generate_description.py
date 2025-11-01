@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Structural labels do not help with navigation cues.
 IGNORED_LABELS = {
     "ceiling",
