@@ -48,6 +48,7 @@ from habitat_sim import ReplayRenderer, ReplayRendererConfiguration, physics
 from habitat_sim.logging import LoggingContext, logger
 from habitat_sim.utils.common import quat_from_angle_axis
 from habitat_sim.utils.settings import default_sim_settings, make_cfg
+from habitat_sim.utils.generate_description import generate_path_description
 
 
 from habitat.utils.visualizations import maps
@@ -2455,119 +2456,6 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
 
         except EOFError:
             break
-
-
-
-
-
-IGNORED_LABELS = {"ceiling", "floor", "wall", "walls", "ceiling trim", "wall trim", "railing"}
-
-
-@dataclass
-class FrameSummary:
-    name: str
-    objects: Sequence[str]
-    relationships: Sequence[str]
-
-    def to_prompt_line(self) -> str:
-        parts = []
-        if self.objects:
-            parts.append("Key objects: " + ", ".join(self.objects))
-        if self.relationships:
-            parts.append("Relations: " + "; ".join(self.relationships))
-        return f"{self.name}: " + (" | ".join(parts) if parts else "Limited landmarks visible.")
-
-
-def generate_path_description(folder: str, model: str = "gpt-4o") -> str:
-    """Reads all json in the folder and elaborate the instruction."""
-    folder_path = Path(folder)
-    json_paths = sorted(folder_path.glob("*.json"))
-    if not json_paths:
-        raise ValueError(f"No JSON file found in the folder: {folder}")
-
-    # ---- UTILITIES ----------------------------------------------------------
-    def distance_bucket(d: float | None) -> str | None:
-        if d is None or d <= 0: return None
-        if d < 1: return "very close"
-        if d < 3: return "near"
-        if d <= 5: return "mid-range"
-        if d <= 6: return "slightly far"
-        return "far"
-
-    def format_obj(o: Dict[str, Any]) -> str | None:
-        label = str(o.get("label", "")).strip()
-        if not label or label.lower() in IGNORED_LABELS:
-            return None
-        details = []
-        if (p := o.get("pixel_percent")): details.append(f"{float(p):.2f}% area")
-        if (d := o.get("distance_from_camera")):
-            d = float(d)
-            if d > 0:
-                details.append(f"{d:.1f}m away")
-                if (b := distance_bucket(d)): details.append(b)
-        return f"{label} ({', '.join(details)})" if details else label
-
-    def object_priority(o: Dict[str, Any]) -> tuple:
-        percent = float(o.get("pixel_percent") or 0)
-        dist = float(o.get("distance_from_camera") or 0)
-        pref = (
-            1.0 if 3 <= dist <= 5 else
-            0.75 if 2 <= dist < 6 else
-            0.3
-        )
-        return (percent * pref, pref, percent, -dist)
-
-    def extract_objects(objs: Dict[str, Any]) -> List[str]:
-        filtered = [o for o in objs.values() if str(o.get("label", "")).lower() not in IGNORED_LABELS]
-        filtered.sort(key=object_priority, reverse=True)
-        return [x for x in (format_obj(o) for o in filtered[:6]) if x]
-
-    def extract_relationships(rel: Iterable[Dict[str, Any]]) -> List[str]:
-        results = []
-        for r in rel:
-            s, reln, o = r.get("subject"), r.get("relation"), r.get("object")
-            if not (s and reln and o): continue
-            if s.lower() in IGNORED_LABELS or o.lower() in IGNORED_LABELS: continue
-            results.append(f"{s} {reln} {o}")
-            if len(results) >= 6: break
-        return results
-
-    # ---- LOAD & SUMMARIZE FRAMES -------------------------------------------
-    frames = [json.loads(p.read_text()) for p in json_paths]
-    summaries = [
-        FrameSummary(
-            name=str(f.get("image_index", i)),
-            objects=extract_objects(f.get("objects") or f.get("visible_objects") or {}),
-            relationships=extract_relationships(f.get("spatial_relations") or f.get("relationships") or []),
-        )
-        for i, f in enumerate(frames)
-    ]
-
-    # ---- BUILD PROMPT -------------------------------------------------------
-    prompt = textwrap.dedent(
-        f"""
-        You are a navigation assistant analysing a sequence of snapshots along a path.
-        Prioritise landmarks at mid-range distance (3–5m).
-        Produce a concise path description (<180 words). Don't invent objects.
-
-        Observations:
-        {chr(10).join(f"- {s.to_prompt_line()}" for s in summaries)}
-        """
-    ).strip()
-
-    # ---- CALL OPENAI --------------------------------------------------------
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "Precise navigation. Only reference observed landmarks."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        max_tokens=400,
-    )
-    return response.choices[0].message.content.strip()
-
 
 if __name__ == "__main__":
     import argparse
