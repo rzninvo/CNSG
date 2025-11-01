@@ -2,8 +2,11 @@
 
 import os
 from pathlib import Path
-import habitat_sim
-from habitat_sim.utils.generate_description import generate_path_description
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from utils.generate_description import generate_path_description
 
 
 def main():
