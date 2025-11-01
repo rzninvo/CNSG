@@ -22,8 +22,6 @@ import threading
 import queue
 
 
-
-
 import json
 import os
 from pathlib import Path
@@ -48,8 +46,9 @@ from habitat_sim import ReplayRenderer, ReplayRendererConfiguration, physics
 from habitat_sim.logging import LoggingContext, logger
 from habitat_sim.utils.common import quat_from_angle_axis
 from habitat_sim.utils.settings import default_sim_settings, make_cfg
-from habitat_sim.utils.generate_description import generate_path_description
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from utils.generate_description import generate_path_description
 
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
@@ -2450,7 +2449,8 @@ def user_input_loop(viewer: HabitatSimInteractiveViewer):
 
                 ############ Generate Instruction ###############
                 # print("Current working dir:", os.getcwd())
-                instructions = generate_path_description(os.getcwd()+"/output/")
+                instructions = generate_path_description(os.getcwd()+"/output/", user_input=user_input, model="gpt-4o", dry_run=False)
+                print("\n--- GENERATED DESCRIPTION ---\n")
                 print(instructions)
 
 
