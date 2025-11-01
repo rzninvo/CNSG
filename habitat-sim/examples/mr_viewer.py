@@ -110,7 +110,10 @@ class HabitatSimInteractiveViewer(Application):
     # CPU and GPU usage info
     DISPLAY_FONT_SIZE = 16.0
 
-    def __init__(self, sim_settings: Dict[str, Any]) -> None:
+    def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
+
+        self.q_app = q_app
+
 
         self.cnt = 0
         self.action_queue = queue.Queue()
@@ -1301,6 +1304,9 @@ class HabitatSimInteractiveViewer(Application):
         Calls continuously to re-render frames and swap the two frame buffers
         at a fixed rate.
         """
+        if self.q_app:
+            self.q_app.processEvents() 
+
         agent_acts_per_sec = self.fps
 
         mn.gl.default_framebuffer.clear(
@@ -2377,80 +2383,85 @@ def get_goal_from_response(response: str) -> object:
 
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
+    
 
-
-def user_input_loop(viewer: HabitatSimInteractiveViewer):
+def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue):
     while True:
         try:
-            user_input = input("User Input: ").lower().strip()
+            user_input = input_q.get()
+            print("Received user input:", user_input)
+            if not user_input:
+                continue
 
-            if user_input:
+            # output_q.put("Processing your request...")
 
-                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
-                print("Response from ChatGPT: ", response)
-                goal_info = get_goal_from_response(
-                    response
-                )  # * Handle response and distinguish cases
-                print("Handled Response: ", goal_info)
+            response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+            print("Response from ChatGPT: ", response)
+            goal_info = get_goal_from_response(
+                response
+            )  # * Handle response and distinguish cases
+            print("Handled Response: ", goal_info)
 
-                # Determine search target
-                if goal_info["type"] == "object_in_room":
-                    target_name = goal_info["object"]
-                    room_name = goal_info["room"]
-                elif goal_info["type"] == "room_only":
-                    target_name = None
-                    room_name = goal_info["room"]
-                elif goal_info["type"] == "object_in_single_room":
-                    target_name = None
-                    room_name = goal_info["room"]
-                elif goal_info["type"] == "object_repeated_in_room":
-                    target_name = None
-                    room_name = goal_info["room"]
-                elif goal_info["type"] == "ambiguous_room":
-                    print(goal_info["message"])
-                    continue
-                elif goal_info["type"] == "ambiguous_object_rooms":
-                    print(goal_info["message"])
-                    continue
-                elif goal_info["type"] == "not_found":
-                    print(goal_info["message"])
-                    continue
-                else:
-                    print(f"Unhandled goal type: {goal_info['type']}")
-                    continue
+            # Determine search target
+            if goal_info["type"] == "object_in_room":
+                target_name = goal_info["object"]
+                room_name = goal_info["room"]
+            elif goal_info["type"] == "room_only":
+                target_name = None
+                room_name = goal_info["room"]
+            elif goal_info["type"] == "object_in_single_room":
+                target_name = None
+                room_name = goal_info["room"]
+            elif goal_info["type"] == "object_repeated_in_room":
+                target_name = None
+                room_name = goal_info["room"]
+            elif goal_info["type"] == "ambiguous_room":
+                print(goal_info["message"])
+                continue
+            elif goal_info["type"] == "ambiguous_object_rooms":
+                print(goal_info["message"])
+                continue
+            elif goal_info["type"] == "not_found":
+                print(goal_info["message"])
+                continue
+            else:
+                print(f"Unhandled goal type: {goal_info['type']}")
+                continue
 
-                # * === SANITY CHECK ===
-                if not viewer.check_object_in_room(target_name, room_name):
-                    print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
-                    continue
-                else:
-                    print(f"Sanity check passed: '{target_name}' in '{room_name}'")
+            # * === SANITY CHECK ===
+            if not viewer.check_object_in_room(target_name, room_name):
+                print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
+                continue
+            else:
+                print(f"Sanity check passed: '{target_name}' in '{room_name}'")
 
-                # * Query scene (and retrieve a point in the 3D space)
-                goal_pos = viewer.get_object_position(
-                    object_name=target_name, room_name=room_name
-                )
+            # * Query scene (and retrieve a point in the 3D space)
+            goal_pos = viewer.get_object_position(
+                object_name=target_name, room_name=room_name
+            )
+            print(
+                f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}"
+            )
+
+            if goal_pos is None:
                 print(
-                    f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}"
+                    f"Warning: '{room_name}/{target_name}' not found in the scene."
                 )
+                continue
 
-                if goal_pos is None:
-                    print(
-                        f"Warning: '{room_name}/{target_name}' not found in the scene."
-                    )
-                    continue
+            if goal_pos.y < 2.0:
+                goal_pos.y = 0.163378  # Adjust height
 
-                if goal_pos.y < 2.0:
-                    goal_pos.y = 0.163378  # Adjust height
-
-                viewer.enqueue_shortest_path(goal_pos)
-                time.sleep(2.0)
+            viewer.enqueue_shortest_path(goal_pos)
+            # output_q.put(f"Generating navigation instructions...")
+            time.sleep(0.3)
 
 
-                ############ Generate Instruction ###############
-                # print("Current working dir:", os.getcwd())
-                instructions = generate_path_description(os.getcwd()+"/output/")
-                print(instructions)
+            ############ Generate Instruction ###############
+            # instructions = generate_path_description(os.getcwd()+"/output/") # TODO uncomment
+            instructions = "Dummy instructions for testing."
+            output_q.put(instructions)
+            # print(instructions)
 
 
         except EOFError:
@@ -2569,6 +2580,191 @@ def generate_path_description(folder: str, model: str = "gpt-4o") -> str:
     return response.choices[0].message.content.strip()
 
 
+
+
+
+
+
+
+
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QLineEdit, QPushButton
+from PySide6.QtCore import Qt, Slot, QTimer
+from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat
+from html import escape
+import queue
+
+
+class ModernGui(QWidget):
+    """
+    Modern chat GUI styled like Apple iMessage (transparent bubbles).
+    - User messages: right aligned
+    - Assistant messages: left aligned
+    - Robust alignment via QTextBlockFormat (no HTML align)
+    """
+
+    def __init__(self, input_q: queue.Queue, output_q: queue.Queue, window_width: int):
+        super().__init__()
+        self.input_q = input_q
+        self.output_q = output_q
+
+        self.init_ui(window_width)
+        self.apply_style()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.check_output_queue)
+        self.timer.start(100)
+
+    def init_ui(self, window_width: int):
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(10)
+
+        header_label = QLabel("Navigation Assistant Chat")
+        header_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        header_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(header_label)
+
+        self.log_area = QTextEdit()
+        self.log_area.setReadOnly(True)
+        self.log_area.setMinimumHeight(300)
+        main_layout.addWidget(self.log_area, 1)
+
+        input_layout = QHBoxLayout()
+        input_layout.setSpacing(10)
+
+        self.input_entry = QLineEdit()
+        self.input_entry.setPlaceholderText("Where would you like to go?")
+        self.input_entry.returnPressed.connect(self.submit_input)
+        input_layout.addWidget(self.input_entry, 1)
+
+        self.submit_button = QPushButton("Send")
+        self.submit_button.setCursor(Qt.PointingHandCursor)
+        self.submit_button.clicked.connect(self.submit_input)
+        input_layout.addWidget(self.submit_button)
+
+        main_layout.addLayout(input_layout)
+        self.setLayout(main_layout)
+        self.resize(window_width, 550)
+
+    def apply_style(self):
+        self.setStyleSheet("""
+            ModernGui {
+                background-color: #1E1E1E;
+                color: #E0E0E0;
+                font-family: "Segoe UI", Arial, sans-serif;
+            }
+            QLabel { color: #FFFFFF; }
+            QTextEdit {
+                background-color: #2A2A2A;
+                border-radius: 10px;
+                padding: 10px;
+                font-size: 11pt;
+            }
+            QLineEdit {
+                background-color: #333;
+                border: 1px solid #555;
+                border-radius: 20px;
+                padding: 10px 15px;
+                font-size: 11pt;
+                color: white;
+            }
+            QLineEdit:focus { border-color: #0A84FF; }
+            QPushButton {
+                background-color: #0A84FF;
+                border-radius: 20px;
+                padding: 10px 22px;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+            QPushButton:hover { background-color: #3AA0FF; }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+
+            QScrollBar::handle:vertical {
+                background: #555;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+
+            QScrollBar::handle:vertical:hover {
+                background: #777;
+            }
+
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: none;
+            }
+
+        """)
+
+    # ---------- Helpers ----------
+    def _append_message(self, name_html: str, body_html: str, align: Qt.AlignmentFlag, color_css: str):
+        """Append a single chat message with robust paragraph alignment."""
+        cursor = self.log_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_area.setTextCursor(cursor)
+
+        # New paragraph with explicit alignment (this is the key fix)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(align)
+        block_fmt.setTopMargin(0)     # compact vertical spacing
+        block_fmt.setBottomMargin(3)
+        cursor.insertBlock(block_fmt)
+
+        # Transparent 'bubble' that sizes to content
+        html = (
+            f'<span style="display:inline-block; padding:6px 6px; '
+            f'border-radius:18px; font-size:11pt; color:{color_css}; '
+            f'max-width:70%; background:transparent; word-wrap:break-word;">'
+            f'{name_html}<br>{body_html}'
+            f'</span>'
+        )
+        cursor.insertHtml(html)
+
+        # Close with another block so next message starts clean
+        # cursor.insertBlock()
+        self.scroll_to_bottom()
+
+    # ---------- Slots ----------
+    @Slot()
+    def submit_input(self):
+        """Triggered when user presses Enter or clicks Send."""
+        text = self.input_entry.text().strip()
+        if not text:
+            return
+        self.input_q.put(text)
+
+        escaped = escape(text).replace("\n", "<br>")
+        self._append_message('<b style="font-size:9pt;">You</b>', escaped, Qt.AlignRight, "white")
+        self.input_entry.clear()
+
+    def check_output_queue(self):
+        """Poll assistant messages and append them."""
+        try:
+            while True:
+                msg = self.output_q.get_nowait()
+                escaped = escape(msg).replace("\n", "<br>")
+                self._append_message('<b style="font-size:9pt;">Assistant</b>', escaped, Qt.AlignLeft, "#E5E5EA")
+        except queue.Empty:
+            pass
+
+    def scroll_to_bottom(self):
+        self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
+
+
+def create_gui(input_q: queue.Queue, output_q: queue.Queue, window_width: int) -> QWidget:
+    return ModernGui(input_q, output_q, window_width)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2660,9 +2856,25 @@ if __name__ == "__main__":
     # start the application
     # HabitatSimInteractiveViewer(sim_settings).exec()
 
-    viewer = HabitatSimInteractiveViewer(sim_settings)
 
-    input_thread = threading.Thread(target=user_input_loop, args=(viewer,), daemon=True)
-    input_thread.start()
+    input_from_gui_q = queue.Queue()
+    output_to_gui_q = queue.Queue()
+
+    # 1. Crea la GUI di Tkinter nel thread principale
+    #    (ma non avviarla ancora con mainloop)
+    q_app = QApplication(sys.argv or [])
+    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width)
+    gui_window.show()
+
+    viewer = HabitatSimInteractiveViewer(sim_settings, q_app=q_app)
+
+    logic_thread = threading.Thread(
+        target=user_input_logic_loop, 
+        args=(viewer, input_from_gui_q, output_to_gui_q), 
+        daemon=True
+    )
+    logic_thread.start()
 
     viewer.exec()
+
+    sys.exit(q_app.exec_())
