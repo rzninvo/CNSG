@@ -15,7 +15,12 @@ def main():
     print(f"Reading frames from: {input_dir}")
 
     try:
-        description = generate_path_description(input_dir)
+        description = generate_path_description(
+            input_dir,
+            user_input="How can I get to the entrance?",
+            model="gpt-4o",
+            dry_run=True,
+        )
         print("\n--- GENERATED DESCRIPTION ---\n")
         print(description)
     except Exception as e:
