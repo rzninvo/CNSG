@@ -49,25 +49,13 @@ from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from utils.generate_description import generate_path_description
+from utils.conversation_gui import * 
 
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
 
-IGNORE_BBOX_CATEGORIES = {
-    "ceiling",
-    "floor",
-    "wall",
-    "handle",
-    "window frame",
-    "door frame",
-    "frame",
-    "unknown",
-    "stairs",
-    "staircase",
-    "stair",
-    "stairway",
-}
+
 
 
 
@@ -297,13 +285,9 @@ class HabitatSimInteractiveViewer(Application):
             else:
                 raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
-            # if os.path.exists(room_object_file_path):
-            #     with open(room_object_file_path, "r", encoding="utf-8") as f:
-            #         self.room_objects_occurences = json.load(f)
-            # else:
-            #     raise FileNotFoundError(f"Occurences file not found: {room_object_file_path}")
 
-            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=IGNORE_BBOX_CATEGORIES)
+            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", "stairs", "staircase", "stair", "stairway"]
+            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
             
             self.room_objects_occurences = semantic_info
             # print("\nSemantic information of the scene:")
@@ -348,8 +332,10 @@ class HabitatSimInteractiveViewer(Application):
         # plt.show(block=False)
 
 
-
-        plt.savefig("output/topdown_map.png", bbox_inches="tight")
+        self.topdown_map_counter = getattr(self, "topdown_map_counter", 0)
+        plt.savefig(f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight")
+        self.topdown_map_counter += 1  
+        plt.close()
         # logger.info(f"Saved: output/topdown_map.png")
 
     def display_sample(
@@ -388,10 +374,12 @@ class HabitatSimInteractiveViewer(Application):
             self.output_counter = 0
 
         # incrementa contatore
-        self.output_counter += 1
+        
         filename = f"output/sample_output_{self.output_counter}.png"
+        self.output_counter += 1
 
         plt.savefig(filename, bbox_inches="tight")
+        plt.close()
         # logger.info(f"Saved: {filename}")
 
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
@@ -415,7 +403,7 @@ class HabitatSimInteractiveViewer(Application):
             for s in range(1, n_steps + 1):
                 new_point = p0 + direction * step_size * s
                 new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 1e-3:
+        if np.linalg.norm(new_points[-1] - points[-1]) > 1: # NOTE removed
             new_points.append(points[-1])
         return np.array(new_points)
 
@@ -897,13 +885,12 @@ class HabitatSimInteractiveViewer(Application):
             print("Goal : " + str(path.requested_end))
             print("Path points : " + str(path_points))
 
-            path_points = self.densify_path(path_points, step_size=1.0)
+            path_points = self.densify_path(path_points, step_size=3.0)
 
             save_images = False
 
             output_dir = "output"
             if os.path.exists(output_dir):
-                # cancella tutto il contenuto della cartella
                 shutil.rmtree(output_dir)
             os.makedirs(output_dir, exist_ok=True)
             
@@ -976,11 +963,9 @@ class HabitatSimInteractiveViewer(Application):
 
                             if rgb is not None:
                                 if save_images:
-                                    # Save RGB/depth/semantic preview as before
-                                    if semantic is not None and depth is not None:
-                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic, depth_obs=depth)
-                                    elif depth is not None:
-                                        self.display_sample(rgb_obs=rgb, depth_obs=depth)
+                                    # Save RGB/semantic preview as before
+                                    if semantic is not None:
+                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
                                     else:
                                         self.display_sample(rgb_obs=rgb)
 
@@ -1378,7 +1363,7 @@ class HabitatSimInteractiveViewer(Application):
         """
         make_action_spec = habitat_sim.agent.ActionSpec
         make_actuation_spec = habitat_sim.agent.ActuationSpec
-        MOVE, LOOK = 0.07, 1.5
+        MOVE, LOOK = 0.04, 1.5 # TODO modified: originally 0.07, 1.5
 
         # all of our possible actions' names
         action_list = [
@@ -2081,35 +2066,36 @@ class HabitatSimInteractiveViewer(Application):
         exit(0)
 
     def draw_text(self, sensor_spec):
-        # make magnum text background transparent for text
-        mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
-        mn.gl.Renderer.set_blend_function(
-            mn.gl.Renderer.BlendFunction.ONE,
-            mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
-        )
+        pass
+#         # make magnum text background transparent for text
+#         mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
+#         mn.gl.Renderer.set_blend_function(
+#             mn.gl.Renderer.BlendFunction.ONE,
+#             mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
+#         )
 
-        self.shader.bind_vector_texture(self.glyph_cache.texture)
-        self.shader.transformation_projection_matrix = self.window_text_transform
-        self.shader.color = [1.0, 1.0, 1.0]
+#         self.shader.bind_vector_texture(self.glyph_cache.texture)
+#         self.shader.transformation_projection_matrix = self.window_text_transform
+#         self.shader.color = [1.0, 1.0, 1.0]
 
-        sensor_type_string = str(sensor_spec.sensor_type.name)
-        sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
-        if self.mouse_interaction == MouseMode.LOOK:
-            mouse_mode_string = "LOOK"
-        elif self.mouse_interaction == MouseMode.GRAB:
-            mouse_mode_string = "GRAB"
-        self.window_text.render(
-            f"""
-{self.fps} FPS
-Sensor Type: {sensor_type_string}
-Sensor Subtype: {sensor_subtype_string}
-Mouse Interaction Mode: {mouse_mode_string}
-            """
-        )
-        self.shader.draw(self.window_text.mesh)
+#         sensor_type_string = str(sensor_spec.sensor_type.name)
+#         sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
+#         if self.mouse_interaction == MouseMode.LOOK:
+#             mouse_mode_string = "LOOK"
+#         elif self.mouse_interaction == MouseMode.GRAB:
+#             mouse_mode_string = "GRAB"
+#         self.window_text.render(
+#             f"""
+# {self.fps} FPS
+# Sensor Type: {sensor_type_string}
+# Sensor Subtype: {sensor_subtype_string}
+# Mouse Interaction Mode: {mouse_mode_string}
+#             """
+#         )
+#         self.shader.draw(self.window_text.mesh)
 
-        # Disable blending for text
-        mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
+#         # Disable blending for text
+#         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
     def print_help_text(self) -> None:
         """
@@ -2212,6 +2198,8 @@ Key Commands:
 
         7. If no match or synonym is found, say you couldn't find the object and ask for more details.
         Example: "7. I couldn't find the object. Can you describe it or specify where it might be located?"
+
+        8. If the user conversates without asking for a room or object, respond in a friendly manner.
 
         Output format rule: Always respond in the format
         <rule number>. <response text>
@@ -2343,46 +2331,43 @@ class Timer:
 
 
 def get_goal_from_response(response: str) -> object:
-    match = re.match(r"^\s*(\d)\.\s*(.+)", response.strip())
-    if not match:
+    response_list = response.split(".", 1)
+    if len(response_list) < 2:
         raise ValueError(f"Invalid LLM response format: {response}")
-    rule_number = int(match.group(1))
-    content = match.group(2).strip()
+    rule_number = int(response_list[0].strip())
+    content = response_list[1].strip()
 
+    
     if rule_number == 1:
-        # Format: "room_name, object_name"
         try:
             room, obj = map(str.strip, content.split(",", 1))
             return {"type": "object_in_room", "room": room, "object": obj}
         except ValueError:
             raise ValueError(f"Rule 1: Expected format 'room, object'. Got: {content}")
-
     elif rule_number == 2:
         # Format: "room_name"
-        return {"type": "room_only", "room": content.strip()}
-
+        return {"type": "room_only", "room": content}
     elif rule_number == 3:
         # Object is ambiguous across rooms
         return {"type": "ambiguous_object_rooms", "message": content}
-
     elif rule_number == 4:
         # Room type is ambiguous
         return {"type": "ambiguous_room", "message": content}
-
     elif rule_number == 5:
         # Object repeated in one room only
-        return {"type": "object_in_single_room", "room": content.strip()}
-
+        return {"type": "object_in_single_room", "room": content}
     elif rule_number == 6:
         # Object repeated in specified room
-        return {"type": "object_repeated_in_room", "room": content.strip()}
-
+        return {"type": "object_repeated_in_room", "room": content}
     elif rule_number == 7:
         # No match found
         return {"type": "not_found", "message": content}
-
+    elif rule_number == 8:
+        # Friendly conversation
+        return {"type": "friendly_conversation", "message": content}
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
+
     
 
 def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue):
@@ -2401,32 +2386,22 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
                 response
             )  # * Handle response and distinguish cases
             print("Handled Response: ", goal_info)
+            response = response.split(".", 1)[1].strip() # Remove numbering from response for user display
+            res_type = goal_info["type"]
 
-            # Determine search target
-            if goal_info["type"] == "object_in_room":
+            if res_type == "object_in_room":
                 target_name = goal_info["object"]
                 room_name = goal_info["room"]
-            elif goal_info["type"] == "room_only":
+            elif res_type == "room_only" or res_type == "object_in_single_room" or res_type == "object_repeated_in_room":
                 target_name = None
                 room_name = goal_info["room"]
-            elif goal_info["type"] == "object_in_single_room":
-                target_name = None
-                room_name = goal_info["room"]
-            elif goal_info["type"] == "object_repeated_in_room":
-                target_name = None
-                room_name = goal_info["room"]
-            elif goal_info["type"] == "ambiguous_room":
+            elif res_type == "ambiguous_room" or res_type == "ambiguous_object_rooms" or res_type == "not_found" or res_type == "friendly_conversation":
                 print(goal_info["message"])
-                continue
-            elif goal_info["type"] == "ambiguous_object_rooms":
-                print(goal_info["message"])
-                continue
-            elif goal_info["type"] == "not_found":
-                print(goal_info["message"])
+                output_q.put(response)
                 continue
             else:
-                print(f"Unhandled goal type: {goal_info['type']}")
-                continue
+                print(f"Unhandled goal type: {res_type}")
+            
 
             # * === SANITY CHECK ===
             if not viewer.check_object_in_room(target_name, room_name):
@@ -2468,186 +2443,6 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
 
         except EOFError:
             break
-
-
-
-from PySide6.QtWidgets import QApplication
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QLineEdit, QPushButton
-from PySide6.QtCore import Qt, Slot, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat
-from html import escape
-import queue
-
-
-class ModernGui(QWidget):
-    """
-    Modern chat GUI styled like Apple iMessage (transparent bubbles).
-    - User messages: right aligned
-    - Assistant messages: left aligned
-    - Robust alignment via QTextBlockFormat (no HTML align)
-    """
-
-    def __init__(self, input_q: queue.Queue, output_q: queue.Queue, window_width: int):
-        super().__init__()
-        self.input_q = input_q
-        self.output_q = output_q
-
-        self.init_ui(window_width)
-        self.apply_style()
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.check_output_queue)
-        self.timer.start(100)
-
-    def init_ui(self, window_width: int):
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(10)
-
-        header_label = QLabel("Navigation Assistant Chat")
-        header_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        header_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(header_label)
-
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
-        self.log_area.setMinimumHeight(300)
-        main_layout.addWidget(self.log_area, 1)
-
-        input_layout = QHBoxLayout()
-        input_layout.setSpacing(10)
-
-        self.input_entry = QLineEdit()
-        self.input_entry.setPlaceholderText("Where would you like to go?")
-        self.input_entry.returnPressed.connect(self.submit_input)
-        input_layout.addWidget(self.input_entry, 1)
-
-        self.submit_button = QPushButton("Send")
-        self.submit_button.setCursor(Qt.PointingHandCursor)
-        self.submit_button.clicked.connect(self.submit_input)
-        input_layout.addWidget(self.submit_button)
-
-        main_layout.addLayout(input_layout)
-        self.setLayout(main_layout)
-        self.resize(window_width, 550)
-
-    def apply_style(self):
-        self.setStyleSheet("""
-            ModernGui {
-                background-color: #1E1E1E;
-                color: #E0E0E0;
-                font-family: "Segoe UI", Arial, sans-serif;
-            }
-            QLabel { color: #FFFFFF; }
-            QTextEdit {
-                background-color: #2A2A2A;
-                border-radius: 10px;
-                padding: 10px;
-                font-size: 11pt;
-            }
-            QLineEdit {
-                background-color: #333;
-                border: 1px solid #555;
-                border-radius: 20px;
-                padding: 10px 15px;
-                font-size: 11pt;
-                color: white;
-            }
-            QLineEdit:focus { border-color: #0A84FF; }
-            QPushButton {
-                background-color: #0A84FF;
-                border-radius: 20px;
-                padding: 10px 22px;
-                color: white;
-                font-weight: bold;
-                font-size: 11pt;
-            }
-            QPushButton:hover { background-color: #3AA0FF; }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 0px;
-            }
-
-            QScrollBar::handle:vertical {
-                background: #555;
-                border-radius: 4px;
-                min-height: 20px;
-            }
-
-            QScrollBar::handle:vertical:hover {
-                background: #777;
-            }
-
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {
-                background: none;
-            }
-
-        """)
-
-    # ---------- Helpers ----------
-    def _append_message(self, name_html: str, body_html: str, align: Qt.AlignmentFlag, color_css: str):
-        """Append a single chat message with robust paragraph alignment."""
-        cursor = self.log_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.log_area.setTextCursor(cursor)
-
-        # New paragraph with explicit alignment (this is the key fix)
-        block_fmt = QTextBlockFormat()
-        block_fmt.setAlignment(align)
-        block_fmt.setTopMargin(0)     # compact vertical spacing
-        block_fmt.setBottomMargin(3)
-        cursor.insertBlock(block_fmt)
-
-        # Transparent 'bubble' that sizes to content
-        html = (
-            f'<span style="display:inline-block; padding:6px 6px; '
-            f'border-radius:18px; font-size:11pt; color:{color_css}; '
-            f'max-width:70%; background:transparent; word-wrap:break-word;">'
-            f'{name_html}<br>{body_html}'
-            f'</span>'
-        )
-        cursor.insertHtml(html)
-
-        # Close with another block so next message starts clean
-        # cursor.insertBlock()
-        self.scroll_to_bottom()
-
-    # ---------- Slots ----------
-    @Slot()
-    def submit_input(self):
-        """Triggered when user presses Enter or clicks Send."""
-        text = self.input_entry.text().strip()
-        if not text:
-            return
-        self.input_q.put(text)
-
-        escaped = escape(text).replace("\n", "<br>")
-        self._append_message('<b style="font-size:9pt;">You</b>', escaped, Qt.AlignRight, "white")
-        self.input_entry.clear()
-
-    def check_output_queue(self):
-        """Poll assistant messages and append them."""
-        try:
-            while True:
-                msg = self.output_q.get_nowait()
-                escaped = escape(msg).replace("\n", "<br>")
-                self._append_message('<b style="font-size:9pt;">Assistant</b>', escaped, Qt.AlignLeft, "#E5E5EA")
-        except queue.Empty:
-            pass
-
-    def scroll_to_bottom(self):
-        self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
-
-
-def create_gui(input_q: queue.Queue, output_q: queue.Queue, window_width: int) -> QWidget:
-    return ModernGui(input_q, output_q, window_width)
 
 
 if __name__ == "__main__":
@@ -2748,7 +2543,7 @@ if __name__ == "__main__":
     # 1. Crea la GUI di Tkinter nel thread principale
     #    (ma non avviarla ancora con mainloop)
     q_app = QApplication(sys.argv or [])
-    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width)
+    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width//2, window_height=args.height)
     gui_window.show()
 
     viewer = HabitatSimInteractiveViewer(sim_settings, q_app=q_app)

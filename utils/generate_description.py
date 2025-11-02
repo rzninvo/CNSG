@@ -395,7 +395,8 @@ def build_prompt(
         "Write a single human-sounding description of the walk — fluent and easy to follow.",
         "You can mention positions like left/right, in front of, next to, behind.",
         "Prefer common, easily recognized landmarks like large furniture, doors, appliances, and windows. Avoid small, decorative, or rarely used objects like mats, lamps, or soap bottles.",
-        "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words.",
+        "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
+        "Avoid saying the object is not visible in the observation. Assume it is always visible in the last 1 or 2 observations.", # TODO added
         f"User question: {user_input}",
     ]
 
