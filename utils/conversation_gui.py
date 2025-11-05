@@ -4,6 +4,21 @@ from PySide6.QtCore import Qt, Slot, QTimer, QCoreApplication
 from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat, QTextCharFormat
 from html import escape
 import queue
+import threading
+
+# pip install PySide6
+# pip install SpeechRecognition
+# conda install -c conda-forge pyaudio
+# conda install -c conda-forge alsa-plugins jack speex
+
+# Optional speech recognition support
+try:
+    import speech_recognition as sr  # type: ignore
+    SR_AVAILABLE = True
+except Exception:
+    sr = None
+    print("Speech recognition support not available. Install SpeechRecognition and PyAudio for voice input.")
+    SR_AVAILABLE = False
 
 
 class ModernGui(QWidget):
@@ -18,9 +33,9 @@ class ModernGui(QWidget):
         super().__init__()
         self.input_q = input_q
         self.output_q = output_q
-        
-        # Variabile per tracciare il blocco (paragrafo) del loading
+        self.mic_q = queue.Queue()  
         self.loading_block_number = -1 
+
 
         self.init_ui(window_width, window_height)
         self.apply_style()
@@ -52,6 +67,23 @@ class ModernGui(QWidget):
         self.input_entry.setPlaceholderText("Where would you like to go?")
         self.input_entry.returnPressed.connect(self.submit_input)
         input_layout.addWidget(self.input_entry, 1)
+
+        # Microphone button for voice input
+        self.mic_button = QPushButton()
+        self.mic_button.setText("\U0001F3A4")
+        self.mic_button.setObjectName("micButton")
+        self.mic_button.setCursor(Qt.PointingHandCursor)
+        self.mic_button.setFixedSize(40, 40)
+        self.mic_button.setToolTip(
+            "Press and speak to enter a voice query"
+            if SR_AVAILABLE
+            else "Speech recognition not available (install SpeechRecognition/pyaudio)"
+        )
+        self.mic_button.clicked.connect(self._on_mic_clicked)
+        # Disable if speech recognition support is missing
+        if not SR_AVAILABLE:
+            self.mic_button.setEnabled(False)
+        input_layout.addWidget(self.mic_button)
 
         self.submit_button = QPushButton("Send")
         self.submit_button.setCursor(Qt.PointingHandCursor)
@@ -93,7 +125,9 @@ class ModernGui(QWidget):
                 font-weight: bold;
                 font-size: 11pt;
             }
+                         
             QPushButton:hover { background-color: #3AA0FF; }
+            
             QScrollBar:vertical {
                 background: transparent;
                 width: 8px;
@@ -118,6 +152,20 @@ class ModernGui(QWidget):
             QScrollBar::add-page:vertical,
             QScrollBar::sub-page:vertical {
                 background: none;
+            }
+                           
+            #micButton {
+                border-radius: 20px; /* Metà di 40px */
+                padding: 0px;        /* Remove problemcatic padding */
+                font-size: 16pt;     /* Makes the emoji bigger */
+                background-color: #333;
+                border: 1px solid #555;
+            }
+            #micButton:hover {
+                background-color: #555;
+            }
+            #micButton:pressed {
+                background-color: #0A84FF; 
             }
 
         """)
@@ -190,8 +238,12 @@ class ModernGui(QWidget):
             cursor.removeSelectedText()
 
         self.loading_block_number = -1 # Reset
-        # Forza un aggiornamento visivo
-        QCoreApplication.processEvents()
+        # Forza un aggiornamento visivo: assicurati che il GUI thread rinfreschi
+        try:
+            QCoreApplication.processEvents()
+        except Exception:
+            # If something goes wrong, silently continue
+            pass
 
 
     # ---------- Slots ----------
@@ -231,8 +283,119 @@ class ModernGui(QWidget):
         
         self._show_loading_indicator()
 
+    @Slot()
+    def _on_mic_clicked(self):
+        """Start background listening if SR is available."""
+        if not SR_AVAILABLE:
+            self._append_message(
+                '<b style="font-size:9pt;">System</b>',
+                escape("Speech recognition not available. Install SpeechRecognition and PyAudio."),
+                Qt.AlignLeft,
+                "#E5E5EA",
+            )
+            return
+
+        # Update UI state
+        self.mic_button.setEnabled(False)
+        try:
+            self.mic_button.setText("⏺️")
+        except Exception:
+            print("Error setting mic button text.")
+            pass
+        self.submit_button.setEnabled(False)
+        self.input_entry.setEnabled(False)
+
+        # Show small loading indicator in chat
+        self._show_loading_indicator()
+
+        # Launch recognition in background
+        t = threading.Thread(target=self._listen_worker, daemon=True)
+        t.start()
+        
+    def _listen_worker(self) -> None:
+        """Background worker that captures audio and performs speech recognition."""
+        if not SR_AVAILABLE:
+            # ERRORE: Metti il risultato nella coda
+            self.mic_q.put((False, "Speech recognition unavailable."))
+            return
+
+        print("[MicWorker] Thread started.")
+        recognizer = sr.Recognizer()
+        recognizer.pause_threshold = 1.5
+        try:
+            print("[MicWorker] Initializing Microphone...")
+            with sr.Microphone() as source:
+                # ... (adjust_for_ambient_noise)
+                print("[MicWorker] Adjusting for ambient noise (0.8s)...")
+                recognizer.adjust_for_ambient_noise(source, duration=0.8)
+                
+                print("[MicWorker] Listening... (max 12s)")
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=12)
+                print("[MicWorker] Audio captured. Recognizing...")
+
+            try:
+                text = recognizer.recognize_google(audio, language="it-IT")
+                print(f"[MicWorker] Recognition success: {text}")
+                # SUCCESSO: Metti il risultato nella coda
+                self.mic_q.put((True, text))
+
+            except Exception as e:
+                print(f"[MicWorker] Recognition error: {e}")
+                # ERRORE: Metti il risultato nella coda
+                msg = f"Errore di riconoscimento: {e}"
+                if hasattr(sr, "UnknownValueError") and isinstance(e, sr.UnknownValueError):
+                    msg = "Non ho capito. Puoi ripetere?"
+                elif hasattr(sr, "RequestError") and isinstance(e, sr.RequestError):
+                    msg = f"Servizio non disponibile: {e}"
+                
+                self.mic_q.put((False, msg))
+                return
+
+        except Exception as e:
+            print(f"[MicWorker] CRITICAL ERROR (Microphone?): {e}")
+            # ERRORE: Metti il risultato nella coda
+            self.mic_q.put((False, f"Errore microfono: {e}"))
+
+
+    def _on_recognition_result(self, success: bool, text: str) -> None:
+        """Handle the recognition result on the GUI thread."""
+        # remove listening indicator and restore buttons
+        self._remove_loading_indicator()
+        try:
+            self.mic_button.setEnabled(True)
+            # Reset visual pressed state and icon/text
+            try:
+                self.mic_button.setDown(False)
+            except Exception:
+                pass
+            self.mic_button.setText("🎤")
+        except Exception:
+            print("Error restoring mic button text.")
+            pass
+        self.submit_button.setEnabled(True)
+        self.input_entry.setEnabled(True)
+
+        # Ensure the UI refreshes immediately so the button and loading indicator
+        # don't visually remain stuck while other work happens.
+        try:
+            QCoreApplication.processEvents()
+        except Exception:
+            print("Error processing events after recognition.")
+            pass
+
+        if success:
+            # Put text into the input and submit as if the user typed it
+            self.input_entry.setText(text)
+            # Small delay so UI updates before submitting
+            QTimer.singleShot(50, self.submit_input)
+            # self.submit_input()
+        else:
+            # Show friendly system message in chat
+            self._append_message('<b style="font-size:9pt;">System</b>', escape(text).replace("\n", "<br>"), Qt.AlignLeft, "#E5E5EA")
+
     def check_output_queue(self):
         """Poll assistant messages and append them."""
+        # 1. Controlla i messaggi dell'assistente (come prima)
         try:
             while True:
                 msg = self.output_q.get_nowait()
@@ -241,6 +404,17 @@ class ModernGui(QWidget):
                 
                 escaped = escape(msg).replace("\n", "<br>")
                 self._append_message('<b style="font-size:9pt;">Assistant</b>', escaped, Qt.AlignLeft, "#E5E5EA")
+        except queue.Empty:
+            pass
+
+        # 2. AGGIUNGI QUESTO: Controlla i risultati del microfono
+        try:
+            while True:
+                # Prendi il risultato dalla coda
+                success, text = self.mic_q.get_nowait()
+                
+                # Chiama _on_recognition_result (ora siamo nel thread GUI, è sicuro)
+                self._on_recognition_result(success, text)
         except queue.Empty:
             pass
 
