@@ -2543,7 +2543,7 @@ if __name__ == "__main__":
     # 1. Crea la GUI di Tkinter nel thread principale
     #    (ma non avviarla ancora con mainloop)
     q_app = QApplication(sys.argv or [])
-    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width//2, window_height=args.height)
+    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width*3//5, window_height=args.height)
     gui_window.show()
 
     viewer = HabitatSimInteractiveViewer(sim_settings, q_app=q_app)
