@@ -403,7 +403,7 @@ class HabitatSimInteractiveViewer(Application):
             for s in range(1, n_steps + 1):
                 new_point = p0 + direction * step_size * s
                 new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 1: # NOTE removed
+        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3: # NOTE removed
             new_points.append(points[-1])
         return np.array(new_points)
 

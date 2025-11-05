@@ -201,6 +201,28 @@ class ModernGui(QWidget):
         text = self.input_entry.text().strip()
         if not text:
             return
+
+        # Special command: clear the chat window and pending assistant outputs
+        if text.lower() == "clear":
+            # Remove any loading indicator if present
+            self._remove_loading_indicator()
+
+            # Clear visible chat area
+            self.log_area.clear()
+
+            # Drain any pending assistant messages in the output queue to avoid
+            # them reappearing after a clear (they are considered stale)
+            try:
+                while True:
+                    self.output_q.get_nowait()
+            except queue.Empty:
+                pass
+
+            # Clear the input box and return (do not forward "clear" to logic thread)
+            self.input_entry.clear()
+            return
+
+        # Normal input: forward to logic thread and show user message + loading
         self.input_q.put(text)
 
         escaped = escape(text).replace("\n", "<br>")
