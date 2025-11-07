@@ -47,6 +47,12 @@ from habitat_sim.logging import LoggingContext, logger
 from habitat_sim.utils.common import quat_from_angle_axis
 from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
+
+# Try importing the base viewer.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "./")))
+from viewer import (HabitatSimInteractiveViewer as BaseViewer, MouseMode, MouseGrabber, Timer)
+
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from utils.generate_description import generate_path_description
 from utils.conversation_gui import *
@@ -68,247 +74,52 @@ except Exception as e:
     client = None
 
 
-def get_landmark_room_manually(user_input):
-    # Fallback function to get landmark/room information manually
-    res = re.findall(r'"(.*?)"', user_input.lower().strip())
-    return res[0] if len(res) > 0 else ""
-
-
-class HabitatSimInteractiveViewer(Application):
-    # the maximum number of chars displayable in the app window
-    # using the magnum text module. These chars are used to
-    # display the CPU/GPU usage data
-    MAX_DISPLAY_TEXT_CHARS = 256
-
-    # how much to displace window text relative to the center of the
-    # app window (e.g if you want the display text in the top left of
-    # the app window, you will displace the text
-    # window width * -TEXT_DELTA_FROM_CENTER in the x axis and
-    # window height * TEXT_DELTA_FROM_CENTER in the y axis, as the text
-    # position defaults to the middle of the app window)
-    TEXT_DELTA_FROM_CENTER = 0.49
-
-    # font size of the magnum in-window display text that displays
-    # CPU and GPU usage info
-    DISPLAY_FONT_SIZE = 16.0
+class NewViewer(BaseViewer):
+    MOVE, LOOK = 0.04, 1.5  # New definition for these two attributes
 
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
-
+        scene_path = sim_settings["scene"]
+        super().__init__(sim_settings)
         self.q_app = q_app
 
         self.cnt = 0
         self.action_queue = queue.Queue()
 
-        self.sim_settings: Dict[str:Any] = sim_settings
-        scene_path = self.sim_settings["scene"]
-
-        self.enable_batch_renderer: bool = self.sim_settings["enable_batch_renderer"]
-        self.num_env: int = (
-            self.sim_settings["num_environments"] if self.enable_batch_renderer else 1
-        )
-
-        # Compute environment camera resolution based on the number of environments to render in the window.
-        window_size: mn.Vector2 = (
-            self.sim_settings["window_width"],
-            self.sim_settings["window_height"],
-        )
-
-        configuration = self.Configuration()
-        configuration.title = "Habitat Sim Interactive Viewer"
-        configuration.size = window_size
-        Application.__init__(self, configuration)
-        self.fps: float = 60.0
-
-        # Compute environment camera resolution based on the number of environments to render in the window.
-        grid_size: mn.Vector2i = ReplayRenderer.environment_grid_size(self.num_env)
-        camera_resolution: mn.Vector2 = mn.Vector2(self.framebuffer_size) / mn.Vector2(
-            grid_size
-        )
-        self.sim_settings["width"] = camera_resolution[0]
-        self.sim_settings["height"] = camera_resolution[1]
-
-        # draw Bullet debug line visualizations (e.g. collision meshes)
-        self.debug_bullet_draw = False
-        # draw active contact point debug line visualizations
-        self.contact_debug_draw = False
-        # draw semantic region debug visualizations if present
-        self.semantic_region_debug_draw = False
         # draw object bounding boxes when enabled
         self.show_object_bboxes = False
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
 
-        # cache most recently loaded URDF file for quick-reload
-        self.cached_urdf = ""
-
-        # set up our movement map
-
-        key = Application.Key
-        self.pressed = {
-            key.UP: False,
-            key.DOWN: False,
-            key.LEFT: False,
-            key.RIGHT: False,
-            key.A: False,
-            key.D: False,
-            key.S: False,
-            key.W: False,
-            key.X: False,
-            key.Z: False,
-        }
-
-        # set up our movement key bindings map
-        self.key_to_action = {
-            key.UP: "look_up",
-            key.DOWN: "look_down",
-            key.LEFT: "turn_left",
-            key.RIGHT: "turn_right",
-            key.A: "move_left",
-            key.D: "move_right",
-            key.S: "move_backward",
-            key.W: "move_forward",
-            key.X: "move_down",
-            key.Z: "move_up",
-        }
-
-        # Load a TrueTypeFont plugin and open the font file
-        self.display_font = text.FontManager().load_and_instantiate("TrueTypeFont")
-        relative_path_to_font = "../data/fonts/ProggyClean.ttf"
-        self.display_font.open_file(
-            os.path.join(os.path.dirname(__file__), relative_path_to_font),
-            13,
-        )
-
-        # Glyphs we need to render everything
-        self.glyph_cache = text.GlyphCacheGL(
-            mn.PixelFormat.R8_UNORM, mn.Vector2i(256), mn.Vector2i(1)
-        )
-        self.display_font.fill_glyph_cache(
-            self.glyph_cache,
-            string.ascii_lowercase
-            + string.ascii_uppercase
-            + string.digits
-            + ":-_+,.! %µ",
-        )
-
-        # magnum text object that displays CPU/GPU usage data in the app window
-        self.window_text = text.Renderer2D(
-            self.display_font,
-            self.glyph_cache,
-            HabitatSimInteractiveViewer.DISPLAY_FONT_SIZE,
-            text.Alignment.TOP_LEFT,
-        )
-        self.window_text.reserve(HabitatSimInteractiveViewer.MAX_DISPLAY_TEXT_CHARS)
-
-        # text object transform in window space is Projection matrix times Translation Matrix
-        # put text in top left of window
-        self.window_text_transform = mn.Matrix3.projection(
-            self.framebuffer_size
-        ) @ mn.Matrix3.translation(
-            mn.Vector2(self.framebuffer_size)
-            * mn.Vector2(
-                -HabitatSimInteractiveViewer.TEXT_DELTA_FROM_CENTER,
-                HabitatSimInteractiveViewer.TEXT_DELTA_FROM_CENTER,
-            )
-        )
-        self.shader = shaders.VectorGL2D()
-
-        # Set blend function
-        mn.gl.Renderer.set_blend_equation(
-            mn.gl.Renderer.BlendEquation.ADD, mn.gl.Renderer.BlendEquation.ADD
-        )
-
-        # variables that track app data and CPU/GPU usage
-        self.num_frames_to_track = 60
-
-        # Cycle mouse utilities
-        self.mouse_interaction = MouseMode.LOOK
-        self.mouse_grabber: Optional[MouseGrabber] = None
-        self.previous_mouse_point = None
-
-        # toggle physics simulation on/off
-        self.simulating = True
-
-        # toggle a single simulation step at the next opportunity if not
-        # simulating continuously.
-        self.simulate_single_step = False
-
-        # configure our simulator
-        self.cfg: Optional[habitat_sim.simulator.Configuration] = None
-        self.sim: Optional[habitat_sim.simulator.Simulator] = None
-        self.tiled_sims: list[habitat_sim.simulator.Simulator] = None
-        self.replay_renderer_cfg: Optional[ReplayRendererConfiguration] = None
-        self.replay_renderer: Optional[ReplayRenderer] = None
-        self.reconfigure_sim()
-        self.debug_semantic_colors = {}
-
-        # compute NavMesh if not already loaded by the scene.
-        if (
-            not self.sim.pathfinder.is_loaded
-            and self.cfg.sim_cfg.scene_id.lower() != "none"
-        ):
-            self.navmesh_config_and_recompute()
-
-        self.time_since_last_simulation = 0.0
-        LoggingContext.reinitialize_from_env()
-        logger.setLevel("INFO")
-        self.print_help_text()
-
-        #########################################
         self.map_room_id_to_name = {}
         self.room_objects_occurences = {}
 
-        if True:
-            base_path = os.path.dirname(scene_path)
-            scene_name = os.path.splitext(os.path.basename(scene_path))[0]
-            semantic_path = os.path.join(
-                base_path, f"{scene_name.split('.')[0]}.semantic.txt"
-            )
-            map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
-            # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
+        base_path = os.path.dirname(scene_path)
+        scene_name = os.path.splitext(os.path.basename(scene_path))[0]
+        semantic_path = os.path.join(
+            base_path, f"{scene_name.split('.')[0]}.semantic.txt"
+        )
+        map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+        # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
 
-            print(f"Base path: {base_path}")
-            print(f"Semantic path: {semantic_path}")
-            print(f"Map file path: {map_file_path}")
-            # print(f"Room-object occurences file path: {room_object_file_path}")
+        print(f"Base path: {base_path}")
+        print(f"Semantic path: {semantic_path}")
+        print(f"Map file path: {map_file_path}")
+        # print(f"Room-object occurences file path: {room_object_file_path}")
 
-            if os.path.exists(map_file_path):
-                with open(map_file_path, "r", encoding="utf-8") as f:
-                    self.map_room_id_to_name = json.load(f)
-            else:
-                raise FileNotFoundError(f"Map file not found: {map_file_path}")
+        if os.path.exists(map_file_path):
+            with open(map_file_path, "r", encoding="utf-8") as f:
+                self.map_room_id_to_name = json.load(f)
+        else:
+            raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
-            ignore_categories = [
-                "ceiling",
-                "floor",
-                "wall",
-                "handle",
-                "window frame",
-                "door frame",
-                "frame",
-                "unknown",
-                "stairs",
-                "staircase",
-                "stair",
-                "stairway",
-            ]
-            semantic_info = self.get_semantic_info(
-                semantic_path,
-                map_room_id_to_name=self.map_room_id_to_name,
-                ignore_categories=ignore_categories,
-            )
+        ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", "stairs", "staircase", "stair", "stairway"]
+        semantic_info = self.get_semantic_info(
+            semantic_path,
+            map_room_id_to_name=self.map_room_id_to_name,
+            ignore_categories=ignore_categories,
+        )
 
-            self.room_objects_occurences = semantic_info
-            # print("\nSemantic information of the scene:")
-            # print(semantic_info)
-
-            # self.print_scene_semantic_info()
-
-            # Demonstrate shortest path functionality
-            # dummy_goal = mn.Vector3(-1.6096749, 3.163378, -7.154511)
-            # self.shortest_path(self.sim, dummy_goal)
-
-        ###########################################
+        self.room_objects_occurences = semantic_info
 
     def _process_queued_actions(self):
         """Execute actions enqueued from other threads."""
@@ -341,24 +152,18 @@ class HabitatSimInteractiveViewer(Application):
         # plt.show(block=False)
 
         self.topdown_map_counter = getattr(self, "topdown_map_counter", 0)
-        plt.savefig(
-            f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight"
-        )
+        plt.savefig(f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight")
         self.topdown_map_counter += 1
         plt.close()
         # logger.info(f"Saved: output/topdown_map.png")
 
-    def display_sample(
-        self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])
-    ):
+    def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
 
         arr = [rgb_img]
         titles = ["rgb"]
         if semantic_obs.size != 0:
-            semantic_img = Image.new(
-                "P", (semantic_obs.shape[1], semantic_obs.shape[0])
-            )
+            semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
             semantic_img.putpalette(d3_40_colors_rgb.flatten())
             semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
             semantic_img = semantic_img.convert("RGBA")
@@ -366,9 +171,7 @@ class HabitatSimInteractiveViewer(Application):
             titles.append("semantic")
 
         if depth_obs.size != 0:
-            depth_img = Image.fromarray(
-                (depth_obs / 10 * 255).astype(np.uint8), mode="L"
-            )
+            depth_img = Image.fromarray((depth_obs / 10 * 255).astype(np.uint8), mode="L")
             arr.append(depth_img)
             titles.append("depth")
 
@@ -402,10 +205,7 @@ class HabitatSimInteractiveViewer(Application):
             dist = np.linalg.norm(segment)
             if dist == 0:
                 continue
-            if (
-                dist <= step_size
-                and np.linalg.norm(new_points[-1] - p1) > min_step_size
-            ):
+            if (dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size):
                 new_points.append(p1)
                 continue
             direction = segment / dist
@@ -450,9 +250,7 @@ class HabitatSimInteractiveViewer(Application):
         returns a dict of visible objects and spatial relations between them.
         """
         if "semantic_sensor" not in observations:
-            logger.warning(
-                "No semantic sensor found; skipping visible object extraction."
-            )
+            logger.warning("No semantic sensor found; skipping visible object extraction.")
             return None
 
         semantic = observations["semantic_sensor"]
@@ -469,9 +267,7 @@ class HabitatSimInteractiveViewer(Application):
             except IndexError:
                 continue
 
-            label = (
-                obj.category.name() if obj.category is not None else f"object_{obj_id}"
-            )
+            label = (obj.category.name() if obj.category is not None else f"object_{obj_id}")
             # Prefer oriented bounding box if available
             obb = getattr(obj, "obb", None)
             if obb is not None:
@@ -493,10 +289,7 @@ class HabitatSimInteractiveViewer(Application):
                     mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
                     mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
                 ]
-                corners_world = [
-                    rotation.transform_vector(offset) + center
-                    for offset in corner_offsets
-                ]
+                corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
                 bbox_world = [
                     [
@@ -548,9 +341,7 @@ class HabitatSimInteractiveViewer(Application):
 
         print(f"[DEBUG] Visible Objects (size): ")
         for obj_id, obj_data in visible_objects.items():
-            print(
-                f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m"
-            )
+            print(f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m")
 
         # Compute spatial relations
         relations = self.compute_spatial_relations(visible_objects)
@@ -560,14 +351,7 @@ class HabitatSimInteractiveViewer(Application):
             "spatial_relations": relations,
         }
 
-    def compute_spatial_relations(
-        self,
-        visible_objects,
-        max_distance=1.5,
-        vertical_thresh=0.25,
-        horizontal_bias=1.2,
-        size_ratio_thresh=3.0,
-    ):
+    def compute_spatial_relations(self, visible_objects, max_distance=1.5, vertical_thresh=0.25, horizontal_bias=1.2, size_ratio_thresh=3.0):
         """
         Compute spatial relations between nearby objects, filtering out irrelevant ones.
         - Ignora relazioni tra oggetti con scala troppo diversa
@@ -586,19 +370,10 @@ class HabitatSimInteractiveViewer(Application):
                 "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
             },
             "door": {
-                "allowed": [
-                    "on_top_of",
-                    "left_of",
-                    "right_of",
-                    "in_front_of",
-                ],
+                "allowed": ["on_top_of", "left_of", "right_of", "in_front_of"],
             },
             "window": {
-                "allowed": [
-                    "on_top_of",
-                    "left_of",
-                    "right_of",
-                ],
+                "allowed": [ "on_top_of", "left_of", "right_of"],
             },
             "ceiling": {
                 "allowed": ["beneath_of"],
@@ -658,10 +433,7 @@ class HabitatSimInteractiveViewer(Application):
 
                 # Calcola la relazione dominante
                 rel_ab = None
-                if (
-                    abs_dy > vertical_thresh
-                    and abs_dy > (abs_dx + abs_dz) / horizontal_bias
-                ):
+                if (abs_dy > vertical_thresh and abs_dy > (abs_dx + abs_dz) / horizontal_bias):
                     rel_ab = "on_top_of" if dy > 0 else "beneath_of"
                 elif abs_dx > abs_dz:
                     rel_ab = "left_of" if dx > 0 else "right_of"
@@ -684,7 +456,7 @@ class HabitatSimInteractiveViewer(Application):
 
         return relations
 
-    def compute_object_size(obj_entry: dict[str, any]) -> float:
+    def compute_object_size(self, obj_entry: dict[str, any]) -> float:
         """
         Return approximate linear size (in meters) of an object based on its bounding box.
         Works with bbox_world from extract_visible_objects.
@@ -701,15 +473,7 @@ class HabitatSimInteractiveViewer(Application):
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
         l = label.strip().lower()
-        if l in {
-            "wall",
-            "ceiling",
-            "floor",
-            "window frame",
-            "door frame",
-            "frame",
-            "unknown",
-        }:
+        if l in {"wall", "ceiling", "floor", "window frame", "door frame", "frame", "unknown"}:
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
@@ -720,14 +484,7 @@ class HabitatSimInteractiveViewer(Application):
 
         return l
 
-    def _is_informative(
-        self,
-        label_norm: str,
-        *,
-        mode: str = "blacklist",
-        blacklist=None,
-        whitelist=None,
-    ) -> bool:
+    def _is_informative(self, label_norm: str, *, mode: str = "blacklist", blacklist=None, whitelist=None) -> bool:
         """
         mode="blacklist": keep everything except the blacklist
         mode="whitelist": keep only the whitelist
@@ -735,41 +492,10 @@ class HabitatSimInteractiveViewer(Application):
         if mode not in {"blacklist", "whitelist"}:
             mode = "blacklist"
         if mode == "blacklist":
-            blacklist = set(
-                blacklist
-                or [
-                    "wall",
-                    "floor",
-                    "ceiling",
-                    "frame",
-                    "window frame",
-                    "unknown",
-                    "ceiling_light",
-                    "light",
-                    "lamp",
-                ]
-            )
+            blacklist = set(blacklist or ["wall", "floor", "ceiling", "frame", "window frame", "unknown", "ceiling_light", "light", "lamp"])
             return label_norm not in blacklist
         else:
-            whitelist = set(
-                whitelist
-                or [
-                    "doorway",
-                    "staircase",
-                    "elevator",
-                    "escalator",
-                    "corridor",
-                    "intersection",
-                    "railing",
-                    "exit_sign",
-                    "sign",
-                    "sofa",
-                    "table",
-                    "wardrobe",
-                    "balcony",
-                    "bridge",
-                ]
-            )
+            whitelist = set(whitelist or ["doorway", "staircase", "elevator", "escalator", "corridor", "intersection", "railing", "exit_sign", "sign", "sofa", "table", "wardrobe", "balcony", "bridge"])
             return label_norm in whitelist
 
     def _xy_dist(self, a, b):
@@ -803,46 +529,28 @@ class HabitatSimInteractiveViewer(Application):
         clusters = []  # each: dict like instances, aggregated
 
         # Sort big to small so large areas seed clusters
-        instances_sorted = sorted(
-            instances, key=lambda x: x["pixel_count"], reverse=True
-        )
+        instances_sorted = sorted(instances, key=lambda x: x["pixel_count"], reverse=True)
 
         for inst in instances_sorted:
             assigned = False
             for cl in clusters:
-                if (
-                    self._xy_dist(inst["centroid_world"], cl["centroid_world"])
-                    <= distance_thresh
-                ):
+                if (self._xy_dist(inst["centroid_world"], cl["centroid_world"]) <= distance_thresh):
                     # merge into cluster (weighted by pixel_count)
                     w_old = cl["pixel_count"]
                     w_new = inst["pixel_count"]
                     w_sum = w_old + w_new
 
                     # weighted centroid (world)
-                    cx = (
-                        cl["centroid_world"][0] * w_old
-                        + inst["centroid_world"][0] * w_new
-                    ) / w_sum
-                    cy = (
-                        cl["centroid_world"][1] * w_old
-                        + inst["centroid_world"][1] * w_new
-                    ) / w_sum
-                    cz = (
-                        cl["centroid_world"][2] * w_old
-                        + inst["centroid_world"][2] * w_new
-                    ) / w_sum
+                    cx = (cl["centroid_world"][0] * w_old + inst["centroid_world"][0] * w_new) / w_sum
+                    cy = (cl["centroid_world"][1] * w_old + inst["centroid_world"][1] * w_new) / w_sum
+                    cz = (cl["centroid_world"][2] * w_old + inst["centroid_world"][2] * w_new) / w_sum
                     cl["centroid_world"] = [cx, cy, cz]
 
                     # choose min distance to camera (useful for narration)
-                    cl["distance_from_camera"] = min(
-                        cl["distance_from_camera"], inst["distance_from_camera"]
-                    )
+                    cl["distance_from_camera"] = min(cl["distance_from_camera"], inst["distance_from_camera"])
 
                     # union bbox
-                    cl["bbox_world"] = self._merge_aabbs(
-                        cl["bbox_world"], inst["bbox_world"]
-                    )
+                    cl["bbox_world"] = self._merge_aabbs(cl["bbox_world"], inst["bbox_world"])
 
                     # accumulate pixels
                     cl["pixel_count"] = w_sum
@@ -863,18 +571,7 @@ class HabitatSimInteractiveViewer(Application):
 
         return clusters
 
-    def postprocess_visible_objects(
-        self,
-        visible_objects: dict,
-        *,
-        pixel_percent_min=0.02,
-        mode="blacklist",
-        blacklist=None,
-        whitelist=None,
-        per_label_cluster_thresh_m=1.0,
-        top_k_per_label=None,
-        recompute_relations=True,
-    ):
+    def postprocess_visible_objects(self, visible_objects: dict, *, pixel_percent_min=0.02, mode="blacklist", blacklist=None, whitelist=None, per_label_cluster_thresh_m=1.0, top_k_per_label=None, recompute_relations=True):
         """
         - visible_objects: the dict produced by extract_visible_objects()["visible_objects"]
         Returns:
@@ -887,9 +584,7 @@ class HabitatSimInteractiveViewer(Application):
         buckets = {}  # label_norm -> list[instance]
         for raw_id, inst in visible_objects.items():
             label_norm = self._normalize_label(inst["label"])
-            if not self._is_informative(
-                label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist
-            ):
+            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
                 continue
             if inst.get("pixel_percent", 0.0) < pixel_percent_min:
                 continue
@@ -912,15 +607,11 @@ class HabitatSimInteractiveViewer(Application):
         # 2) Clustering per label
         dedup_list = []
         for label_norm, insts in buckets.items():
-            clusters = self._cluster_same_label(
-                insts, distance_thresh=per_label_cluster_thresh_m
-            )
+            clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
 
             # (opzionale) top-K cluster per label
             if top_k_per_label is not None and len(clusters) > top_k_per_label:
-                clusters = sorted(
-                    clusters, key=lambda x: x["pixel_count"], reverse=True
-                )[:top_k_per_label]
+                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
 
             dedup_list.extend(clusters)
 
@@ -943,11 +634,7 @@ class HabitatSimInteractiveViewer(Application):
                     if sz > 0:
                         sizes.append(sz)
                         weights.append(float(v.get("pixel_count", 1)))
-                cluster_linear_size = (
-                    float(np.average(sizes, weights=weights))
-                    if sizes
-                    else float(cl.get("linear_size", 0.0))
-                )
+                cluster_linear_size = (float(np.average(sizes, weights=weights)) if sizes else float(cl.get("linear_size", 0.0)))
             else:
                 cluster_linear_size = float(cl.get("linear_size", 0.0))
 
@@ -964,21 +651,10 @@ class HabitatSimInteractiveViewer(Application):
             }
 
         # 4) Relazioni ricalcolate sul set deduplicato
-        relations = (
-            self.compute_spatial_relations(objects) if recompute_relations else []
-        )
+        relations = (self.compute_spatial_relations(objects) if recompute_relations else [])
 
         # 5) Ordinamento: salienza primaria pixel_count, secondaria grandezza
-        objects = dict(
-            sorted(
-                objects.items(),
-                key=lambda item: (
-                    item[1]["pixel_count"],
-                    item[1].get("linear_size", 0.0),
-                ),
-                reverse=True,
-            )
-        )
+        objects = dict(sorted(objects.items(), key=lambda item: (item[1]["pixel_count"], item[1].get("linear_size", 0.0),), reverse=True))
 
         return {"objects": objects, "spatial_relations": relations}
 
@@ -1018,37 +694,18 @@ class HabitatSimInteractiveViewer(Application):
                     meters_per_pixel = 0.025
                     height = sim.scene_aabb.y().min
 
-                    top_down_map = maps.get_topdown_map(
-                        sim.pathfinder, height, meters_per_pixel=meters_per_pixel
-                    )
-                    recolor_map = np.array(
-                        [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
-                    )
+                    top_down_map = maps.get_topdown_map(sim.pathfinder, height, meters_per_pixel=meters_per_pixel)
+                    recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8)
                     top_down_map = recolor_map[top_down_map]
                     grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
                     # convert world trajectory points to maps module grid points
-                    trajectory = [
-                        maps.to_grid(
-                            path_point[2],
-                            path_point[0],
-                            grid_dimensions,
-                            pathfinder=sim.pathfinder,
-                        )
-                        for path_point in path_points
-                    ]
-                    grid_tangent = mn.Vector2(
-                        trajectory[1][1] - trajectory[0][1],
-                        trajectory[1][0] - trajectory[0][0],
-                    )
+                    trajectory = [maps.to_grid(path_point[2], path_point[0], grid_dimensions, pathfinder=sim.pathfinder) for path_point in path_points]
+                    grid_tangent = mn.Vector2(trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0],)
                     path_initial_tangent = grid_tangent / grid_tangent.length()
-                    initial_angle = math.atan2(
-                        path_initial_tangent[0], path_initial_tangent[1]
-                    )
+                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
                     # draw the agent and trajectory on the map
                     maps.draw_path(top_down_map, trajectory)
-                    maps.draw_agent(
-                        top_down_map, trajectory[0], initial_angle, agent_radius_px=8
-                    )
+                    maps.draw_agent(top_down_map, trajectory[0], initial_angle, agent_radius_px=8)
                     # print("\nDisplay the map with agent and path overlay:")
                     self.display_map(top_down_map)
 
@@ -1062,15 +719,9 @@ class HabitatSimInteractiveViewer(Application):
                         if ix < len(path_points) - 1:
                             tangent = path_points[ix + 1] - point
                             agent_state.position = point
-                            tangent_orientation_matrix = mn.Matrix4.look_at(
-                                point, point + tangent, np.array([0, 1.0, 0])
-                            )
-                            tangent_orientation_q = mn.Quaternion.from_matrix(
-                                tangent_orientation_matrix.rotation()
-                            )
-                            agent_state.rotation = utils.quat_from_magnum(
-                                tangent_orientation_q
-                            )
+                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0, 1.0, 0]))
+                            tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
+                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
 
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
@@ -1086,16 +737,12 @@ class HabitatSimInteractiveViewer(Application):
                                 if save_images:
                                     # Save RGB/semantic preview as before
                                     if semantic is not None:
-                                        self.display_sample(
-                                            rgb_obs=rgb, semantic_obs=semantic
-                                        )
+                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
                                     else:
                                         self.display_sample(rgb_obs=rgb)
 
                                 # Extract visible objects + relations
-                                frame_meta = self.extract_visible_objects(
-                                    sim, observations
-                                )
+                                frame_meta = self.extract_visible_objects(sim, observations)
                                 if frame_meta is not None:
                                     dedup = self.postprocess_visible_objects(
                                         frame_meta["visible_objects"],
@@ -1112,9 +759,7 @@ class HabitatSimInteractiveViewer(Application):
                                         .sensor_states["color_sensor"]
                                     )
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
-                                    T_world_sensor = mn.Matrix4.from_(
-                                        rot_mn.to_matrix(), sensor_state.position
-                                    )
+                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
 
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
@@ -1127,9 +772,7 @@ class HabitatSimInteractiveViewer(Application):
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                        print(
-                                            f"✅ Saved metadata: output/frame_{ix:06d}.json"
-                                        )
+                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
 
@@ -1141,80 +784,23 @@ class HabitatSimInteractiveViewer(Application):
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
         if scene is not None:
-            print(
-                f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects"
-            )
+            print(f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects")
 
             for region in scene.regions:
                 print(f"\nRegion id:{region.id}" f" center:{region.aabb.center}")
                 for obj in region.objects:
-                    print(
-                        f"\tObject id:{obj.id}, category:{obj.category.name()},"
-                        f" center:{self.compute_xyz_center(obj.aabb)}"
-                    )
+                    print(f"\tObject id:{obj.id}, category:{obj.category.name()}," f" center:{self.compute_xyz_center(obj.aabb)}")
 
     def compute_xyz_center(self, obj_aabb):
         # ottieni i vertici min e max dell'AABB
-        vmin = (
-            obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min
-        )
-        vmax = (
-            obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max
-        )
+        vmin = (obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min)
+        vmax = (obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max)
 
         # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
         cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
         cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
         cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
         return cx, cy, cz
-
-    def draw_contact_debug(self, debug_line_render: Any):
-        """
-        This method is called to render a debug line overlay displaying active contact points and normals.
-        Yellow lines show the contact distance along the normal and red lines show the contact normal at a fixed length.
-        """
-        yellow = mn.Color4.yellow()
-        red = mn.Color4.red()
-        cps = self.sim.get_physics_contact_points()
-        debug_line_render.set_line_width(1.5)
-        camera_position = self.render_camera.render_camera.node.absolute_translation
-        # only showing active contacts
-        active_contacts = (x for x in cps if x.is_active)
-        for cp in active_contacts:
-            # red shows the contact distance
-            debug_line_render.draw_transformed_line(
-                cp.position_on_b_in_ws,
-                cp.position_on_b_in_ws
-                + cp.contact_normal_on_b_in_ws * -cp.contact_distance,
-                red,
-            )
-            # yellow shows the contact normal at a fixed length for visualization
-            debug_line_render.draw_transformed_line(
-                cp.position_on_b_in_ws,
-                # + cp.contact_normal_on_b_in_ws * cp.contact_distance,
-                cp.position_on_b_in_ws + cp.contact_normal_on_b_in_ws * 0.1,
-                yellow,
-            )
-            debug_line_render.draw_circle(
-                translation=cp.position_on_b_in_ws,
-                radius=0.005,
-                color=yellow,
-                normal=camera_position - cp.position_on_b_in_ws,
-            )
-
-    def draw_region_debug(self, debug_line_render: Any) -> None:
-        """
-        Draw the semantic region wireframes.
-        """
-
-        for region in self.sim.semantic_scene.regions:
-            color = self.debug_semantic_colors.get(region.id, mn.Color4.magenta())
-            for edge in region.volume_edges:
-                debug_line_render.draw_transformed_line(
-                    edge[0],
-                    edge[1],
-                    color,
-                )
 
     def _get_bbox_color(self, obj_id: int) -> mn.Color4:
         """
@@ -1275,18 +861,11 @@ class HabitatSimInteractiveViewer(Application):
             if not label:
                 continue
 
-            label_renderer = text.Renderer2D(
-                self.display_font,
-                self.glyph_cache,
-                HabitatSimInteractiveViewer.DISPLAY_FONT_SIZE,
-                text.Alignment.TOP_CENTER,
-            )
+            label_renderer = text.Renderer2D(self.display_font, self.glyph_cache, BaseViewer.DISPLAY_FONT_SIZE, text.Alignment.TOP_CENTER)
             label_renderer.reserve(len(label))
             label_renderer.render(label)
 
-            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(
-                screen_pos
-            )
+            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(screen_pos)
             self.shader.transformation_projection_matrix = transform
             self.shader.color = mn.Color4(1.0, 1.0, 1.0, 1.0)
             self.shader.draw(label_renderer.mesh)
@@ -1340,57 +919,24 @@ class HabitatSimInteractiveViewer(Application):
                 mn.Vector3(-half_extents[0], half_extents[1], half_extents[2]),
                 mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
             ]
-            corners = [
-                rotation.transform_vector(offset) + center for offset in corner_offsets
-            ]
+            corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            candidates.append(
-                (volume, obj.id, label, corners, center, rotation, half_extents)
-            )
+            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
 
-        edges = [
-            (0, 1),
-            (0, 2),
-            (0, 4),
-            (1, 3),
-            (1, 5),
-            (2, 3),
-            (2, 6),
-            (3, 7),
-            (4, 5),
-            (4, 6),
-            (5, 7),
-            (6, 7),
-        ]
+        edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
 
-        for (
-            volume,
-            obj_id,
-            label,
-            corners,
-            center,
-            rotation,
-            half_extents,
-        ) in candidates[:max_boxes]:
+        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
             color = self._get_bbox_color(obj_id)
 
             for edge in edges:
                 start = corners[edge[0]]
                 end = corners[edge[1]]
-                debug_line_render.draw_transformed_line(
-                    start,
-                    end,
-                    color,
-                )
+                debug_line_render.draw_transformed_line(start, end, color)
 
-            top_center = (
-                center
-                + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0))
-                + mn.Vector3(0.0, 0.05, 0.0)
-            )
+            top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
             screen_pos = self._project_to_screen(top_center)
             if screen_pos is not None:
                 self._bbox_label_screen_positions.append((label, screen_pos))
@@ -1399,33 +945,13 @@ class HabitatSimInteractiveViewer(Application):
         """
         Additional draw commands to be called during draw_event.
         """
-        if self.debug_bullet_draw:
-            render_cam = self.render_camera.render_camera
-            proj_mat = render_cam.projection_matrix.__matmul__(render_cam.camera_matrix)
-            self.sim.physics_debug_draw(proj_mat)
-
-        debug_line_render = self.sim.get_debug_line_render()
-        if self.contact_debug_draw:
-            self.draw_contact_debug(debug_line_render)
-
-        if self.semantic_region_debug_draw:
-            if len(self.debug_semantic_colors) != len(self.sim.semantic_scene.regions):
-                for region in self.sim.semantic_scene.regions:
-                    self.debug_semantic_colors[region.id] = mn.Color4(
-                        mn.Vector3(np.random.random(3))
-                    )
-            self.draw_region_debug(debug_line_render)
+        super().debug_draw()
         if self.show_object_bboxes:
-            self._draw_object_bboxes(debug_line_render)
+            self._draw_object_bboxes(self.debug_line_render)
         else:
             self._bbox_label_screen_positions.clear()
 
-    def draw_event(
-        self,
-        simulation_call: Optional[Callable] = None,
-        global_call: Optional[Callable] = None,
-        active_agent_id_and_sensor_name: Tuple[int, str] = (0, "color_sensor"),
-    ) -> None:
+    def draw_event(self, simulation_call: Optional[Callable] = None, global_call: Optional[Callable] = None, active_agent_id_and_sensor_name: Tuple[int, str] = (0, "color_sensor")) -> None:
         """
         Calls continuously to re-render frames and swap the two frame buffers
         at a fixed rate.
@@ -1435,9 +961,7 @@ class HabitatSimInteractiveViewer(Application):
 
         agent_acts_per_sec = self.fps
 
-        mn.gl.default_framebuffer.clear(
-            mn.gl.FramebufferClear.COLOR | mn.gl.FramebufferClear.DEPTH
-        )
+        mn.gl.default_framebuffer.clear(mn.gl.FramebufferClear.COLOR | mn.gl.FramebufferClear.DEPTH)
 
         # Agent actions should occur at a fixed rate per second
         self.time_since_last_simulation += Timer.prev_frame_duration
@@ -1455,9 +979,7 @@ class HabitatSimInteractiveViewer(Application):
                 global_call()
 
             # reset time_since_last_simulation, accounting for potential overflow
-            self.time_since_last_simulation = math.fmod(
-                self.time_since_last_simulation, 1.0 / self.fps
-            )
+            self.time_since_last_simulation = math.fmod(self.time_since_last_simulation, 1.0 / self.fps)
 
         if self.enable_batch_renderer:
             self.render_batch()
@@ -1474,11 +996,7 @@ class HabitatSimInteractiveViewer(Application):
                         for sensor in agent_sensors:
                             spec_fn = getattr(sensor, "specification", None)
                             spec = spec_fn() if callable(spec_fn) else None
-                            if (
-                                spec is not None
-                                and getattr(spec, "sensor_type", None)
-                                == habitat_sim.SensorType.COLOR
-                            ):
+                            if (spec is not None and getattr(spec, "sensor_type", None) == habitat_sim.SensorType.COLOR):
                                 color_sensor = sensor
                                 break
             if color_sensor is None:
@@ -1499,176 +1017,15 @@ class HabitatSimInteractiveViewer(Application):
         Timer.next_frame()
         self.redraw()
 
-    def default_agent_config(self) -> habitat_sim.agent.AgentConfiguration:
-        """
-        Set up our own agent and agent controls
-        """
-        make_action_spec = habitat_sim.agent.ActionSpec
-        make_actuation_spec = habitat_sim.agent.ActuationSpec
-        MOVE, LOOK = 0.04, 1.5  # TODO modified: originally 0.07, 1.5
-
-        # all of our possible actions' names
-        action_list = [
-            "move_left",
-            "turn_left",
-            "move_right",
-            "turn_right",
-            "move_backward",
-            "look_up",
-            "move_forward",
-            "look_down",
-            "move_down",
-            "move_up",
-        ]
-
-        action_space: Dict[str, habitat_sim.agent.ActionSpec] = {}
-
-        # build our action space map
-        for action in action_list:
-            actuation_spec_amt = MOVE if "move" in action else LOOK
-            action_spec = make_action_spec(
-                action, make_actuation_spec(actuation_spec_amt)
-            )
-            action_space[action] = action_spec
-
-        sensor_spec: List[habitat_sim.sensor.SensorSpec] = self.cfg.agents[
-            self.agent_id
-        ].sensor_specifications
-
-        agent_config = habitat_sim.agent.AgentConfiguration(
-            height=1.5,
-            radius=0.1,
-            sensor_specifications=sensor_spec,
-            action_space=action_space,
-            body_type="cylinder",
-        )
-        return agent_config
-
-    def reconfigure_sim(self) -> None:
-        """
-        Utilizes the current `self.sim_settings` to configure and set up a new
-        `habitat_sim.Simulator`, and then either starts a simulation instance, or replaces
-        the current simulator instance, reloading the most recently loaded scene
-        """
-        # configure our sim_settings but then set the agent to our default
-        self.cfg = make_cfg(self.sim_settings)
-
-        # # Add semantic sensor to default agent if missing # TODO remove
-        # for agent_cfg in self.cfg.agents:
-        #     sensor_types = [s.uuid for s in agent_cfg.sensor_specifications]
-        #     if "semantic_sensor" not in sensor_types:
-        #         semantic_spec = habitat_sim.SensorSpec()
-        #         semantic_spec.uuid = "semantic_sensor"
-        #         semantic_spec.sensor_type = habitat_sim.SensorType.SEMANTIC
-        #         semantic_spec.resolution = [self.sim_settings["height"], self.sim_settings["width"]]
-        #         agent_cfg.sensor_specifications.append(semantic_spec)
-
-        self.agent_id: int = self.sim_settings["default_agent"]
-        self.cfg.agents[self.agent_id] = self.default_agent_config()
-
-        if self.enable_batch_renderer:
-            self.cfg.enable_batch_renderer = True
-            self.cfg.sim_cfg.create_renderer = False
-            self.cfg.sim_cfg.enable_gfx_replay_save = True
-
-        if self.sim_settings["use_default_lighting"]:
-            logger.info("Setting default lighting override for scene.")
-            self.cfg.sim_cfg.override_scene_light_defaults = True
-            self.cfg.sim_cfg.scene_light_setup = habitat_sim.gfx.DEFAULT_LIGHTING_KEY
-
-        if self.sim is None:
-            self.tiled_sims = []
-            for _i in range(self.num_env):
-                self.tiled_sims.append(habitat_sim.Simulator(self.cfg))
-            self.sim = self.tiled_sims[0]
-        else:  # edge case
-            for i in range(self.num_env):
-                if (
-                    self.tiled_sims[i].config.sim_cfg.scene_id
-                    == self.cfg.sim_cfg.scene_id
-                ):
-                    # we need to force a reset, so change the internal config scene name
-                    self.tiled_sims[i].config.sim_cfg.scene_id = "NONE"
-                self.tiled_sims[i].reconfigure(self.cfg)
-
-        # post reconfigure
-        self.default_agent = self.sim.get_agent(self.agent_id)
-        self._object_bbox_colors.clear()
-        self.render_camera = self.default_agent.scene_node.node_sensor_suite.get(
-            "color_sensor"
-        )
-
-        # set sim_settings scene name as actual loaded scene
-        self.sim_settings["scene"] = self.sim.curr_scene_name
-
-        # Initialize replay renderer
-        if self.enable_batch_renderer and self.replay_renderer is None:
-            self.replay_renderer_cfg = ReplayRendererConfiguration()
-            self.replay_renderer_cfg.num_environments = self.num_env
-            self.replay_renderer_cfg.standalone = (
-                False  # Context is owned by the GLFW window
-            )
-            self.replay_renderer_cfg.sensor_specifications = self.cfg.agents[
-                self.agent_id
-            ].sensor_specifications
-            self.replay_renderer_cfg.gpu_device_id = self.cfg.sim_cfg.gpu_device_id
-            self.replay_renderer_cfg.force_separate_semantic_scene_graph = False
-            self.replay_renderer_cfg.leave_context_with_background_renderer = False
-            self.replay_renderer = ReplayRenderer.create_batch_replay_renderer(
-                self.replay_renderer_cfg
-            )
-            # Pre-load composite files
-            if sim_settings["composite_files"] is not None:
-                for composite_file in sim_settings["composite_files"]:
-                    self.replay_renderer.preload_file(composite_file)
-
-        Timer.start()
-        self.step = -1
-
-    def render_batch(self):
-        """
-        This method updates the replay manager with the current state of environments and renders them.
-        """
-        for i in range(self.num_env):
-            # Apply keyframe
-            keyframe = self.tiled_sims[i].gfx_replay_manager.extract_keyframe()
-            self.replay_renderer.set_environment_keyframe(i, keyframe)
-            # Copy sensor transforms
-            sensor_suite = self.tiled_sims[i]._sensors
-            for sensor_uuid, sensor in sensor_suite.items():
-                transform = sensor._sensor_object.node.absolute_transformation()
-                self.replay_renderer.set_sensor_transform(i, sensor_uuid, transform)
-        # Render
-        self.replay_renderer.render(mn.gl.default_framebuffer)
-
     def move_and_look(self, repetitions: int) -> None:
         """
         This method is called continuously with `self.draw_event` to monitor
         any changes in the movement keys map `Dict[KeyEvent.key, Bool]`.
         When a key in the map is set to `True` the corresponding action is taken.
         """
-        # avoids unnecessary updates to grabber's object position
-        if repetitions == 0:
-            return
-
-        agent = self.sim.agents[self.agent_id]
-        press: Dict[Application.Key.key, bool] = self.pressed
-        act: Dict[Application.Key.key, str] = self.key_to_action
-
-        action_queue: List[str] = [act[k] for k, v in press.items() if v]
-
-        for _ in range(int(repetitions)):
-            [agent.act(x) for x in action_queue]
-
-        # update the grabber transform when our agent is moved
-        if self.mouse_grabber is not None:
-            # update location of grabbed object
-            self.update_grab_position(self.previous_mouse_point)
+        super().move_and_look(repetitions)
 
         self._process_queued_actions()  # process any queued actions from the other thread
-        # if self.cnt % 60 == 0:
-        #     self.print_agent_state()
-        # self.cnt += 1
 
     def print_agent_state(self) -> None:
         """
@@ -1709,18 +1066,12 @@ class HabitatSimInteractiveViewer(Application):
             # Case 3: search for the object (in matching room or in all rooms)
             if object_name:
                 for obj in region.objects:
-                    if (
-                        obj
-                        and obj.category
-                        and obj.category.name().lower() == object_name.lower()
-                    ):
+                    if (obj and obj.category and obj.category.name().lower() == object_name.lower()):
                         return mn.Vector3(obj.obb.center)
 
         return None
 
-    def check_object_in_room(
-        self, object_name: Optional[str], room_name: Optional[str]
-    ) -> bool:
+    def check_object_in_room(self, object_name: Optional[str], room_name: Optional[str]) -> bool:
         """
         Verifies whether the given object exists in the given room.
         If room_name is None, always returns False.
@@ -1746,14 +1097,6 @@ class HabitatSimInteractiveViewer(Application):
         room_objects = self.room_objects_occurences[room_name]
         return object_name in (obj.lower() for obj in room_objects.keys())
 
-    def invert_gravity(self) -> None:
-        """
-        Sets the gravity vector to the negative of it's previous value. This is
-        a good method for testing simulation functionality.
-        """
-        gravity: mn.Vector3 = self.sim.get_gravity() * -1
-        self.sim.set_gravity(gravity)
-
     def key_press_event(self, event: Application.KeyEvent) -> None:
         """
         Handles `Application.KeyEvent` on a key press by performing the corresponding functions.
@@ -1764,543 +1107,13 @@ class HabitatSimInteractiveViewer(Application):
         pressed = Application.Key
         mod = Application.Modifier
 
-        shift_pressed = bool(event.modifiers & mod.SHIFT)
-        alt_pressed = bool(event.modifiers & mod.ALT)
         # warning: ctrl doesn't always pass through with other key-presses
-
-        if key == pressed.ESC:
-            event.accepted = True
-            self.exit_event(Application.ExitEvent)
-            return
-
-        elif key == pressed.H:
-            self.print_help_text()
-        elif key == pressed.J:
-            logger.info(
-                f"Toggle Region Draw from {self.semantic_region_debug_draw } to {not self.semantic_region_debug_draw}"
-            )
-            # Toggle visualize semantic bboxes. Currently only regions supported
-            self.semantic_region_debug_draw = not self.semantic_region_debug_draw
-        elif key == pressed.B:
+        if key == pressed.B:
             self.show_object_bboxes = not self.show_object_bboxes
             state = "enabled" if self.show_object_bboxes else "disabled"
             logger.info(f"Object bounding boxes {state}.")
 
-        elif key == pressed.TAB:
-            # NOTE: (+ALT) - reconfigure without cycling scenes
-            if not alt_pressed:
-                # cycle the active scene from the set available in MetadataMediator
-                inc = -1 if shift_pressed else 1
-                scene_ids = self.sim.metadata_mediator.get_scene_handles()
-                cur_scene_index = 0
-                if self.sim_settings["scene"] not in scene_ids:
-                    matching_scenes = [
-                        (ix, x)
-                        for ix, x in enumerate(scene_ids)
-                        if self.sim_settings["scene"] in x
-                    ]
-                    if not matching_scenes:
-                        logger.warning(
-                            f"The current scene, '{self.sim_settings['scene']}', is not in the list, starting cycle at index 0."
-                        )
-                    else:
-                        cur_scene_index = matching_scenes[0][0]
-                else:
-                    cur_scene_index = scene_ids.index(self.sim_settings["scene"])
-
-                next_scene_index = min(
-                    max(cur_scene_index + inc, 0), len(scene_ids) - 1
-                )
-                self.sim_settings["scene"] = scene_ids[next_scene_index]
-            self.reconfigure_sim()
-            logger.info(
-                f"Reconfigured simulator for scene: {self.sim_settings['scene']}"
-            )
-
-        elif key == pressed.SPACE:
-            if not self.sim.config.sim_cfg.enable_physics:
-                logger.warn("Warning: physics was not enabled during setup")
-            else:
-                self.simulating = not self.simulating
-                logger.info(f"Command: physics simulating set to {self.simulating}")
-
-        elif key == pressed.PERIOD:
-            if self.simulating:
-                logger.warn("Warning: physics simulation already running")
-            else:
-                self.simulate_single_step = True
-                logger.info("Command: physics step taken")
-
-        elif key == pressed.COMMA:
-            self.debug_bullet_draw = not self.debug_bullet_draw
-            logger.info(f"Command: toggle Bullet debug draw: {self.debug_bullet_draw}")
-
-        elif key == pressed.C:
-            if shift_pressed:
-                self.contact_debug_draw = not self.contact_debug_draw
-                logger.info(
-                    f"Command: toggle contact debug draw: {self.contact_debug_draw}"
-                )
-            else:
-                # perform a discrete collision detection pass and enable contact debug drawing to visualize the results
-                logger.info(
-                    "Command: perform discrete collision detection and visualize active contacts."
-                )
-                self.sim.perform_discrete_collision_detection()
-                self.contact_debug_draw = True
-                # TODO: add a nice log message with concise contact pair naming.
-
-        elif key == pressed.T:
-            # load URDF
-            fixed_base = alt_pressed
-            urdf_file_path = ""
-            if shift_pressed and self.cached_urdf:
-                urdf_file_path = self.cached_urdf
-            else:
-                urdf_file_path = input("Load URDF: provide a URDF filepath:").strip()
-
-            if not urdf_file_path:
-                logger.warn("Load URDF: no input provided. Aborting.")
-            elif not urdf_file_path.endswith((".URDF", ".urdf")):
-                logger.warn("Load URDF: input is not a URDF. Aborting.")
-            elif os.path.exists(urdf_file_path):
-                self.cached_urdf = urdf_file_path
-                aom = self.sim.get_articulated_object_manager()
-                ao = aom.add_articulated_object_from_urdf(
-                    urdf_file_path,
-                    fixed_base,
-                    1.0,
-                    1.0,
-                    True,
-                    maintain_link_order=False,
-                    intertia_from_urdf=False,
-                )
-                ao.translation = (
-                    self.default_agent.scene_node.transformation.transform_point(
-                        [0.0, 1.0, -1.5]
-                    )
-                )
-                # check removal and auto-creation
-                joint_motor_settings = habitat_sim.physics.JointMotorSettings(
-                    position_target=0.0,
-                    position_gain=1.0,
-                    velocity_target=0.0,
-                    velocity_gain=1.0,
-                    max_impulse=1000.0,
-                )
-                existing_motor_ids = ao.existing_joint_motor_ids
-                for motor_id in existing_motor_ids:
-                    ao.remove_joint_motor(motor_id)
-                ao.create_all_motors(joint_motor_settings)
-            else:
-                logger.warn("Load URDF: input file not found. Aborting.")
-
-        elif key == pressed.M:
-            self.cycle_mouse_mode()
-            logger.info(f"Command: mouse mode set to {self.mouse_interaction}")
-
-        elif key == pressed.V:
-            self.invert_gravity()
-            logger.info("Command: gravity inverted")
-        elif key == pressed.N:
-            # (default) - toggle navmesh visualization
-            # NOTE: (+ALT) - re-sample the agent position on the NavMesh
-            # NOTE: (+SHIFT) - re-compute the NavMesh
-            if alt_pressed:
-                logger.info("Command: resample agent state from navmesh")
-                if self.sim.pathfinder.is_loaded:
-                    new_agent_state = habitat_sim.AgentState()
-                    new_agent_state.position = (
-                        self.sim.pathfinder.get_random_navigable_point()
-                    )
-                    new_agent_state.rotation = quat_from_angle_axis(
-                        self.sim.random.uniform_float(0, 2.0 * np.pi),
-                        np.array([0, 1, 0]),
-                    )
-                    self.default_agent.set_state(new_agent_state)
-                else:
-                    logger.warning(
-                        "NavMesh is not initialized. Cannot sample new agent state."
-                    )
-            elif shift_pressed:
-                logger.info("Command: recompute navmesh")
-                self.navmesh_config_and_recompute()
-            else:
-                if self.sim.pathfinder.is_loaded:
-                    self.sim.navmesh_visualization = not self.sim.navmesh_visualization
-                    logger.info("Command: toggle navmesh")
-                else:
-                    logger.warn("Warning: recompute navmesh first")
-
-        # update map of moving/looking keys which are currently pressed
-        if key in self.pressed:
-            self.pressed[key] = True
-        event.accepted = True
-        self.redraw()
-
-    def key_release_event(self, event: Application.KeyEvent) -> None:
-        """
-        Handles `Application.KeyEvent` on a key release. When a key is released, if it
-        is part of the movement keys map `Dict[KeyEvent.key, Bool]`, then the key will
-        be set to False for the next `self.move_and_look()` to update the current actions.
-        """
-        key = event.key
-
-        # update map of moving/looking keys which are currently pressed
-        if key in self.pressed:
-            self.pressed[key] = False
-        event.accepted = True
-        self.redraw()
-
-    def pointer_move_event(self, event: Application.PointerMoveEvent) -> None:
-        """
-        Handles `Application.PointerMoveEvent`. When in LOOK mode, enables the left
-        mouse button to steer the agent's facing direction. When in GRAB mode,
-        continues to update the grabber's object position with our agents position.
-        """
-        # if interactive mode -> LOOK MODE
-        if (
-            event.pointers & Application.Pointer.MOUSE_LEFT
-            and self.mouse_interaction == MouseMode.LOOK
-        ):
-            agent = self.sim.agents[self.agent_id]
-            delta = self.get_mouse_position(event.relative_position) / 2
-            action = habitat_sim.agent.ObjectControls()
-            act_spec = habitat_sim.agent.ActuationSpec
-
-            # left/right on agent scene node
-            action(agent.scene_node, "turn_right", act_spec(delta.x))
-
-            # up/down on cameras' scene nodes
-            action = habitat_sim.agent.ObjectControls()
-            sensors = list(self.default_agent.scene_node.subtree_sensors.values())
-            [action(s.object, "look_down", act_spec(delta.y), False) for s in sensors]
-
-        # if interactive mode is TRUE -> GRAB MODE
-        elif self.mouse_interaction == MouseMode.GRAB and self.mouse_grabber:
-            # update location of grabbed object
-            self.update_grab_position(self.get_mouse_position(event.position))
-
-        self.previous_mouse_point = self.get_mouse_position(event.position)
-        self.redraw()
-        event.accepted = True
-
-    def pointer_press_event(self, event: Application.PointerEvent) -> None:
-        """
-        Handles `Application.PointerEvent`. When in GRAB mode, click on
-        objects to drag their position. (right-click for fixed constraints)
-        """
-        physics_enabled = self.sim.get_physics_simulation_library()
-
-        # if interactive mode is True -> GRAB MODE
-        if self.mouse_interaction == MouseMode.GRAB and physics_enabled:
-            render_camera = self.render_camera.render_camera
-            ray = render_camera.unproject(self.get_mouse_position(event.position))
-            raycast_results = self.sim.cast_ray(ray=ray)
-
-            if raycast_results.has_hits():
-                hit_object, ao_link = -1, -1
-                hit_info = raycast_results.hits[0]
-
-                if hit_info.object_id > habitat_sim.stage_id:
-                    # we hit an non-staged collision object
-                    ro_mngr = self.sim.get_rigid_object_manager()
-                    ao_mngr = self.sim.get_articulated_object_manager()
-                    ao = ao_mngr.get_object_by_id(hit_info.object_id)
-                    ro = ro_mngr.get_object_by_id(hit_info.object_id)
-
-                    if ro:
-                        # if grabbed an object
-                        hit_object = hit_info.object_id
-                        object_pivot = ro.transformation.inverted().transform_point(
-                            hit_info.point
-                        )
-                        object_frame = ro.rotation.inverted()
-                    elif ao:
-                        # if grabbed the base link
-                        hit_object = hit_info.object_id
-                        object_pivot = ao.transformation.inverted().transform_point(
-                            hit_info.point
-                        )
-                        object_frame = ao.rotation.inverted()
-                    else:
-                        for ao_handle in ao_mngr.get_objects_by_handle_substring():
-                            ao = ao_mngr.get_object_by_handle(ao_handle)
-                            link_to_obj_ids = ao.link_object_ids
-
-                            if hit_info.object_id in link_to_obj_ids:
-                                # if we got a link
-                                ao_link = link_to_obj_ids[hit_info.object_id]
-                                object_pivot = (
-                                    ao.get_link_scene_node(ao_link)
-                                    .transformation.inverted()
-                                    .transform_point(hit_info.point)
-                                )
-                                object_frame = ao.get_link_scene_node(
-                                    ao_link
-                                ).rotation.inverted()
-                                hit_object = ao.object_id
-                                break
-                    # done checking for AO
-
-                    if hit_object >= 0:
-                        node = self.default_agent.scene_node
-                        constraint_settings = physics.RigidConstraintSettings()
-
-                        constraint_settings.object_id_a = hit_object
-                        constraint_settings.link_id_a = ao_link
-                        constraint_settings.pivot_a = object_pivot
-                        constraint_settings.frame_a = (
-                            object_frame.to_matrix() @ node.rotation.to_matrix()
-                        )
-                        constraint_settings.frame_b = node.rotation.to_matrix()
-                        constraint_settings.pivot_b = hit_info.point
-
-                        # by default use a point 2 point constraint
-                        if event.pointer == Application.Pointer.MOUSE_RIGHT:
-                            constraint_settings.constraint_type = (
-                                physics.RigidConstraintType.Fixed
-                            )
-
-                        grip_depth = (
-                            hit_info.point - render_camera.node.absolute_translation
-                        ).length()
-
-                        self.mouse_grabber = MouseGrabber(
-                            constraint_settings,
-                            grip_depth,
-                            self.sim,
-                        )
-                    else:
-                        logger.warning(
-                            "Oops, couldn't find the hit object. That's odd."
-                        )
-                # end if didn't hit the scene
-            # end has raycast hit
-        # end has physics enabled
-
-        self.previous_mouse_point = self.get_mouse_position(event.position)
-        self.redraw()
-        event.accepted = True
-
-    def scroll_event(self, event: Application.ScrollEvent) -> None:
-        """
-        Handles `Application.ScrollEvent`. When in LOOK mode, enables camera
-        zooming (fine-grained zoom using shift) When in GRAB mode, adjusts the depth
-        of the grabber's object. (larger depth change rate using shift)
-        """
-        scroll_mod_val = (
-            event.offset.y
-            if abs(event.offset.y) > abs(event.offset.x)
-            else event.offset.x
-        )
-        if not scroll_mod_val:
-            return
-
-        # use shift to scale action response
-        shift_pressed = bool(event.modifiers & Application.Modifier.SHIFT)
-        alt_pressed = bool(event.modifiers & Application.Modifier.ALT)
-        ctrl_pressed = bool(event.modifiers & Application.Modifier.CTRL)
-
-        # if interactive mode is False -> LOOK MODE
-        if self.mouse_interaction == MouseMode.LOOK:
-            # use shift for fine-grained zooming
-            mod_val = 1.01 if shift_pressed else 1.1
-            mod = mod_val if scroll_mod_val > 0 else 1.0 / mod_val
-            cam = self.render_camera
-            cam.zoom(mod)
-            self.redraw()
-
-        elif self.mouse_interaction == MouseMode.GRAB and self.mouse_grabber:
-            # adjust the depth
-            mod_val = 0.1 if shift_pressed else 0.01
-            scroll_delta = scroll_mod_val * mod_val
-            if alt_pressed or ctrl_pressed:
-                # rotate the object's local constraint frame
-                agent_t = self.default_agent.scene_node.transformation_matrix()
-                # ALT - yaw
-                rotation_axis = agent_t.transform_vector(mn.Vector3(0, 1, 0))
-                if alt_pressed and ctrl_pressed:
-                    # ALT+CTRL - roll
-                    rotation_axis = agent_t.transform_vector(mn.Vector3(0, 0, -1))
-                elif ctrl_pressed:
-                    # CTRL - pitch
-                    rotation_axis = agent_t.transform_vector(mn.Vector3(1, 0, 0))
-                self.mouse_grabber.rotate_local_frame_by_global_angle_axis(
-                    rotation_axis, mn.Rad(scroll_delta)
-                )
-            else:
-                # update location of grabbed object
-                self.mouse_grabber.grip_depth += scroll_delta
-                self.update_grab_position(self.get_mouse_position(event.position))
-        self.redraw()
-        event.accepted = True
-
-    def pointer_release_event(self, event: Application.PointerEvent) -> None:
-        """
-        Release any existing constraints.
-        """
-        del self.mouse_grabber
-        self.mouse_grabber = None
-        event.accepted = True
-
-    def update_grab_position(self, point: mn.Vector2i) -> None:
-        """
-        Accepts a point derived from a mouse click event and updates the
-        transform of the mouse grabber.
-        """
-        # check mouse grabber
-        if not self.mouse_grabber:
-            return
-
-        render_camera = self.render_camera.render_camera
-        ray = render_camera.unproject(point)
-
-        rotation: mn.Matrix3x3 = self.default_agent.scene_node.rotation.to_matrix()
-        translation: mn.Vector3 = (
-            render_camera.node.absolute_translation
-            + ray.direction * self.mouse_grabber.grip_depth
-        )
-        self.mouse_grabber.update_transform(mn.Matrix4.from_(rotation, translation))
-
-    def get_mouse_position(self, mouse_event_position: mn.Vector2i) -> mn.Vector2i:
-        """
-        This function will get a screen-space mouse position appropriately
-        scaled based on framebuffer size and window size.  Generally these would be
-        the same value, but on certain HiDPI displays (Retina displays) they may be
-        different.
-        """
-        scaling = mn.Vector2i(self.framebuffer_size) / mn.Vector2i(self.window_size)
-        return mouse_event_position * scaling
-
-    def cycle_mouse_mode(self) -> None:
-        """
-        This method defines how to cycle through the mouse mode.
-        """
-        if self.mouse_interaction == MouseMode.LOOK:
-            self.mouse_interaction = MouseMode.GRAB
-        elif self.mouse_interaction == MouseMode.GRAB:
-            self.mouse_interaction = MouseMode.LOOK
-
-    def navmesh_config_and_recompute(self) -> None:
-        """
-        This method is setup to be overridden in for setting config accessibility
-        in inherited classes.
-        """
-        self.navmesh_settings = habitat_sim.NavMeshSettings()
-        self.navmesh_settings.set_defaults()
-        self.navmesh_settings.agent_height = self.cfg.agents[self.agent_id].height
-        self.navmesh_settings.agent_radius = self.cfg.agents[self.agent_id].radius
-        self.navmesh_settings.include_static_objects = True
-        self.sim.recompute_navmesh(
-            self.sim.pathfinder,
-            self.navmesh_settings,
-        )
-
-    def exit_event(self, event: Application.ExitEvent):
-        """
-        Overrides exit_event to properly close the Simulator before exiting the
-        application.
-        """
-        for i in range(self.num_env):
-            self.tiled_sims[i].close(destroy=True)
-            event.accepted = True
-        exit(0)
-
-    def draw_text(self, sensor_spec):
-        pass
-
-    #         # make magnum text background transparent for text
-    #         mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
-    #         mn.gl.Renderer.set_blend_function(
-    #             mn.gl.Renderer.BlendFunction.ONE,
-    #             mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
-    #         )
-
-    #         self.shader.bind_vector_texture(self.glyph_cache.texture)
-    #         self.shader.transformation_projection_matrix = self.window_text_transform
-    #         self.shader.color = [1.0, 1.0, 1.0]
-
-    #         sensor_type_string = str(sensor_spec.sensor_type.name)
-    #         sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
-    #         if self.mouse_interaction == MouseMode.LOOK:
-    #             mouse_mode_string = "LOOK"
-    #         elif self.mouse_interaction == MouseMode.GRAB:
-    #             mouse_mode_string = "GRAB"
-    #         self.window_text.render(
-    #             f"""
-    # {self.fps} FPS
-    # Sensor Type: {sensor_type_string}
-    # Sensor Subtype: {sensor_subtype_string}
-    # Mouse Interaction Mode: {mouse_mode_string}
-    #             """
-    #         )
-    #         self.shader.draw(self.window_text.mesh)
-
-    #         # Disable blending for text
-    #         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
-
-    def print_help_text(self) -> None:
-        """
-        Print the Key Command help text.
-        """
-        logger.info(
-            """
-=====================================================
-Welcome to the Habitat-sim Python Viewer application!
-=====================================================
-Mouse Functions ('m' to toggle mode):
-----------------
-In LOOK mode (default):
-    LEFT:
-        Click and drag to rotate the agent and look up/down.
-    WHEEL:
-        Modify orthographic camera zoom/perspective camera FOV (+SHIFT for fine grained control)
-
-In GRAB mode (with 'enable-physics'):
-    LEFT:
-        Click and drag to pickup and move an object with a point-to-point constraint (e.g. ball joint).
-    RIGHT:
-        Click and drag to pickup and move an object with a fixed frame constraint.
-    WHEEL (with picked object):
-        default - Pull gripped object closer or push it away.
-        (+ALT) rotate object fixed constraint frame (yaw)
-        (+CTRL) rotate object fixed constraint frame (pitch)
-        (+ALT+CTRL) rotate object fixed constraint frame (roll)
-        (+SHIFT) amplify scroll magnitude
-
-
-Key Commands:
--------------
-    esc:        Exit the application.
-    'h':        Display this help message.
-    'm':        Cycle mouse interaction modes.
-
-    Agent Controls:
-    'wasd':     Move the agent's body forward/backward and left/right.
-    'zx':       Move the agent's body up/down.
-    arrow keys: Turn the agent's body left/right and camera look up/down.
-
-    Utilities:
-    'r':        Reset the simulator with the most recently loaded scene.
-    'n':        Show/hide NavMesh wireframe.
-                (+SHIFT) Recompute NavMesh with default settings.
-                (+ALT) Re-sample the agent(camera)'s position and orientation from the NavMesh.
-    ',':        Render a Bullet collision shape debug wireframe overlay (white=active, green=sleeping, blue=wants sleeping, red=can't sleep).
-    'c':        Run a discrete collision detection pass and render a debug wireframe overlay showing active contact points and normals (yellow=fixed length normals, red=collision distances).
-                (+SHIFT) Toggle the contact point debug render overlay on/off.
-    'j'         Toggle Semantic visualization bounds (currently only Semantic Region annotations)
-
-    Object Interactions:
-    SPACE:      Toggle physics simulation on/off.
-    '.':        Take a single simulation step if not simulating continuously.
-    'v':        (physics) Invert gravity.
-    't':        Load URDF from filepath
-                (+SHIFT) quick re-load the previously specified URDF
-                (+ALT) load the URDF with fixed base
-=====================================================
-"""
-        )
+        super().key_press_event(event)
 
     def get_response_LLM(self, user_input):
         # This function calls an LLM to retrieve the landmark / room information from the Human Request
@@ -2351,129 +1164,13 @@ Key Commands:
 
         messages = [
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": user_input + "\n" + str(self.room_objects_occurences),
-            },
+            {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
         ]
 
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
         print("Response from GPT:")
         print(response.choices[0].message.content)
         return response.choices[0].message.content
-
-
-class MouseMode(Enum):
-    LOOK = 0
-    GRAB = 1
-    MOTION = 2
-
-
-class MouseGrabber:
-    """
-    Create a MouseGrabber from RigidConstraintSettings to manipulate objects.
-    """
-
-    def __init__(
-        self,
-        settings: physics.RigidConstraintSettings,
-        grip_depth: float,
-        sim: habitat_sim.simulator.Simulator,
-    ) -> None:
-        self.settings = settings
-        self.simulator = sim
-
-        # defines distance of the grip point from the camera for pivot updates
-        self.grip_depth = grip_depth
-        self.constraint_id = sim.create_rigid_constraint(settings)
-
-    def __del__(self):
-        self.remove_constraint()
-
-    def remove_constraint(self) -> None:
-        """
-        Remove a rigid constraint by id.
-        """
-        self.simulator.remove_rigid_constraint(self.constraint_id)
-
-    def updatePivot(self, pos: mn.Vector3) -> None:
-        self.settings.pivot_b = pos
-        self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
-
-    def update_frame(self, frame: mn.Matrix3x3) -> None:
-        self.settings.frame_b = frame
-        self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
-
-    def update_transform(self, transform: mn.Matrix4) -> None:
-        self.settings.frame_b = transform.rotation()
-        self.settings.pivot_b = transform.translation
-        self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
-
-    def rotate_local_frame_by_global_angle_axis(
-        self, axis: mn.Vector3, angle: mn.Rad
-    ) -> None:
-        """rotate the object's local constraint frame with a global angle axis input."""
-        object_transform = mn.Matrix4()
-        rom = self.simulator.get_rigid_object_manager()
-        aom = self.simulator.get_articulated_object_manager()
-        if rom.get_library_has_id(self.settings.object_id_a):
-            object_transform = rom.get_object_by_id(
-                self.settings.object_id_a
-            ).transformation
-        else:
-            # must be an ao
-            object_transform = (
-                aom.get_object_by_id(self.settings.object_id_a)
-                .get_link_scene_node(self.settings.link_id_a)
-                .transformation
-            )
-        local_axis = object_transform.inverted().transform_vector(axis)
-        R = mn.Matrix4.rotation(angle, local_axis.normalized())
-        self.settings.frame_a = R.rotation().__matmul__(self.settings.frame_a)
-        self.simulator.update_rigid_constraint(self.constraint_id, self.settings)
-
-
-class Timer:
-    """
-    Timer class used to keep track of time between buffer swaps
-    and guide the display frame rate.
-    """
-
-    start_time = 0.0
-    prev_frame_time = 0.0
-    prev_frame_duration = 0.0
-    running = False
-
-    @staticmethod
-    def start() -> None:
-        """
-        Starts timer and resets previous frame time to the start time.
-        """
-        Timer.running = True
-        Timer.start_time = time.time()
-        Timer.prev_frame_time = Timer.start_time
-        Timer.prev_frame_duration = 0.0
-
-    @staticmethod
-    def stop() -> None:
-        """
-        Stops timer and erases any previous time data, resetting the timer.
-        """
-        Timer.running = False
-        Timer.start_time = 0.0
-        Timer.prev_frame_time = 0.0
-        Timer.prev_frame_duration = 0.0
-
-    @staticmethod
-    def next_frame() -> None:
-        """
-        Records previous frame duration and updates the previous frame timestamp
-        to the current time. If the timer is not currently running, perform nothing.
-        """
-        if not Timer.running:
-            return
-        Timer.prev_frame_duration = time.time() - Timer.prev_frame_time
-        Timer.prev_frame_time = time.time()
 
 
 def get_goal_from_response(response: str) -> object:
@@ -2514,9 +1211,7 @@ def get_goal_from_response(response: str) -> object:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
 
-def user_input_logic_loop(
-    viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue
-):
+def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue):
     while True:
         try:
             user_input = input_q.get()
@@ -2528,31 +1223,18 @@ def user_input_logic_loop(
 
             response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
             print("Response from ChatGPT: ", response)
-            goal_info = get_goal_from_response(
-                response
-            )  # * Handle response and distinguish cases
+            goal_info = get_goal_from_response(response)  # * Handle response and distinguish cases
             print("Handled Response: ", goal_info)
-            response = response.split(".", 1)[
-                1
-            ].strip()  # Remove numbering from response for user display
+            response = response.split(".", 1)[1].strip()  # Remove numbering from response for user display
             res_type = goal_info["type"]
 
             if res_type == "object_in_room":
                 target_name = goal_info["object"]
                 room_name = goal_info["room"]
-            elif (
-                res_type == "room_only"
-                or res_type == "object_in_single_room"
-                or res_type == "object_repeated_in_room"
-            ):
+            elif (res_type == "room_only" or res_type == "object_in_single_room" or res_type == "object_repeated_in_room"):
                 target_name = None
                 room_name = goal_info["room"]
-            elif (
-                res_type == "ambiguous_room"
-                or res_type == "ambiguous_object_rooms"
-                or res_type == "not_found"
-                or res_type == "friendly_conversation"
-            ):
+            elif (res_type == "ambiguous_room" or res_type == "ambiguous_object_rooms" or res_type == "not_found" or res_type == "friendly_conversation"):
                 print(goal_info["message"])
                 output_q.put(response)
                 continue
@@ -2567,9 +1249,7 @@ def user_input_logic_loop(
                 print(f"Sanity check passed: '{target_name}' in '{room_name}'")
 
             # * Query scene (and retrieve a point in the 3D space)
-            goal_pos = viewer.get_object_position(
-                object_name=target_name, room_name=room_name
-            )
+            goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
             print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
 
             if goal_pos is None:
@@ -2586,9 +1266,7 @@ def user_input_logic_loop(
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            instructions = generate_path_description(
-                input_dir, user_input=user_input, model="gpt-4o", dry_run=False
-            )
+            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False)
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)
@@ -2702,7 +1380,7 @@ if __name__ == "__main__":
     )
     gui_window.show()
 
-    viewer = HabitatSimInteractiveViewer(sim_settings, q_app=q_app)
+    viewer = NewViewer(sim_settings, q_app=q_app)
 
     logic_thread = threading.Thread(
         target=user_input_logic_loop,
