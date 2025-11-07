@@ -154,6 +154,7 @@ class FrameSummary:
         if not self.objects:
             return f"{self.name}: Limited visibility in this frame."
 
+
         object_part = ", ".join(self.objects[:num_objs_per_frame])
         rel_part = "; ".join(self.relations[:num_objs_per_frame]) if self.relations else ""
 
@@ -348,21 +349,25 @@ def extract_relations(
             "next_to": "next to",
         }
         return table.get(relation, relation.replace("_", " "))
-
+    objs_str_ids: List[str] = []
     filtered: List[str] = []
     for item in relationships:
-        subj = str(item.get("subject", "")).strip()
-        rel = str(item.get("relation", "")).strip()
-        obj = str(item.get("object", "")).strip()
+        subj = item.get("subject", "")
+        rel = item.get("relation", "")
+        obj = item.get("object", "")
+        subj_label = subj["label"]
+        obj_label = obj["label"]
+
         if not subj or not rel or not obj:
             continue
-        if subj.lower() in IGNORED_LABELS or obj.lower() in IGNORED_LABELS:
+        if subj_label.lower() in IGNORED_LABELS or obj_label.lower() in IGNORED_LABELS:
             continue
         natural_rel = natural_direction(rel)
-        filtered.append(f"{subj} is {natural_rel} {obj}")
+        filtered.append(f"{subj_label} is {natural_rel} {obj_label}")
+        objs_str_ids += subj.get("obj_str_ids", []) + obj.get("obj_str_ids", [])
         if len(filtered) >= limit:
             break
-    return filtered
+    return filtered, objs_str_ids
 
 
 def summarise_frames(frames: Sequence[Dict[str, Any]], num_objs_per_frame = 2) -> List[FrameSummary]:
@@ -376,7 +381,11 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_objs_per_frame = 2) -
         spatial_relations = frame.get("spatial_relations", [])
 
         phrases, selected_objects = select_n_objects(objects, num_objs_per_frame)
-        relations = extract_relations(spatial_relations)
+        relations, obj_str_ids = extract_relations(spatial_relations)
+
+        for obj_str_id in obj_str_ids:
+            obj_str_ids_to_draw.add(obj_str_id)
+
         print("Frame", name, "objects:", selected_objects)
         for obj in selected_objects:
             if "obj_str_ids" in obj:
