@@ -47,6 +47,17 @@ from habitat_sim.logging import LoggingContext, logger
 from habitat_sim.utils.common import quat_from_angle_axis
 from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
+
+# Try importing the base viewer.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "./")))
+from viewer import (
+    HabitatSimInteractiveViewer as BaseViewer,
+    MouseMode,
+    MouseGrabber,
+    Timer,
+)
+
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from utils.generate_description import generate_path_description
 from utils.conversation_gui import *
@@ -54,13 +65,6 @@ from utils.conversation_gui import *
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
-# Try importing the base viewer.py
-from habitat_sim.examples.viewer import (
-    HabitatSimInteractiveViewer as BaseViewer,
-    MouseMode,
-    MouseGrabber,
-    Timer,
-)
 
 
 # Initialize OpenAI client
@@ -78,13 +82,13 @@ except Exception as e:
 
 class NewViewer(BaseViewer):
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
+        scene_path = sim_settings["scene"]
         super().__init__(sim_settings)
         self.q_app = q_app
 
         self.cnt = 0
         self.action_queue = queue.Queue()
 
-        scene_path = self.sim_settings["scene"]
 
         # draw object bounding boxes when enabled
         self.show_object_bboxes = False
@@ -520,7 +524,7 @@ class NewViewer(BaseViewer):
 
         return relations
 
-    def compute_object_size(obj_entry: dict[str, any]) -> float:
+    def compute_object_size(self, obj_entry: dict[str, any]) -> float:
         """
         Return approximate linear size (in meters) of an object based on its bounding box.
         Works with bbox_world from extract_visible_objects.
