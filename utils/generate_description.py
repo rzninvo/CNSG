@@ -150,12 +150,12 @@ class FrameSummary:
     objects: Sequence[str]
     relationships: Sequence[str]
 
-    def to_prompt_line(self) -> str:
+    def to_prompt_line(self, num_objs_per_frame = 2) -> str:
         if not self.objects:
             return f"{self.name}: Limited visibility in this frame."
 
-        object_part = ", ".join(self.objects[:2])
-        rel_part = "; ".join(self.relationships[:2]) if self.relationships else ""
+        object_part = ", ".join(self.objects[:num_objs_per_frame])
+        rel_part = "; ".join(self.relationships[:num_objs_per_frame]) if self.relationships else ""
 
         description = f"In {self.name}, you see {object_part}"
         if rel_part:
@@ -329,7 +329,7 @@ def extract_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str
         formatted = format_object_entry(obj)
         if formatted:
             results.append(formatted)
-    return results
+    return results, candidates[:limit]
 
 
 def extract_relationships(
@@ -365,28 +365,43 @@ def extract_relationships(
     return filtered
 
 
-def summarise_frames(frames: Sequence[Dict[str, Any]]) -> List[FrameSummary]:
+def summarise_frames(frames: Sequence[Dict[str, Any]], num_objs_per_frame = 2) -> List[FrameSummary]:
     summaries: List[FrameSummary] = []
+
+    raw_ids = []
+
     for frame in frames:
         name = str(frame.get("image_index") or frame.get("frame", "frame")).strip()
         object_data = frame.get("objects") or frame.get("visible_objects") or {}
         relation_data = (
             frame.get("spatial_relations") or frame.get("relationships") or []
         )
-        objects = extract_objects(object_data)
+        phrases, objects = extract_objects(object_data)
         relationships = extract_relationships(relation_data)
+        print("Frame", name, "objects:", objects)
+        for obj in objects[:num_objs_per_frame]:
+            if "merged_raw_ids" in obj:
+                merged_raw_ids = obj.get("merged_raw_ids")
+                if isinstance(merged_raw_ids, list):
+                    for raw_id in merged_raw_ids:
+                        if raw_id not in raw_ids:
+                            raw_ids.append(raw_id)
+
+        # print("IDs in frame", name, ":", list(raw_ids))
+
         summaries.append(
             FrameSummary(
                 name=name,
-                objects=objects,
+                objects=phrases,
                 relationships=relationships,
             )
         )
-    return summaries
+    # print("All collected IDs:", raw_ids)
+    return summaries, raw_ids
 
 
 def build_prompt(
-    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str
+    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_objs_per_frame: int = 2
 ) -> str:
     intro_lines = [
         "You are a navigation assistant helping someone retrace a short walk through a home.",
@@ -404,7 +419,7 @@ def build_prompt(
     scene_line = (
         f"Scene index: {scene_index}" if scene_index else "Scene index: unknown"
     )
-    observation_lines = "\n".join(summary.to_prompt_line() for summary in summaries)
+    observation_lines = "\n".join(summary.to_prompt_line(num_objs_per_frame=num_objs_per_frame) for summary in summaries)
 
     return textwrap.dedent(
         f"""
@@ -493,14 +508,15 @@ def generate_path_description(
     """
     frames = load_frames(input_dir, max_frames)
     scene_index = frames[0].get("scene_index")
-    summaries = summarise_frames(frames)
-    prompt = build_prompt(scene_index, summaries, user_input)
+    num_objs_per_frame = 2
+    summaries, raw_ids = summarise_frames(frames, num_objs_per_frame=num_objs_per_frame)
+    prompt = build_prompt(scene_index, summaries, user_input, num_objs_per_frame=num_objs_per_frame)
 
     print(prompt)
     if dry_run: 
-        return None
+        return None, raw_ids
 
-    return generate_description(prompt, model)
+    return generate_description(prompt, model), raw_ids
 
 
 if __name__ == "__main__":

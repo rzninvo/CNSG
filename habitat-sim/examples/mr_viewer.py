@@ -95,7 +95,8 @@ class HabitatSimInteractiveViewer(Application):
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
 
         self.q_app = q_app
-
+        self.objs_to_draw_ids = None
+        self.prev_ids = None
         self.cnt = 0
         self.action_queue = queue.Queue()
 
@@ -254,6 +255,8 @@ class HabitatSimInteractiveViewer(Application):
         logger.setLevel("INFO")
         self.print_help_text()
 
+        self.print_scene_semantic_info()
+
         #########################################
         self.map_room_id_to_name = {}
         self.room_objects_occurences = {}
@@ -324,6 +327,10 @@ class HabitatSimInteractiveViewer(Application):
 
         except queue.Empty:
             pass
+
+    def set_objs_to_draw_ids(self, object_ids):
+        # print(f"set_objs_to_draw_ids: {object_ids}")
+        self.action_queue.put((self._set_objs_to_draw_ids, (object_ids,), {}))
 
     def enqueue_shortest_path(self, goal_pos):
         self.action_queue.put((self.shortest_path, (self.sim, goal_pos), {}))
@@ -460,6 +467,7 @@ class HabitatSimInteractiveViewer(Application):
         ids, counts = np.unique(semantic, return_counts=True)
 
         visible_objects = {}
+        # print("semantic ids", ids)
         for obj_id, pixel_count in zip(ids, counts):
             if obj_id == 0 or pixel_count < 50:
                 continue  # skip background/noise/small fragments
@@ -932,6 +940,11 @@ class HabitatSimInteractiveViewer(Application):
         )
 
         return {"objects": objects, "spatial_relations": relations}
+    
+    def _set_objs_to_draw_ids(self, object_ids):
+        # print(f" _set_objs_to_draw_ids: {object_ids}")
+        self.objs_to_draw_ids = object_ids
+        # print(f"Updated objs_to_draw_ids: {self.objs_to_draw_ids}")
 
     def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
         if not sim.pathfinder.is_loaded:
@@ -1244,10 +1257,12 @@ class HabitatSimInteractiveViewer(Application):
 
         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
-    def _draw_object_bboxes(self, debug_line_render: Any) -> None:
+    def _draw_object_bboxes(self, debug_line_render: Any, object_ids: list = None) -> None:
+    
         """
         Draw axis-aligned bounding boxes for every semantic object.
         """
+        # print(f" _draw_object_bboxes called with object_ids: {object_ids}")
         scene = self.sim.semantic_scene
         if scene is None:
             return
@@ -1258,12 +1273,25 @@ class HabitatSimInteractiveViewer(Application):
         target_labels = {"wall clock", "sofa", "armchair", "couch"}
         candidates = []
 
-        for obj in scene.objects:
+        
+
+        
+
+        if object_ids is None: 
+            obj_to_draw = scene.objects
+        else:
+            obj_to_draw = [obj for obj in scene.objects if str(obj.id).split("_")[-1] in object_ids]
+            if obj_to_draw != self.prev_ids:
+                print(f"Drawing bounding boxes for objects: {[obj.id for obj in obj_to_draw]}")
+        self.prev_ids = obj_to_draw
+
+        for obj in obj_to_draw:
+
             label = ""
             if obj.category is not None and hasattr(obj.category, "name"):
                 label = obj.category.name()
             label_norm = label.strip().lower()
-            if label_norm not in target_labels:
+            if object_ids is None and label_norm not in target_labels:
                 continue
 
             if not label:
@@ -1296,6 +1324,7 @@ class HabitatSimInteractiveViewer(Application):
             ]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
+            # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
             candidates.append(
                 (volume, obj.id, label, corners, center, rotation, half_extents)
             )
@@ -1317,25 +1346,13 @@ class HabitatSimInteractiveViewer(Application):
             (6, 7),
         ]
 
-        for (
-            volume,
-            obj_id,
-            label,
-            corners,
-            center,
-            rotation,
-            half_extents,
-        ) in candidates[:max_boxes]:
+        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
             color = self._get_bbox_color(obj_id)
 
             for edge in edges:
                 start = corners[edge[0]]
                 end = corners[edge[1]]
-                debug_line_render.draw_transformed_line(
-                    start,
-                    end,
-                    color,
-                )
+                debug_line_render.draw_transformed_line(start, end, color)
 
             top_center = (
                 center
@@ -1367,7 +1384,7 @@ class HabitatSimInteractiveViewer(Application):
                     )
             self.draw_region_debug(debug_line_render)
         if self.show_object_bboxes:
-            self._draw_object_bboxes(debug_line_render)
+            self._draw_object_bboxes(debug_line_render, self.objs_to_draw_ids)
         else:
             self._bbox_label_screen_positions.clear()
 
@@ -2547,7 +2564,9 @@ def user_input_logic_loop(
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
             
-            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
+            instructions, objs_to_draw_ids = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
+            # print("Objects to draw IDs:", objs_to_draw_ids)
+            viewer.set_objs_to_draw_ids(objs_to_draw_ids)
             if instructions is None:
                 instructions = "Proceed to the " + room_name
 
