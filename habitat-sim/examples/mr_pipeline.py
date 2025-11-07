@@ -81,8 +81,7 @@ class NewViewer(BaseViewer):
         scene_path = sim_settings["scene"]
         super().__init__(sim_settings)
         self.q_app = q_app
-        self.objs_to_draw_ids = None
-        self.prev_ids = None
+
         self.cnt = 0
         self.action_queue = queue.Queue()
 
@@ -136,10 +135,6 @@ class NewViewer(BaseViewer):
 
         except queue.Empty:
             pass
-
-    def set_objs_to_draw_ids(self, object_ids):
-        # print(f"set_objs_to_draw_ids: {object_ids}")
-        self.action_queue.put((self._set_objs_to_draw_ids, (object_ids,), {}))
 
     def enqueue_shortest_path(self, goal_pos):
         self.action_queue.put((self.shortest_path, (self.sim, goal_pos), {}))
@@ -263,7 +258,6 @@ class NewViewer(BaseViewer):
         ids, counts = np.unique(semantic, return_counts=True)
 
         visible_objects = {}
-        # print("semantic ids", ids)
         for obj_id, pixel_count in zip(ids, counts):
             if obj_id == 0 or pixel_count < 50:
                 continue  # skip background/noise/small fragments
@@ -345,9 +339,9 @@ class NewViewer(BaseViewer):
                 "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
             }
 
-        # print(f"[DEBUG] Visible Objects (size): ")
-        # for obj_id, obj_data in visible_objects.items():
-        #     print(f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m")
+        print(f"[DEBUG] Visible Objects (size): ")
+        for obj_id, obj_data in visible_objects.items():
+            print(f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m")
 
         # Compute spatial relations
         relations = self.compute_spatial_relations(visible_objects)
@@ -483,12 +477,10 @@ class NewViewer(BaseViewer):
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
-            return "door"
+            return "doorway"
 
         if l in {"stairs", "stair", "step", "stairway"}:
-            return "stairs"
-        
-        # TODO add more classes synonyms/groupings as needed
+            return "staircase"
 
         return l
 
@@ -510,19 +502,19 @@ class NewViewer(BaseViewer):
         # ground-plane distance using world x,z (index 0 and 2)
         return math.hypot(a[0] - b[0], a[2] - b[2])
 
-
-    def merge_obbs(self, obb_a, obb_b):
+    def _merge_aabbs(self, aabb_a, aabb_b):
+        # each aabb: [[xmin,ymin,zmin],[xmax,ymax,zmax]]
         return [
             [
-                min(obb_a[0][0], obb_b[0][0]),
-                min(obb_a[0][1], obb_b[0][1]),
-                min(obb_a[0][2], obb_b[0][2]),
+                min(aabb_a[0][0], aabb_b[0][0]),
+                min(aabb_a[0][1], aabb_b[0][1]),
+                min(aabb_a[0][2], aabb_b[0][2]),
             ],
             [
-                max(obb_a[1][0], obb_b[1][0]),
-                max(obb_a[1][1], obb_b[1][1]),
-                max(obb_a[1][2], obb_b[1][2]),
-            ]
+                max(aabb_a[1][0], aabb_b[1][0]),
+                max(aabb_a[1][1], aabb_b[1][1]),
+                max(aabb_a[1][2], aabb_b[1][2]),
+            ],
         ]
 
     def _cluster_same_label(self, instances, distance_thresh=1.0):
@@ -613,7 +605,7 @@ class NewViewer(BaseViewer):
             )
 
         # 2) Clustering per label
-        clusters_list = []
+        dedup_list = []
         for label_norm, insts in buckets.items():
             clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
 
@@ -621,12 +613,12 @@ class NewViewer(BaseViewer):
             if top_k_per_label is not None and len(clusters) > top_k_per_label:
                 clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
 
-            clusters_list.extend(clusters)
+            dedup_list.extend(clusters)
 
         # 3) Build oggetti unici + stima linear_size di cluster
         objects = {}
         per_label_counts = {}
-        for cl in clusters_list:
+        for cl in dedup_list:
             cnt = per_label_counts.get(cl["label_norm"], 0) + 1
             per_label_counts[cl["label_norm"]] = cnt
             uid = f"{cl['label_norm']}_{cnt:02d}"
@@ -635,13 +627,14 @@ class NewViewer(BaseViewer):
             # (robusta anche se _cluster_same_label non propaga linear_size)
             raw_ids = list(cl.get("raw_ids", []))
             if raw_ids:
-                sizes = []
+                sizes, weights = [], []
                 for rid in raw_ids:
                     v = visible_objects.get(rid, {})
                     sz = float(v.get("linear_size", 0.0))
                     if sz > 0:
                         sizes.append(sz)
-                cluster_linear_size = (float(np.sum(sizes)) if sizes else float(cl.get("linear_size", 0.0)))
+                        weights.append(float(v.get("pixel_count", 1)))
+                cluster_linear_size = (float(np.average(sizes, weights=weights)) if sizes else float(cl.get("linear_size", 0.0)))
             else:
                 cluster_linear_size = float(cl.get("linear_size", 0.0))
 
@@ -661,14 +654,9 @@ class NewViewer(BaseViewer):
         relations = (self.compute_spatial_relations(objects) if recompute_relations else [])
 
         # 5) Ordinamento: salienza primaria pixel_count, secondaria grandezza
-        objects = dict(sorted(objects.items(), key=lambda item: (item[1].get("linear_size", 0.0),),reverse=True,))
+        objects = dict(sorted(objects.items(), key=lambda item: (item[1]["pixel_count"], item[1].get("linear_size", 0.0),), reverse=True))
 
         return {"objects": objects, "spatial_relations": relations}
-    
-    def _set_objs_to_draw_ids(self, object_ids):
-        # print(f" _set_objs_to_draw_ids: {object_ids}")
-        self.objs_to_draw_ids = object_ids
-        # print(f"Updated objs_to_draw_ids: {self.objs_to_draw_ids}")
 
     def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
         if not sim.pathfinder.is_loaded:
@@ -756,7 +744,7 @@ class NewViewer(BaseViewer):
                                 # Extract visible objects + relations
                                 frame_meta = self.extract_visible_objects(sim, observations)
                                 if frame_meta is not None:
-                                    processed_objs = self.postprocess_visible_objects(
+                                    dedup = self.postprocess_visible_objects(
                                         frame_meta["visible_objects"],
                                         pixel_percent_min=0.02,
                                         mode="blacklist",
@@ -777,8 +765,8 @@ class NewViewer(BaseViewer):
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{ix:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "objects": processed_objs["objects"],  
-                                        "spatial_relations": processed_objs["spatial_relations"],
+                                        "objects": dedup["objects"],  # deduped version
+                                        "spatial_relations": dedup["spatial_relations"],
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
 
@@ -884,12 +872,10 @@ class NewViewer(BaseViewer):
 
         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
-    def _draw_object_bboxes(self, debug_line_render: Any, object_ids: list = None) -> None:
-    
+    def _draw_object_bboxes(self, debug_line_render: Any) -> None:
         """
         Draw axis-aligned bounding boxes for every semantic object.
         """
-        # print(f" _draw_object_bboxes called with object_ids: {object_ids}")
         scene = self.sim.semantic_scene
         if scene is None:
             return
@@ -900,25 +886,12 @@ class NewViewer(BaseViewer):
         target_labels = {"wall clock", "sofa", "armchair", "couch"}
         candidates = []
 
-        
-
-        
-
-        if object_ids is None: 
-            obj_to_draw = scene.objects
-        else:
-            obj_to_draw = [obj for obj in scene.objects if str(obj.id).split("_")[-1] in object_ids]
-            if obj_to_draw != self.prev_ids:
-                print(f"Drawing bounding boxes for objects: {[obj.id for obj in obj_to_draw]}")
-        self.prev_ids = obj_to_draw
-
-        for obj in obj_to_draw:
-
+        for obj in scene.objects:
             label = ""
             if obj.category is not None and hasattr(obj.category, "name"):
                 label = obj.category.name()
             label_norm = label.strip().lower()
-            if object_ids is None and label_norm not in target_labels:
+            if label_norm not in target_labels:
                 continue
 
             if not label:
@@ -949,7 +922,6 @@ class NewViewer(BaseViewer):
             corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
             candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -957,13 +929,11 @@ class NewViewer(BaseViewer):
         edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
 
         for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
-        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
             color = self._get_bbox_color(obj_id)
 
             for edge in edges:
                 start = corners[edge[0]]
                 end = corners[edge[1]]
-                debug_line_render.draw_transformed_line(start, end, color)
                 debug_line_render.draw_transformed_line(start, end, color)
 
             top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
@@ -977,7 +947,7 @@ class NewViewer(BaseViewer):
         """
         super().debug_draw()
         if self.show_object_bboxes:
-            self._draw_object_bboxes(self.debug_line_render, self.objs_to_draw_ids)
+            self._draw_object_bboxes(self.debug_line_render)
         else:
             self._bbox_label_screen_positions.clear()
 
@@ -1240,6 +1210,7 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
+
 def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue):
     while True:
         try:
@@ -1248,48 +1219,27 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             if not user_input:
                 continue
 
-            llm_enabled = False
             # output_q.put("Processing your request...")
-            if not llm_enabled:
-                try:
-                    target_name, room_name = user_input.split("/")[0].strip(), user_input.split("/")[1].strip()
-                    output_q.put(f"Navigating to {room_name}/{target_name}...")
-                except Exception as e:
-                    print("Error parsing input without LLM. Please use 'object/room' format.")
-                    continue
-            else:            
-                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
-                print("Response from ChatGPT: ", response)
-                goal_info = get_goal_from_response(
-                    response
-                )  # * Handle response and distinguish cases
-                print("Handled Response: ", goal_info)
-                response = response.split(".", 1)[
-                    1
-                ].strip()  # Remove numbering from response for user display
-                res_type = goal_info["type"]
 
-                if res_type == "object_in_room":
-                    target_name = goal_info["object"]
-                    room_name = goal_info["room"]
-                elif (
-                    res_type == "room_only"
-                    or res_type == "object_in_single_room"
-                    or res_type == "object_repeated_in_room"
-                ):
-                    target_name = None
-                    room_name = goal_info["room"]
-                elif (
-                    res_type == "ambiguous_room"
-                    or res_type == "ambiguous_object_rooms"
-                    or res_type == "not_found"
-                    or res_type == "friendly_conversation"
-                ):
-                    print(goal_info["message"])
-                    output_q.put(response)
-                    continue
-                else:
-                    print(f"Unhandled goal type: {res_type}")
+            response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+            print("Response from ChatGPT: ", response)
+            goal_info = get_goal_from_response(response)  # * Handle response and distinguish cases
+            print("Handled Response: ", goal_info)
+            response = response.split(".", 1)[1].strip()  # Remove numbering from response for user display
+            res_type = goal_info["type"]
+
+            if res_type == "object_in_room":
+                target_name = goal_info["object"]
+                room_name = goal_info["room"]
+            elif (res_type == "room_only" or res_type == "object_in_single_room" or res_type == "object_repeated_in_room"):
+                target_name = None
+                room_name = goal_info["room"]
+            elif (res_type == "ambiguous_room" or res_type == "ambiguous_object_rooms" or res_type == "not_found" or res_type == "friendly_conversation"):
+                print(goal_info["message"])
+                output_q.put(response)
+                continue
+            else:
+                print(f"Unhandled goal type: {res_type}")
 
             # * === SANITY CHECK ===
             if not viewer.check_object_in_room(target_name, room_name):
@@ -1311,18 +1261,12 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
             viewer.enqueue_shortest_path(goal_pos)
             # output_q.put(f"Generating navigation instructions...")
-            time.sleep(0.2)
+            time.sleep(0.3)
 
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            
-            instructions, objs_to_draw_ids = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
-            # print("Objects to draw IDs:", objs_to_draw_ids)
-            viewer.set_objs_to_draw_ids(objs_to_draw_ids)
-            if instructions is None:
-                instructions = "Proceed to the " + room_name
-
+            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False)
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)
