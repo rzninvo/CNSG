@@ -50,12 +50,7 @@ from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
 # Try importing the base viewer.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "./")))
-from viewer import (
-    HabitatSimInteractiveViewer as BaseViewer,
-    MouseMode,
-    MouseGrabber,
-    Timer,
-)
+from viewer import (HabitatSimInteractiveViewer as BaseViewer, MouseMode, MouseGrabber, Timer)
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -98,57 +93,33 @@ class NewViewer(BaseViewer):
         self.map_room_id_to_name = {}
         self.room_objects_occurences = {}
 
-        if True:
-            base_path = os.path.dirname(scene_path)
-            scene_name = os.path.splitext(os.path.basename(scene_path))[0]
-            semantic_path = os.path.join(
-                base_path, f"{scene_name.split('.')[0]}.semantic.txt"
-            )
-            map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
-            # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
+        base_path = os.path.dirname(scene_path)
+        scene_name = os.path.splitext(os.path.basename(scene_path))[0]
+        semantic_path = os.path.join(
+            base_path, f"{scene_name.split('.')[0]}.semantic.txt"
+        )
+        map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+        # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
 
-            print(f"Base path: {base_path}")
-            print(f"Semantic path: {semantic_path}")
-            print(f"Map file path: {map_file_path}")
-            # print(f"Room-object occurences file path: {room_object_file_path}")
+        print(f"Base path: {base_path}")
+        print(f"Semantic path: {semantic_path}")
+        print(f"Map file path: {map_file_path}")
+        # print(f"Room-object occurences file path: {room_object_file_path}")
 
-            if os.path.exists(map_file_path):
-                with open(map_file_path, "r", encoding="utf-8") as f:
-                    self.map_room_id_to_name = json.load(f)
-            else:
-                raise FileNotFoundError(f"Map file not found: {map_file_path}")
+        if os.path.exists(map_file_path):
+            with open(map_file_path, "r", encoding="utf-8") as f:
+                self.map_room_id_to_name = json.load(f)
+        else:
+            raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
-            ignore_categories = [
-                "ceiling",
-                "floor",
-                "wall",
-                "handle",
-                "window frame",
-                "door frame",
-                "frame",
-                "unknown",
-                "stairs",
-                "staircase",
-                "stair",
-                "stairway",
-            ]
-            semantic_info = self.get_semantic_info(
-                semantic_path,
-                map_room_id_to_name=self.map_room_id_to_name,
-                ignore_categories=ignore_categories,
-            )
+        ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", "stairs", "staircase", "stair", "stairway"]
+        semantic_info = self.get_semantic_info(
+            semantic_path,
+            map_room_id_to_name=self.map_room_id_to_name,
+            ignore_categories=ignore_categories,
+        )
 
-            self.room_objects_occurences = semantic_info
-            # print("\nSemantic information of the scene:")
-            # print(semantic_info)
-
-            # self.print_scene_semantic_info()
-
-            # Demonstrate shortest path functionality
-            # dummy_goal = mn.Vector3(-1.6096749, 3.163378, -7.154511)
-            # self.shortest_path(self.sim, dummy_goal)
-
-        ###########################################
+        self.room_objects_occurences = semantic_info
 
     def _process_queued_actions(self):
         """Execute actions enqueued from other threads."""
@@ -181,24 +152,18 @@ class NewViewer(BaseViewer):
         # plt.show(block=False)
 
         self.topdown_map_counter = getattr(self, "topdown_map_counter", 0)
-        plt.savefig(
-            f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight"
-        )
+        plt.savefig(f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight")
         self.topdown_map_counter += 1
         plt.close()
         # logger.info(f"Saved: output/topdown_map.png")
 
-    def display_sample(
-        self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])
-    ):
+    def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
 
         arr = [rgb_img]
         titles = ["rgb"]
         if semantic_obs.size != 0:
-            semantic_img = Image.new(
-                "P", (semantic_obs.shape[1], semantic_obs.shape[0])
-            )
+            semantic_img = Image.new("P", (semantic_obs.shape[1], semantic_obs.shape[0]))
             semantic_img.putpalette(d3_40_colors_rgb.flatten())
             semantic_img.putdata((semantic_obs.flatten() % 40).astype(np.uint8))
             semantic_img = semantic_img.convert("RGBA")
@@ -206,9 +171,7 @@ class NewViewer(BaseViewer):
             titles.append("semantic")
 
         if depth_obs.size != 0:
-            depth_img = Image.fromarray(
-                (depth_obs / 10 * 255).astype(np.uint8), mode="L"
-            )
+            depth_img = Image.fromarray((depth_obs / 10 * 255).astype(np.uint8), mode="L")
             arr.append(depth_img)
             titles.append("depth")
 
@@ -242,10 +205,7 @@ class NewViewer(BaseViewer):
             dist = np.linalg.norm(segment)
             if dist == 0:
                 continue
-            if (
-                dist <= step_size
-                and np.linalg.norm(new_points[-1] - p1) > min_step_size
-            ):
+            if (dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size):
                 new_points.append(p1)
                 continue
             direction = segment / dist
@@ -290,9 +250,7 @@ class NewViewer(BaseViewer):
         returns a dict of visible objects and spatial relations between them.
         """
         if "semantic_sensor" not in observations:
-            logger.warning(
-                "No semantic sensor found; skipping visible object extraction."
-            )
+            logger.warning("No semantic sensor found; skipping visible object extraction.")
             return None
 
         semantic = observations["semantic_sensor"]
@@ -309,9 +267,7 @@ class NewViewer(BaseViewer):
             except IndexError:
                 continue
 
-            label = (
-                obj.category.name() if obj.category is not None else f"object_{obj_id}"
-            )
+            label = (obj.category.name() if obj.category is not None else f"object_{obj_id}")
             # Prefer oriented bounding box if available
             obb = getattr(obj, "obb", None)
             if obb is not None:
@@ -333,10 +289,7 @@ class NewViewer(BaseViewer):
                     mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
                     mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
                 ]
-                corners_world = [
-                    rotation.transform_vector(offset) + center
-                    for offset in corner_offsets
-                ]
+                corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
                 bbox_world = [
                     [
@@ -388,9 +341,7 @@ class NewViewer(BaseViewer):
 
         print(f"[DEBUG] Visible Objects (size): ")
         for obj_id, obj_data in visible_objects.items():
-            print(
-                f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m"
-            )
+            print(f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m")
 
         # Compute spatial relations
         relations = self.compute_spatial_relations(visible_objects)
@@ -400,14 +351,7 @@ class NewViewer(BaseViewer):
             "spatial_relations": relations,
         }
 
-    def compute_spatial_relations(
-        self,
-        visible_objects,
-        max_distance=1.5,
-        vertical_thresh=0.25,
-        horizontal_bias=1.2,
-        size_ratio_thresh=3.0,
-    ):
+    def compute_spatial_relations(self, visible_objects, max_distance=1.5, vertical_thresh=0.25, horizontal_bias=1.2, size_ratio_thresh=3.0):
         """
         Compute spatial relations between nearby objects, filtering out irrelevant ones.
         - Ignora relazioni tra oggetti con scala troppo diversa
@@ -426,19 +370,10 @@ class NewViewer(BaseViewer):
                 "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
             },
             "door": {
-                "allowed": [
-                    "on_top_of",
-                    "left_of",
-                    "right_of",
-                    "in_front_of",
-                ],
+                "allowed": ["on_top_of", "left_of", "right_of", "in_front_of"],
             },
             "window": {
-                "allowed": [
-                    "on_top_of",
-                    "left_of",
-                    "right_of",
-                ],
+                "allowed": [ "on_top_of", "left_of", "right_of"],
             },
             "ceiling": {
                 "allowed": ["beneath_of"],
@@ -498,10 +433,7 @@ class NewViewer(BaseViewer):
 
                 # Calcola la relazione dominante
                 rel_ab = None
-                if (
-                    abs_dy > vertical_thresh
-                    and abs_dy > (abs_dx + abs_dz) / horizontal_bias
-                ):
+                if (abs_dy > vertical_thresh and abs_dy > (abs_dx + abs_dz) / horizontal_bias):
                     rel_ab = "on_top_of" if dy > 0 else "beneath_of"
                 elif abs_dx > abs_dz:
                     rel_ab = "left_of" if dx > 0 else "right_of"
@@ -541,15 +473,7 @@ class NewViewer(BaseViewer):
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
         l = label.strip().lower()
-        if l in {
-            "wall",
-            "ceiling",
-            "floor",
-            "window frame",
-            "door frame",
-            "frame",
-            "unknown",
-        }:
+        if l in {"wall", "ceiling", "floor", "window frame", "door frame", "frame", "unknown"}:
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
@@ -560,14 +484,7 @@ class NewViewer(BaseViewer):
 
         return l
 
-    def _is_informative(
-        self,
-        label_norm: str,
-        *,
-        mode: str = "blacklist",
-        blacklist=None,
-        whitelist=None,
-    ) -> bool:
+    def _is_informative(self, label_norm: str, *, mode: str = "blacklist", blacklist=None, whitelist=None) -> bool:
         """
         mode="blacklist": keep everything except the blacklist
         mode="whitelist": keep only the whitelist
@@ -575,41 +492,10 @@ class NewViewer(BaseViewer):
         if mode not in {"blacklist", "whitelist"}:
             mode = "blacklist"
         if mode == "blacklist":
-            blacklist = set(
-                blacklist
-                or [
-                    "wall",
-                    "floor",
-                    "ceiling",
-                    "frame",
-                    "window frame",
-                    "unknown",
-                    "ceiling_light",
-                    "light",
-                    "lamp",
-                ]
-            )
+            blacklist = set(blacklist or ["wall", "floor", "ceiling", "frame", "window frame", "unknown", "ceiling_light", "light", "lamp"])
             return label_norm not in blacklist
         else:
-            whitelist = set(
-                whitelist
-                or [
-                    "doorway",
-                    "staircase",
-                    "elevator",
-                    "escalator",
-                    "corridor",
-                    "intersection",
-                    "railing",
-                    "exit_sign",
-                    "sign",
-                    "sofa",
-                    "table",
-                    "wardrobe",
-                    "balcony",
-                    "bridge",
-                ]
-            )
+            whitelist = set(whitelist or ["doorway", "staircase", "elevator", "escalator", "corridor", "intersection", "railing", "exit_sign", "sign", "sofa", "table", "wardrobe", "balcony", "bridge"])
             return label_norm in whitelist
 
     def _xy_dist(self, a, b):
@@ -643,46 +529,28 @@ class NewViewer(BaseViewer):
         clusters = []  # each: dict like instances, aggregated
 
         # Sort big to small so large areas seed clusters
-        instances_sorted = sorted(
-            instances, key=lambda x: x["pixel_count"], reverse=True
-        )
+        instances_sorted = sorted(instances, key=lambda x: x["pixel_count"], reverse=True)
 
         for inst in instances_sorted:
             assigned = False
             for cl in clusters:
-                if (
-                    self._xy_dist(inst["centroid_world"], cl["centroid_world"])
-                    <= distance_thresh
-                ):
+                if (self._xy_dist(inst["centroid_world"], cl["centroid_world"]) <= distance_thresh):
                     # merge into cluster (weighted by pixel_count)
                     w_old = cl["pixel_count"]
                     w_new = inst["pixel_count"]
                     w_sum = w_old + w_new
 
                     # weighted centroid (world)
-                    cx = (
-                        cl["centroid_world"][0] * w_old
-                        + inst["centroid_world"][0] * w_new
-                    ) / w_sum
-                    cy = (
-                        cl["centroid_world"][1] * w_old
-                        + inst["centroid_world"][1] * w_new
-                    ) / w_sum
-                    cz = (
-                        cl["centroid_world"][2] * w_old
-                        + inst["centroid_world"][2] * w_new
-                    ) / w_sum
+                    cx = (cl["centroid_world"][0] * w_old + inst["centroid_world"][0] * w_new) / w_sum
+                    cy = (cl["centroid_world"][1] * w_old + inst["centroid_world"][1] * w_new) / w_sum
+                    cz = (cl["centroid_world"][2] * w_old + inst["centroid_world"][2] * w_new) / w_sum
                     cl["centroid_world"] = [cx, cy, cz]
 
                     # choose min distance to camera (useful for narration)
-                    cl["distance_from_camera"] = min(
-                        cl["distance_from_camera"], inst["distance_from_camera"]
-                    )
+                    cl["distance_from_camera"] = min(cl["distance_from_camera"], inst["distance_from_camera"])
 
                     # union bbox
-                    cl["bbox_world"] = self._merge_aabbs(
-                        cl["bbox_world"], inst["bbox_world"]
-                    )
+                    cl["bbox_world"] = self._merge_aabbs(cl["bbox_world"], inst["bbox_world"])
 
                     # accumulate pixels
                     cl["pixel_count"] = w_sum
@@ -703,18 +571,7 @@ class NewViewer(BaseViewer):
 
         return clusters
 
-    def postprocess_visible_objects(
-        self,
-        visible_objects: dict,
-        *,
-        pixel_percent_min=0.02,
-        mode="blacklist",
-        blacklist=None,
-        whitelist=None,
-        per_label_cluster_thresh_m=1.0,
-        top_k_per_label=None,
-        recompute_relations=True,
-    ):
+    def postprocess_visible_objects(self, visible_objects: dict, *, pixel_percent_min=0.02, mode="blacklist", blacklist=None, whitelist=None, per_label_cluster_thresh_m=1.0, top_k_per_label=None, recompute_relations=True):
         """
         - visible_objects: the dict produced by extract_visible_objects()["visible_objects"]
         Returns:
@@ -727,9 +584,7 @@ class NewViewer(BaseViewer):
         buckets = {}  # label_norm -> list[instance]
         for raw_id, inst in visible_objects.items():
             label_norm = self._normalize_label(inst["label"])
-            if not self._is_informative(
-                label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist
-            ):
+            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
                 continue
             if inst.get("pixel_percent", 0.0) < pixel_percent_min:
                 continue
@@ -752,15 +607,11 @@ class NewViewer(BaseViewer):
         # 2) Clustering per label
         dedup_list = []
         for label_norm, insts in buckets.items():
-            clusters = self._cluster_same_label(
-                insts, distance_thresh=per_label_cluster_thresh_m
-            )
+            clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
 
             # (opzionale) top-K cluster per label
             if top_k_per_label is not None and len(clusters) > top_k_per_label:
-                clusters = sorted(
-                    clusters, key=lambda x: x["pixel_count"], reverse=True
-                )[:top_k_per_label]
+                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
 
             dedup_list.extend(clusters)
 
@@ -783,11 +634,7 @@ class NewViewer(BaseViewer):
                     if sz > 0:
                         sizes.append(sz)
                         weights.append(float(v.get("pixel_count", 1)))
-                cluster_linear_size = (
-                    float(np.average(sizes, weights=weights))
-                    if sizes
-                    else float(cl.get("linear_size", 0.0))
-                )
+                cluster_linear_size = (float(np.average(sizes, weights=weights)) if sizes else float(cl.get("linear_size", 0.0)))
             else:
                 cluster_linear_size = float(cl.get("linear_size", 0.0))
 
@@ -804,21 +651,10 @@ class NewViewer(BaseViewer):
             }
 
         # 4) Relazioni ricalcolate sul set deduplicato
-        relations = (
-            self.compute_spatial_relations(objects) if recompute_relations else []
-        )
+        relations = (self.compute_spatial_relations(objects) if recompute_relations else [])
 
         # 5) Ordinamento: salienza primaria pixel_count, secondaria grandezza
-        objects = dict(
-            sorted(
-                objects.items(),
-                key=lambda item: (
-                    item[1]["pixel_count"],
-                    item[1].get("linear_size", 0.0),
-                ),
-                reverse=True,
-            )
-        )
+        objects = dict(sorted(objects.items(), key=lambda item: (item[1]["pixel_count"], item[1].get("linear_size", 0.0),), reverse=True))
 
         return {"objects": objects, "spatial_relations": relations}
 
@@ -858,37 +694,18 @@ class NewViewer(BaseViewer):
                     meters_per_pixel = 0.025
                     height = sim.scene_aabb.y().min
 
-                    top_down_map = maps.get_topdown_map(
-                        sim.pathfinder, height, meters_per_pixel=meters_per_pixel
-                    )
-                    recolor_map = np.array(
-                        [[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8
-                    )
+                    top_down_map = maps.get_topdown_map(sim.pathfinder, height, meters_per_pixel=meters_per_pixel)
+                    recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8)
                     top_down_map = recolor_map[top_down_map]
                     grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
                     # convert world trajectory points to maps module grid points
-                    trajectory = [
-                        maps.to_grid(
-                            path_point[2],
-                            path_point[0],
-                            grid_dimensions,
-                            pathfinder=sim.pathfinder,
-                        )
-                        for path_point in path_points
-                    ]
-                    grid_tangent = mn.Vector2(
-                        trajectory[1][1] - trajectory[0][1],
-                        trajectory[1][0] - trajectory[0][0],
-                    )
+                    trajectory = [maps.to_grid(path_point[2], path_point[0], grid_dimensions, pathfinder=sim.pathfinder) for path_point in path_points]
+                    grid_tangent = mn.Vector2(trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0],)
                     path_initial_tangent = grid_tangent / grid_tangent.length()
-                    initial_angle = math.atan2(
-                        path_initial_tangent[0], path_initial_tangent[1]
-                    )
+                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
                     # draw the agent and trajectory on the map
                     maps.draw_path(top_down_map, trajectory)
-                    maps.draw_agent(
-                        top_down_map, trajectory[0], initial_angle, agent_radius_px=8
-                    )
+                    maps.draw_agent(top_down_map, trajectory[0], initial_angle, agent_radius_px=8)
                     # print("\nDisplay the map with agent and path overlay:")
                     self.display_map(top_down_map)
 
@@ -902,15 +719,9 @@ class NewViewer(BaseViewer):
                         if ix < len(path_points) - 1:
                             tangent = path_points[ix + 1] - point
                             agent_state.position = point
-                            tangent_orientation_matrix = mn.Matrix4.look_at(
-                                point, point + tangent, np.array([0, 1.0, 0])
-                            )
-                            tangent_orientation_q = mn.Quaternion.from_matrix(
-                                tangent_orientation_matrix.rotation()
-                            )
-                            agent_state.rotation = utils.quat_from_magnum(
-                                tangent_orientation_q
-                            )
+                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0, 1.0, 0]))
+                            tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
+                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
 
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
@@ -926,16 +737,12 @@ class NewViewer(BaseViewer):
                                 if save_images:
                                     # Save RGB/semantic preview as before
                                     if semantic is not None:
-                                        self.display_sample(
-                                            rgb_obs=rgb, semantic_obs=semantic
-                                        )
+                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
                                     else:
                                         self.display_sample(rgb_obs=rgb)
 
                                 # Extract visible objects + relations
-                                frame_meta = self.extract_visible_objects(
-                                    sim, observations
-                                )
+                                frame_meta = self.extract_visible_objects(sim, observations)
                                 if frame_meta is not None:
                                     dedup = self.postprocess_visible_objects(
                                         frame_meta["visible_objects"],
@@ -952,9 +759,7 @@ class NewViewer(BaseViewer):
                                         .sensor_states["color_sensor"]
                                     )
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
-                                    T_world_sensor = mn.Matrix4.from_(
-                                        rot_mn.to_matrix(), sensor_state.position
-                                    )
+                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
 
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
@@ -967,9 +772,7 @@ class NewViewer(BaseViewer):
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                        print(
-                                            f"✅ Saved metadata: output/frame_{ix:06d}.json"
-                                        )
+                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
 
@@ -981,26 +784,17 @@ class NewViewer(BaseViewer):
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
         if scene is not None:
-            print(
-                f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects"
-            )
+            print(f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects")
 
             for region in scene.regions:
                 print(f"\nRegion id:{region.id}" f" center:{region.aabb.center}")
                 for obj in region.objects:
-                    print(
-                        f"\tObject id:{obj.id}, category:{obj.category.name()},"
-                        f" center:{self.compute_xyz_center(obj.aabb)}"
-                    )
+                    print(f"\tObject id:{obj.id}, category:{obj.category.name()}," f" center:{self.compute_xyz_center(obj.aabb)}")
 
     def compute_xyz_center(self, obj_aabb):
         # ottieni i vertici min e max dell'AABB
-        vmin = (
-            obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min
-        )
-        vmax = (
-            obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max
-        )
+        vmin = (obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min)
+        vmax = (obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max)
 
         # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
         cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
@@ -1067,18 +861,11 @@ class NewViewer(BaseViewer):
             if not label:
                 continue
 
-            label_renderer = text.Renderer2D(
-                self.display_font,
-                self.glyph_cache,
-                BaseViewer.DISPLAY_FONT_SIZE,
-                text.Alignment.TOP_CENTER,
-            )
+            label_renderer = text.Renderer2D(self.display_font, self.glyph_cache, BaseViewer.DISPLAY_FONT_SIZE, text.Alignment.TOP_CENTER)
             label_renderer.reserve(len(label))
             label_renderer.render(label)
 
-            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(
-                screen_pos
-            )
+            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(screen_pos)
             self.shader.transformation_projection_matrix = transform
             self.shader.color = mn.Color4(1.0, 1.0, 1.0, 1.0)
             self.shader.draw(label_renderer.mesh)
@@ -1132,57 +919,24 @@ class NewViewer(BaseViewer):
                 mn.Vector3(-half_extents[0], half_extents[1], half_extents[2]),
                 mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
             ]
-            corners = [
-                rotation.transform_vector(offset) + center for offset in corner_offsets
-            ]
+            corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            candidates.append(
-                (volume, obj.id, label, corners, center, rotation, half_extents)
-            )
+            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
 
-        edges = [
-            (0, 1),
-            (0, 2),
-            (0, 4),
-            (1, 3),
-            (1, 5),
-            (2, 3),
-            (2, 6),
-            (3, 7),
-            (4, 5),
-            (4, 6),
-            (5, 7),
-            (6, 7),
-        ]
+        edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
 
-        for (
-            volume,
-            obj_id,
-            label,
-            corners,
-            center,
-            rotation,
-            half_extents,
-        ) in candidates[:max_boxes]:
+        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
             color = self._get_bbox_color(obj_id)
 
             for edge in edges:
                 start = corners[edge[0]]
                 end = corners[edge[1]]
-                debug_line_render.draw_transformed_line(
-                    start,
-                    end,
-                    color,
-                )
+                debug_line_render.draw_transformed_line(start, end, color)
 
-            top_center = (
-                center
-                + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0))
-                + mn.Vector3(0.0, 0.05, 0.0)
-            )
+            top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
             screen_pos = self._project_to_screen(top_center)
             if screen_pos is not None:
                 self._bbox_label_screen_positions.append((label, screen_pos))
@@ -1197,12 +951,7 @@ class NewViewer(BaseViewer):
         else:
             self._bbox_label_screen_positions.clear()
 
-    def draw_event(
-        self,
-        simulation_call: Optional[Callable] = None,
-        global_call: Optional[Callable] = None,
-        active_agent_id_and_sensor_name: Tuple[int, str] = (0, "color_sensor"),
-    ) -> None:
+    def draw_event(self, simulation_call: Optional[Callable] = None, global_call: Optional[Callable] = None, active_agent_id_and_sensor_name: Tuple[int, str] = (0, "color_sensor")) -> None:
         """
         Calls continuously to re-render frames and swap the two frame buffers
         at a fixed rate.
@@ -1212,9 +961,7 @@ class NewViewer(BaseViewer):
 
         agent_acts_per_sec = self.fps
 
-        mn.gl.default_framebuffer.clear(
-            mn.gl.FramebufferClear.COLOR | mn.gl.FramebufferClear.DEPTH
-        )
+        mn.gl.default_framebuffer.clear(mn.gl.FramebufferClear.COLOR | mn.gl.FramebufferClear.DEPTH)
 
         # Agent actions should occur at a fixed rate per second
         self.time_since_last_simulation += Timer.prev_frame_duration
@@ -1232,9 +979,7 @@ class NewViewer(BaseViewer):
                 global_call()
 
             # reset time_since_last_simulation, accounting for potential overflow
-            self.time_since_last_simulation = math.fmod(
-                self.time_since_last_simulation, 1.0 / self.fps
-            )
+            self.time_since_last_simulation = math.fmod(self.time_since_last_simulation, 1.0 / self.fps)
 
         if self.enable_batch_renderer:
             self.render_batch()
@@ -1251,11 +996,7 @@ class NewViewer(BaseViewer):
                         for sensor in agent_sensors:
                             spec_fn = getattr(sensor, "specification", None)
                             spec = spec_fn() if callable(spec_fn) else None
-                            if (
-                                spec is not None
-                                and getattr(spec, "sensor_type", None)
-                                == habitat_sim.SensorType.COLOR
-                            ):
+                            if (spec is not None and getattr(spec, "sensor_type", None) == habitat_sim.SensorType.COLOR):
                                 color_sensor = sensor
                                 break
             if color_sensor is None:
@@ -1325,18 +1066,12 @@ class NewViewer(BaseViewer):
             # Case 3: search for the object (in matching room or in all rooms)
             if object_name:
                 for obj in region.objects:
-                    if (
-                        obj
-                        and obj.category
-                        and obj.category.name().lower() == object_name.lower()
-                    ):
+                    if (obj and obj.category and obj.category.name().lower() == object_name.lower()):
                         return mn.Vector3(obj.obb.center)
 
         return None
 
-    def check_object_in_room(
-        self, object_name: Optional[str], room_name: Optional[str]
-    ) -> bool:
+    def check_object_in_room(self, object_name: Optional[str], room_name: Optional[str]) -> bool:
         """
         Verifies whether the given object exists in the given room.
         If room_name is None, always returns False.
@@ -1429,10 +1164,7 @@ class NewViewer(BaseViewer):
 
         messages = [
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": user_input + "\n" + str(self.room_objects_occurences),
-            },
+            {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
         ]
 
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
@@ -1479,9 +1211,7 @@ def get_goal_from_response(response: str) -> object:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
 
-def user_input_logic_loop(
-    viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue
-):
+def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue):
     while True:
         try:
             user_input = input_q.get()
@@ -1493,31 +1223,18 @@ def user_input_logic_loop(
 
             response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
             print("Response from ChatGPT: ", response)
-            goal_info = get_goal_from_response(
-                response
-            )  # * Handle response and distinguish cases
+            goal_info = get_goal_from_response(response)  # * Handle response and distinguish cases
             print("Handled Response: ", goal_info)
-            response = response.split(".", 1)[
-                1
-            ].strip()  # Remove numbering from response for user display
+            response = response.split(".", 1)[1].strip()  # Remove numbering from response for user display
             res_type = goal_info["type"]
 
             if res_type == "object_in_room":
                 target_name = goal_info["object"]
                 room_name = goal_info["room"]
-            elif (
-                res_type == "room_only"
-                or res_type == "object_in_single_room"
-                or res_type == "object_repeated_in_room"
-            ):
+            elif (res_type == "room_only" or res_type == "object_in_single_room" or res_type == "object_repeated_in_room"):
                 target_name = None
                 room_name = goal_info["room"]
-            elif (
-                res_type == "ambiguous_room"
-                or res_type == "ambiguous_object_rooms"
-                or res_type == "not_found"
-                or res_type == "friendly_conversation"
-            ):
+            elif (res_type == "ambiguous_room" or res_type == "ambiguous_object_rooms" or res_type == "not_found" or res_type == "friendly_conversation"):
                 print(goal_info["message"])
                 output_q.put(response)
                 continue
@@ -1532,9 +1249,7 @@ def user_input_logic_loop(
                 print(f"Sanity check passed: '{target_name}' in '{room_name}'")
 
             # * Query scene (and retrieve a point in the 3D space)
-            goal_pos = viewer.get_object_position(
-                object_name=target_name, room_name=room_name
-            )
+            goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
             print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
 
             if goal_pos is None:
@@ -1551,9 +1266,7 @@ def user_input_logic_loop(
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            instructions = generate_path_description(
-                input_dir, user_input=user_input, model="gpt-4o", dry_run=False
-            )
+            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False)
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)
