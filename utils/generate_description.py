@@ -148,14 +148,14 @@ RELEVANCE_SCORES_OBJECTS = {
 class FrameSummary:
     name: str
     objects: Sequence[str]
-    relationships: Sequence[str]
+    relations: Sequence[str]
 
     def to_prompt_line(self, num_objs_per_frame = 2) -> str:
         if not self.objects:
             return f"{self.name}: Limited visibility in this frame."
 
         object_part = ", ".join(self.objects[:num_objs_per_frame])
-        rel_part = "; ".join(self.relationships[:num_objs_per_frame]) if self.relationships else ""
+        rel_part = "; ".join(self.relations[:num_objs_per_frame]) if self.relations else ""
 
         description = f"In {self.name}, you see {object_part}"
         if rel_part:
@@ -312,7 +312,7 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
         )
 
 
-def extract_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str]:
+def select_n_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str]:
     candidates: List[Dict[str, Any]] = []
     for obj in visible_objects.values():
         label = str(obj.get("label", "")).lower()
@@ -332,7 +332,7 @@ def extract_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str
     return results, candidates[:limit]
 
 
-def extract_relationships(
+def extract_relations(
     relationships: Iterable[Dict[str, Any]], limit: int = 2
 ) -> List[str]:
     def natural_direction(relation: str) -> str:
@@ -368,36 +368,33 @@ def extract_relationships(
 def summarise_frames(frames: Sequence[Dict[str, Any]], num_objs_per_frame = 2) -> List[FrameSummary]:
     summaries: List[FrameSummary] = []
 
-    raw_ids = []
+    obj_str_ids_to_draw = set()
 
     for frame in frames:
         name = str(frame.get("image_index") or frame.get("frame", "frame")).strip()
-        object_data = frame.get("objects") or frame.get("visible_objects") or {}
-        relation_data = (
-            frame.get("spatial_relations") or frame.get("relationships") or []
-        )
-        phrases, objects = extract_objects(object_data)
-        relationships = extract_relationships(relation_data)
-        print("Frame", name, "objects:", objects)
-        for obj in objects[:num_objs_per_frame]:
-            if "merged_raw_ids" in obj:
-                merged_raw_ids = obj.get("merged_raw_ids")
-                if isinstance(merged_raw_ids, list):
-                    for raw_id in merged_raw_ids:
-                        if raw_id not in raw_ids:
-                            raw_ids.append(raw_id)
+        objects = frame.get("objects", {})
+        spatial_relations = frame.get("spatial_relations", [])
 
-        # print("IDs in frame", name, ":", list(raw_ids))
+        phrases, selected_objects = select_n_objects(objects, num_objs_per_frame)
+        relations = extract_relations(spatial_relations)
+        print("Frame", name, "objects:", selected_objects)
+        for obj in selected_objects:
+            if "obj_str_ids" in obj:
+                obj_str_ids = obj.get("obj_str_ids")
+                for obj_str_id in obj_str_ids:
+                    obj_str_ids_to_draw.add(obj_str_id)
+
+        print("IDs in frame", name, ":", list(obj_str_ids_to_draw))
 
         summaries.append(
             FrameSummary(
                 name=name,
                 objects=phrases,
-                relationships=relationships,
+                relations=relations,
             )
         )
     # print("All collected IDs:", raw_ids)
-    return summaries, raw_ids
+    return summaries, list(obj_str_ids_to_draw)
 
 
 def build_prompt(
@@ -509,14 +506,14 @@ def generate_path_description(
     frames = load_frames(input_dir, max_frames)
     scene_index = frames[0].get("scene_index")
     num_objs_per_frame = 2
-    summaries, raw_ids = summarise_frames(frames, num_objs_per_frame=num_objs_per_frame)
+    summaries, obj_str_ids_to_draw = summarise_frames(frames, num_objs_per_frame=num_objs_per_frame)
     prompt = build_prompt(scene_index, summaries, user_input, num_objs_per_frame=num_objs_per_frame)
 
     print(prompt)
     if dry_run: 
-        return None, raw_ids
+        return None, obj_str_ids_to_draw
 
-    return generate_description(prompt, model), raw_ids
+    return generate_description(prompt, model), obj_str_ids_to_draw
 
 
 if __name__ == "__main__":

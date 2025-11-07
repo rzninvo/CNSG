@@ -21,11 +21,7 @@ import re
 import threading
 import queue
 
-
-import json
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Iterable, Sequence
 from dataclasses import dataclass
 import textwrap
 from openai import OpenAI
@@ -81,12 +77,11 @@ class NewViewer(BaseViewer):
         scene_path = sim_settings["scene"]
         super().__init__(sim_settings)
         self.q_app = q_app
-        self.objs_to_draw_ids = None
+        self.objs_str_ids_to_draw = None # List of 'Numbers' e.g. ['1', '645', ...]
         self.prev_ids = None
-        self.cnt = 0
         self.action_queue = queue.Queue()
 
-        # draw object bounding boxes when enabled
+        # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
@@ -94,6 +89,7 @@ class NewViewer(BaseViewer):
         self.map_room_id_to_name = {}
         self.room_objects_occurences = {}
 
+        # * Load semantic info files
         base_path = os.path.dirname(scene_path)
         scene_name = os.path.splitext(os.path.basename(scene_path))[0]
         semantic_path = os.path.join(
@@ -122,27 +118,205 @@ class NewViewer(BaseViewer):
 
         self.room_objects_occurences = semantic_info
 
-    def _process_queued_actions(self):
-        """Execute actions enqueued from other threads."""
-        try:
-            while True:
-                action, args, kwargs = self.action_queue.get_nowait()
-                try:
-                    action(*args, **kwargs)
-                except Exception as e:
-                    print(f"Error executing queued action {action}: {e}")
+        # self.print_scene_semantic_info()
 
-                self.action_queue.task_done()
+    def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
+        semantic_info = {}
+        with open(file_path, "r") as f:
+            for line in f:
+                line_parts = line.strip().split(",")
+                if len(line_parts) != 4:
+                    continue
 
-        except queue.Empty:
-            pass
+                room_info = map_room_id_to_name.get(line_parts[3])
+                if room_info and "name" in room_info:
+                    room_id = room_info["name"]
+                else:
+                    room_id = "unknown_room"
 
-    def set_objs_to_draw_ids(self, object_ids):
-        # print(f"set_objs_to_draw_ids: {object_ids}")
-        self.action_queue.put((self._set_objs_to_draw_ids, (object_ids,), {}))
+                category_id = line_parts[2].strip('"')
 
-    def enqueue_shortest_path(self, goal_pos):
-        self.action_queue.put((self.shortest_path, (self.sim, goal_pos), {}))
+                if room_id not in semantic_info:
+                    semantic_info[room_id] = {}
+
+                if category_id not in ignore_categories:
+                    if category_id not in semantic_info[room_id]:
+                        semantic_info[room_id][category_id] = 1
+                    else:
+                        semantic_info[room_id][category_id] += 1
+
+        return semantic_info
+
+    def print_scene_semantic_info(self) -> None:
+        scene = self.sim.semantic_scene
+        if scene is not None:
+            print(f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects")
+
+            for region in scene.regions:
+                print(f"\nRegion id:{region.id}" f" center:{region.aabb.center}")
+                for obj in region.objects:
+                    print(f"\tObject id:{obj.id}, category:{obj.category.name()}," f" center:{self.compute_xyz_center(obj.obb)}")
+
+    def compute_xyz_center(self, obj_obb):
+        # ottieni i vertici min e max dell'OBB
+        vmin = (obj_obb.min() if callable(getattr(obj_obb, "min", None)) else obj_obb.min)
+        vmax = (obj_obb.max() if callable(getattr(obj_obb, "max", None)) else obj_obb.max)
+
+        # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
+        cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
+        cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
+        cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
+        return cx, cy, cz
+
+    def set_objs_str_ids_to_draw(self, objs_str_ids_to_draw: List[str]):
+        self.objs_str_ids_to_draw = objs_str_ids_to_draw
+        # print(f"Updated objs_str_ids_to_draw: {self.objs_str_ids_to_draw}")    
+
+    def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
+        if not sim.pathfinder.is_loaded:
+            print("Pathfinder not initialized, aborting.")
+        else:
+            seed = 4  # 4  # @param {type:"integer"}
+            sim.pathfinder.seed(seed)
+
+            agent_state = sim.get_agent(self.agent_id).get_state()
+            initial_agent_state_position = agent_state.position
+            initial_agent_state_rotation = agent_state.rotation
+
+            path = habitat_sim.ShortestPath()
+            path.requested_start = mn.Vector3(initial_agent_state_position)
+            path.requested_end = goal
+            found_path = sim.pathfinder.find_path(path)
+            path_points = path.points
+
+            print("Path found : " + str(found_path))
+            print("Start : " + str(path.requested_start))
+            print("Goal : " + str(path.requested_end))
+            print("Path points : " + str(path_points))
+
+            path_points = self.densify_path(path_points, step_size=3.0)
+
+            save_images = False
+
+            output_dir = "output"
+            if os.path.exists(output_dir):
+                shutil.rmtree(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+
+            if found_path:
+                if save_images:
+                    meters_per_pixel = 0.025
+                    height = sim.scene_aabb.y().min
+
+                    top_down_map = maps.get_topdown_map(sim.pathfinder, height, meters_per_pixel=meters_per_pixel)
+                    recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8)
+                    top_down_map = recolor_map[top_down_map]
+                    grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
+                    # convert world trajectory points to maps module grid points
+                    trajectory = [maps.to_grid(path_point[2], path_point[0], grid_dimensions, pathfinder=sim.pathfinder) for path_point in path_points]
+                    grid_tangent = mn.Vector2(trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0],)
+                    path_initial_tangent = grid_tangent / grid_tangent.length()
+                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
+                    # draw the agent and trajectory on the map
+                    maps.draw_path(top_down_map, trajectory)
+                    maps.draw_agent(top_down_map, trajectory[0], initial_angle, agent_radius_px=8)
+                    # print("\nDisplay the map with agent and path overlay:")
+                    self.display_map(top_down_map)
+
+                # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
+                display_path_agent_renders = True  # @param{type:"boolean"}
+                if display_path_agent_renders:
+                    # print("Rendering observations at path points:")
+                    tangent = path_points[1] - path_points[0]
+                    agent_state = habitat_sim.AgentState()
+                    for ix, point in enumerate(path_points):
+                        if ix < len(path_points) - 1:
+                            tangent = path_points[ix + 1] - point
+                            agent_state.position = point
+                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0, 1.0, 0]))
+                            tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
+                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
+
+                            agent = sim.get_agent(self.agent_id)
+                            agent.set_state(agent_state)
+
+                            observations = sim.get_sensor_observations()
+
+                            # use get with default None to safely handle missing sensors
+                            rgb = observations.get("color_sensor", None)
+                            semantic = observations.get("semantic_sensor", None)
+                            depth = observations.get("depth_sensor", None)
+
+                            if rgb is not None:
+                                if save_images:
+                                    # Save RGB/semantic preview as before
+                                    if semantic is not None:
+                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
+                                    else:
+                                        self.display_sample(rgb_obs=rgb)
+
+                                # Extract visible objects + relations
+                                visible_objs = self.extract_visible_objs(sim, observations)
+                                if visible_objs is not None:
+                                    processed_objs = self.postprocess_visible_objects(
+                                        visible_objs,
+                                        pixel_percent_min=0.02,
+                                        mode="blacklist",
+                                        per_label_cluster_thresh_m=1.2,
+                                        top_k_per_label=3,
+                                    )
+
+
+                                    sensor_state = (
+                                        sim.get_agent(0)
+                                        .get_state()
+                                        .sensor_states["color_sensor"]
+                                    )
+                                    rot_mn = utils.quat_to_magnum(sensor_state.rotation)
+                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
+
+                                    print(f"[PLUTO] Oggetti: {processed_objs}")
+                                    frame_data = {
+                                        "scene_index": sim.curr_scene_name,
+                                        "image_index": f"frame-{ix:06d}",
+                                        "scene_pose": np.array(T_world_sensor).tolist(),
+                                        "objects": processed_objs,  
+                                        "spatial_relations": self.compute_spatial_relations(processed_objs),
+                                        "timestamp": datetime.datetime.now().isoformat(),
+                                    }
+
+                                    with open(f"output/frame_{ix:06d}.json", "w") as f:
+                                        json.dump(frame_data, f, indent=2)
+                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
+                            else:
+                                print("No color sensor found in observations.")
+
+            agent_state.position = initial_agent_state_position
+            agent_state.rotation = initial_agent_state_rotation
+            agent = sim.get_agent(self.agent_id)
+            agent.set_state(agent_state)
+        
+    def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
+        points = np.array(path_points)
+
+        new_points = [points[0]]
+        for i in range(1, len(points)):
+            p0, p1 = points[i - 1], points[i]
+            segment = p1 - p0
+            dist = np.linalg.norm(segment)
+            if dist == 0:
+                continue
+            if (dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size):
+                new_points.append(p1)
+                continue
+            direction = segment / dist
+            n_steps = int(dist / step_size)
+            for s in range(1, n_steps + 1):
+                new_point = p0 + direction * step_size * s
+                new_points.append(new_point)
+        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3:  # NOTE removed
+            new_points.append(points[-1])
+        return np.array(new_points)
 
     # display a topdown map with matplotlib
     def display_map(self, topdown_map, key_points=None):
@@ -199,57 +373,8 @@ class NewViewer(BaseViewer):
         plt.savefig(filename, bbox_inches="tight")
         plt.close()
         # logger.info(f"Saved: {filename}")
-
-    def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
-        points = np.array(path_points)
-
-        new_points = [points[0]]
-        for i in range(1, len(points)):
-            p0, p1 = points[i - 1], points[i]
-            segment = p1 - p0
-            dist = np.linalg.norm(segment)
-            if dist == 0:
-                continue
-            if (dist <= step_size and np.linalg.norm(new_points[-1] - p1) > min_step_size):
-                new_points.append(p1)
-                continue
-            direction = segment / dist
-            n_steps = int(dist / step_size)
-            for s in range(1, n_steps + 1):
-                new_point = p0 + direction * step_size * s
-                new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3:  # NOTE removed
-            new_points.append(points[-1])
-        return np.array(new_points)
-
-    def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
-        semantic_info = {}
-        with open(file_path, "r") as f:
-            for line in f:
-                line_parts = line.strip().split(",")
-                if len(line_parts) != 4:
-                    continue
-
-                room_info = map_room_id_to_name.get(line_parts[3])
-                if room_info and "name" in room_info:
-                    room_id = room_info["name"]
-                else:
-                    room_id = "unknown_room"
-
-                category_id = line_parts[2].strip('"')
-
-                if room_id not in semantic_info:
-                    semantic_info[room_id] = {}
-
-                if category_id not in ignore_categories:
-                    if category_id not in semantic_info[room_id]:
-                        semantic_info[room_id][category_id] = 1
-                    else:
-                        semantic_info[room_id][category_id] += 1
-
-        return semantic_info
-
-    def extract_visible_objects(self, sim, observations) -> Optional[Dict[str, Any]]:
+    
+    def extract_visible_objs(self, sim, observations) -> Optional[Dict[str, Any]]:
         """
         Given current sim and observations (must include semantic sensor),
         returns a dict of visible objects and spatial relations between them.
@@ -260,22 +385,22 @@ class NewViewer(BaseViewer):
 
         semantic = observations["semantic_sensor"]
         total_pixels = semantic.size
-        ids, counts = np.unique(semantic, return_counts=True)
+        num_ids, counts = np.unique(semantic, return_counts=True)
 
         visible_objects = {}
         # print("semantic ids", ids)
-        for obj_id, pixel_count in zip(ids, counts):
-            if obj_id == 0 or pixel_count < 50:
+        for obj_num_id, pixel_count in zip(num_ids, counts): # obj_num_id is 'Number'
+            if obj_num_id == 0 or pixel_count < 50:
                 continue  # skip background/noise/small fragments
 
             try:
-                obj = sim.semantic_scene.objects[obj_id]
+                sim_obj = sim.semantic_scene.objects[obj_num_id]
             except IndexError:
                 continue
 
-            label = (obj.category.name() if obj.category is not None else f"object_{obj_id}")
+            label = (sim_obj.category.name() if sim_obj.category is not None else f"sim_object_{obj_num_id}")
             # Prefer oriented bounding box if available
-            obb = getattr(obj, "obb", None)
+            obb = getattr(sim_obj, "obb", None)
             if obb is not None:
                 center = mn.Vector3(obb.center)
                 half_extents = mn.Vector3(obb.half_extents)
@@ -312,7 +437,7 @@ class NewViewer(BaseViewer):
                 centroid_world = [float(center.x), float(center.y), float(center.z)]
             else:
                 # fallback to aabb if obb missing
-                aabb = obj.aabb
+                aabb = sim_obj.aabb
                 vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
                 vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
                 bbox_world = [
@@ -334,7 +459,9 @@ class NewViewer(BaseViewer):
             centroid_cam = np.array([centroid_cam.x, centroid_cam.y, centroid_cam.z])
             dist = float(np.linalg.norm(centroid_cam))
 
-            visible_objects[str(obj_id)] = {
+            obj_str_id = str(sim_obj.id)  # -> Eg. 'wall_clock_231'
+            visible_objects[obj_str_id] = {
+                "sim_obj": sim_obj, 
                 "label": label,
                 "pixel_count": int(pixel_count),
                 "pixel_percent": float(100 * pixel_count / total_pixels),
@@ -345,17 +472,23 @@ class NewViewer(BaseViewer):
                 "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
             }
 
-        # print(f"[DEBUG] Visible Objects (size): ")
-        # for obj_id, obj_data in visible_objects.items():
-        #     print(f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m")
 
-        # Compute spatial relations
-        relations = self.compute_spatial_relations(visible_objects)
 
-        return {
-            "visible_objects": visible_objects,
-            "spatial_relations": relations,
-        }
+        return visible_objects
+    
+    def compute_object_size(self, obj_entry: dict[str, any]) -> float:
+        """
+        Return approximate linear size (in meters) of an object based on its bounding box.
+        Works with bbox_world from extract_visible_objects.
+        """
+        bbox = obj_entry.get("bbox_world")
+        if not bbox or len(bbox) != 2:
+            return 0.0
+        vmin, vmax = np.array(bbox[0]), np.array(bbox[1])
+        dims = np.abs(vmax - vmin)  # [dx, dy, dz] in meters
+        volume = float(np.prod(dims))
+        linear_size = float(np.cbrt(volume))  # cubic root gives a single scalar size
+        return linear_size
 
     def compute_spatial_relations(self, visible_objects, max_distance=1.5, vertical_thresh=0.25, horizontal_bias=1.2, size_ratio_thresh=3.0):
         """
@@ -453,28 +586,64 @@ class NewViewer(BaseViewer):
 
                 relations.append(
                     {
-                        "subject": obj_a["label"],
-                        "object": obj_b["label"],
+                        "subject": obj_a,
+                        "object": obj_b,
                         "relation": rel_ab,
                         "distance_m": round(float(dist), 3),
                     }
                 )
 
         return relations
+    
+    def postprocess_visible_objects(self, visible_objs: dict, *, pixel_percent_min=0.02, mode="blacklist", blacklist=None, whitelist=None, per_label_cluster_thresh_m=1.0, top_k_per_label=None):
+        """
+        - visible_objects: the dict produced by extract_visible_objs_and_relations()["visible_objects"]
+        Returns:
+            {
+            "objects": { "<uid>": {...} },
+            "spatial_relations": [ ... ]   # recomputed on deduped set (if requested)
+            }
+        """
+        buckets = {}  # {label_norm : list[obj_str_ids]
+        for obj_str_id, visible_obj in visible_objs.items():
+            label_norm = self._normalize_label(visible_obj["label"])
+            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
+                continue
+            if visible_obj.get("pixel_percent", 0.0) < pixel_percent_min:
+                continue
 
-    def compute_object_size(self, obj_entry: dict[str, any]) -> float:
-        """
-        Return approximate linear size (in meters) of an object based on its bounding box.
-        Works with bbox_world from extract_visible_objects.
-        """
-        bbox = obj_entry.get("bbox_world")
-        if not bbox or len(bbox) != 2:
-            return 0.0
-        vmin, vmax = np.array(bbox[0]), np.array(bbox[1])
-        dims = np.abs(vmax - vmin)  # [dx, dy, dz] in meters
-        volume = float(np.prod(dims))
-        linear_size = float(np.cbrt(volume))  # cubic root gives a single scalar size
-        return linear_size
+            buckets.setdefault(label_norm, []).append(obj_str_id)
+
+        clusters_list = []
+        cluster_cnt = 0
+        for label_norm, obj_str_ids in buckets.items():
+            clusters, cluster_cnt = self._cluster_same_label(obj_str_ids, visible_objs, cluster_cnt, label_norm, distance_thresh=per_label_cluster_thresh_m)
+
+            # (opzionale) top-K cluster per label
+            if top_k_per_label is not None and len(clusters) > top_k_per_label:
+                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
+
+            clusters_list.extend(clusters)
+
+        objects = {}
+        for cluster in clusters_list:
+            uid = f"{cluster['label_norm']}_{cluster['cluster_id']}"
+            objects[uid] = {
+                "label": cluster["label_norm"],
+                "pixel_count": int(cluster["pixel_count"]),
+                "pixel_percent": float(cluster["pixel_percent"]),
+                "centroid_world": [float(v) for v in cluster["centroid_world"]],
+                "bbox_world": cluster.get("bbox_world"),
+                "centroid_cam": cluster["centroid_cam"],
+                "distance_from_camera": float(cluster["distance_from_camera"]),
+                "linear_size": cluster["linear_size"],
+                "obj_str_ids": sorted(cluster["obj_str_ids"]),
+            }
+
+
+        processed_objs = dict(sorted(objects.items(), key=lambda item: (item[1].get("linear_size", 0.0),),reverse=True,))
+
+        return processed_objs
 
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
@@ -505,31 +674,13 @@ class NewViewer(BaseViewer):
         else:
             whitelist = set(whitelist or ["doorway", "staircase", "elevator", "escalator", "corridor", "intersection", "railing", "exit_sign", "sign", "sofa", "table", "wardrobe", "balcony", "bridge"])
             return label_norm in whitelist
-
-    def _xy_dist(self, a, b):
-        # ground-plane distance using world x,z (index 0 and 2)
-        return math.hypot(a[0] - b[0], a[2] - b[2])
-
-
-    def merge_obbs(self, obb_a, obb_b):
-        return [
-            [
-                min(obb_a[0][0], obb_b[0][0]),
-                min(obb_a[0][1], obb_b[0][1]),
-                min(obb_a[0][2], obb_b[0][2]),
-            ],
-            [
-                max(obb_a[1][0], obb_b[1][0]),
-                max(obb_a[1][1], obb_b[1][1]),
-                max(obb_a[1][2], obb_b[1][2]),
-            ]
-        ]
-
-    def _cluster_same_label(self, instances, distance_thresh=1.0):
+        
+    def _cluster_same_label(self, obj_str_ids, visible_objs, cluster_cnt, label_norm, distance_thresh=1.0):
         """
         Greedy clustering per label on ground plane.
-        - instances: list of dicts with keys:
+        - obj_str_ids: list of dicts with keys:
             label_norm, centroid_world, bbox_world, pixel_count, pixel_percent, distance_from_camera, raw_ids (set)
+        - visible_objs: dict of all visible objects (to access data by obj_str_id)
         - distance_thresh: meters (tune per scene scale; 0.8~1.5 works well)
 
         Returns list of merged clusters for that label.
@@ -537,449 +688,64 @@ class NewViewer(BaseViewer):
         clusters = []  # each: dict like instances, aggregated
 
         # Sort big to small so large areas seed clusters
-        instances_sorted = sorted(instances, key=lambda x: x["pixel_count"], reverse=True)
-
-        for inst in instances_sorted:
+        obj_str_ids_sorted = sorted(obj_str_ids, key=lambda x: visible_objs[x]["pixel_count"], reverse=True)
+        def xz_dist(a, b):
+            return math.sqrt((a[0]-b[0])**2 + (a[2]-b[2])**2)  # ignore Y
+        
+        def merge_obbs(obb_a, obb_b):
+            return [
+                [
+                    min(obb_a[0][0], obb_b[0][0]),
+                    min(obb_a[0][1], obb_b[0][1]),
+                    min(obb_a[0][2], obb_b[0][2]),
+                ],
+                [
+                    max(obb_a[1][0], obb_b[1][0]),
+                    max(obb_a[1][1], obb_b[1][1]),
+                    max(obb_a[1][2], obb_b[1][2]),
+                ]
+            ]
+        
+        for obj_str_id in obj_str_ids_sorted:
             assigned = False
-            for cl in clusters:
-                if (self._xy_dist(inst["centroid_world"], cl["centroid_world"]) <= distance_thresh):
+            visible_obj = visible_objs[obj_str_id]
+            for cluster in clusters:
+                if (xz_dist(visible_obj["centroid_world"], cluster["centroid_world"]) <= distance_thresh):
                     # merge into cluster (weighted by pixel_count)
-                    w_old = cl["pixel_count"]
-                    w_new = inst["pixel_count"]
+                    w_old = cluster["pixel_count"]
+                    w_new = visible_obj["pixel_count"]
                     w_sum = w_old + w_new
 
                     # weighted centroid (world)
-                    cx = (cl["centroid_world"][0] * w_old + inst["centroid_world"][0] * w_new) / w_sum
-                    cy = (cl["centroid_world"][1] * w_old + inst["centroid_world"][1] * w_new) / w_sum
-                    cz = (cl["centroid_world"][2] * w_old + inst["centroid_world"][2] * w_new) / w_sum
-                    cl["centroid_world"] = [cx, cy, cz]
+                    cx = (cluster["centroid_world"][0] * w_old + visible_obj["centroid_world"][0] * w_new) / w_sum
+                    cy = (cluster["centroid_world"][1] * w_old + visible_obj["centroid_world"][1] * w_new) / w_sum
+                    cz = (cluster["centroid_world"][2] * w_old + visible_obj["centroid_world"][2] * w_new) / w_sum
+                    cluster["centroid_world"] = [cx, cy, cz]
 
                     # choose min distance to camera (useful for narration)
-                    cl["distance_from_camera"] = min(cl["distance_from_camera"], inst["distance_from_camera"])
+                    cluster["distance_from_camera"] = min(cluster["distance_from_camera"], visible_obj["distance_from_camera"])
 
                     # union bbox
-                    cl["bbox_world"] = self._merge_aabbs(cl["bbox_world"], inst["bbox_world"])
+                    cluster["bbox_world"] = merge_obbs(cluster["bbox_world"], visible_obj["bbox_world"])
 
                     # accumulate pixels
-                    cl["pixel_count"] = w_sum
-                    cl["pixel_percent"] += inst["pixel_percent"]
+                    cluster["pixel_count"] = w_sum
+                    cluster["pixel_percent"] += visible_obj["pixel_percent"]
 
+                    cluster["linear_size"] += visible_obj.get("linear_size", 0.0) 
                     # track raw semantic ids merged
-                    cl["raw_ids"].update(inst["raw_ids"])
+                    cluster["obj_str_ids"].append(obj_str_id) # TODO check di questa porcata
                     assigned = True
                     break
 
             if not assigned:
-                clusters.append(
-                    {
-                        **inst,
-                        "raw_ids": set(inst["raw_ids"]),  # ensure it’s a fresh set
-                    }
-                )
-
-        return clusters
-
-    def postprocess_visible_objects(self, visible_objects: dict, *, pixel_percent_min=0.02, mode="blacklist", blacklist=None, whitelist=None, per_label_cluster_thresh_m=1.0, top_k_per_label=None, recompute_relations=True):
-        """
-        - visible_objects: the dict produced by extract_visible_objects()["visible_objects"]
-        Returns:
-            {
-            "objects": { "<uid>": {...} },
-            "spatial_relations": [ ... ]   # recomputed on deduped set (if requested)
-            }
-        """
-        # 1) Normalizza + filtro base
-        buckets = {}  # label_norm -> list[instance]
-        for raw_id, inst in visible_objects.items():
-            label_norm = self._normalize_label(inst["label"])
-            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
-                continue
-            if inst.get("pixel_percent", 0.0) < pixel_percent_min:
-                continue
-
-            buckets.setdefault(label_norm, []).append(
-                {
-                    "label": inst["label"],
-                    "label_norm": label_norm,
-                    "pixel_count": inst["pixel_count"],
-                    "pixel_percent": inst.get("pixel_percent", 0.0),
-                    "centroid_world": inst["centroid_world"],
-                    "bbox_world": inst.get("bbox_world"),  # opzionale
-                    "centroid_cam": inst["centroid_cam"],
-                    "distance_from_camera": inst["distance_from_camera"],
-                    "linear_size": float(inst.get("linear_size", 0.0)),  # <<— NEW
-                    "raw_ids": {raw_id},
-                }
-            )
-
-        # 2) Clustering per label
-        clusters_list = []
-        for label_norm, insts in buckets.items():
-            clusters = self._cluster_same_label(insts, distance_thresh=per_label_cluster_thresh_m)
-
-            # (opzionale) top-K cluster per label
-            if top_k_per_label is not None and len(clusters) > top_k_per_label:
-                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
-
-            clusters_list.extend(clusters)
-
-        # 3) Build oggetti unici + stima linear_size di cluster
-        objects = {}
-        per_label_counts = {}
-        for cl in clusters_list:
-            cnt = per_label_counts.get(cl["label_norm"], 0) + 1
-            per_label_counts[cl["label_norm"]] = cnt
-            uid = f"{cl['label_norm']}_{cnt:02d}"
-
-            # linear_size del cluster: media pesata per pixel_count sulle raw_ids
-            # (robusta anche se _cluster_same_label non propaga linear_size)
-            raw_ids = list(cl.get("raw_ids", []))
-            if raw_ids:
-                sizes = []
-                for rid in raw_ids:
-                    v = visible_objects.get(rid, {})
-                    sz = float(v.get("linear_size", 0.0))
-                    if sz > 0:
-                        sizes.append(sz)
-                cluster_linear_size = (float(np.sum(sizes)) if sizes else float(cl.get("linear_size", 0.0)))
-            else:
-                cluster_linear_size = float(cl.get("linear_size", 0.0))
-
-            objects[uid] = {
-                "label": cl["label_norm"],
-                "pixel_count": int(cl["pixel_count"]),
-                "pixel_percent": float(cl["pixel_percent"]),
-                "centroid_world": [float(v) for v in cl["centroid_world"]],
-                "bbox_world": cl.get("bbox_world"),
-                "centroid_cam": cl["centroid_cam"],
-                "distance_from_camera": float(cl["distance_from_camera"]),
-                "linear_size": cluster_linear_size,  # <<— NEW
-                "merged_raw_ids": sorted(list(cl["raw_ids"])),
-            }
-
-        # 4) Relazioni ricalcolate sul set deduplicato
-        relations = (self.compute_spatial_relations(objects) if recompute_relations else [])
-
-        # 5) Ordinamento: salienza primaria pixel_count, secondaria grandezza
-        objects = dict(sorted(objects.items(), key=lambda item: (item[1].get("linear_size", 0.0),),reverse=True,))
-
-        return {"objects": objects, "spatial_relations": relations}
-    
-    def _set_objs_to_draw_ids(self, object_ids):
-        # print(f" _set_objs_to_draw_ids: {object_ids}")
-        self.objs_to_draw_ids = object_ids
-        # print(f"Updated objs_to_draw_ids: {self.objs_to_draw_ids}")
-
-    def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
-        if not sim.pathfinder.is_loaded:
-            print("Pathfinder not initialized, aborting.")
-        else:
-            seed = 4  # 4  # @param {type:"integer"}
-            sim.pathfinder.seed(seed)
-
-            agent_state = sim.get_agent(self.agent_id).get_state()
-            initial_agent_state_position = agent_state.position
-            initial_agent_state_rotation = agent_state.rotation
-
-            path = habitat_sim.ShortestPath()
-            path.requested_start = mn.Vector3(initial_agent_state_position)
-            path.requested_end = goal
-            found_path = sim.pathfinder.find_path(path)
-            path_points = path.points
-
-            print("Path found : " + str(found_path))
-            print("Start : " + str(path.requested_start))
-            print("Goal : " + str(path.requested_end))
-            print("Path points : " + str(path_points))
-
-            path_points = self.densify_path(path_points, step_size=3.0)
-
-            save_images = False
-
-            output_dir = "output"
-            if os.path.exists(output_dir):
-                shutil.rmtree(output_dir)
-            os.makedirs(output_dir, exist_ok=True)
-
-            if found_path:
-                if save_images:
-                    meters_per_pixel = 0.025
-                    height = sim.scene_aabb.y().min
-
-                    top_down_map = maps.get_topdown_map(sim.pathfinder, height, meters_per_pixel=meters_per_pixel)
-                    recolor_map = np.array([[255, 255, 255], [128, 128, 128], [0, 0, 0]], dtype=np.uint8)
-                    top_down_map = recolor_map[top_down_map]
-                    grid_dimensions = (top_down_map.shape[0], top_down_map.shape[1])
-                    # convert world trajectory points to maps module grid points
-                    trajectory = [maps.to_grid(path_point[2], path_point[0], grid_dimensions, pathfinder=sim.pathfinder) for path_point in path_points]
-                    grid_tangent = mn.Vector2(trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0],)
-                    path_initial_tangent = grid_tangent / grid_tangent.length()
-                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
-                    # draw the agent and trajectory on the map
-                    maps.draw_path(top_down_map, trajectory)
-                    maps.draw_agent(top_down_map, trajectory[0], initial_angle, agent_radius_px=8)
-                    # print("\nDisplay the map with agent and path overlay:")
-                    self.display_map(top_down_map)
-
-                # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
-                display_path_agent_renders = True  # @param{type:"boolean"}
-                if display_path_agent_renders:
-                    # print("Rendering observations at path points:")
-                    tangent = path_points[1] - path_points[0]
-                    agent_state = habitat_sim.AgentState()
-                    for ix, point in enumerate(path_points):
-                        if ix < len(path_points) - 1:
-                            tangent = path_points[ix + 1] - point
-                            agent_state.position = point
-                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0, 1.0, 0]))
-                            tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
-                            agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
-
-                            agent = sim.get_agent(self.agent_id)
-                            agent.set_state(agent_state)
-
-                            observations = sim.get_sensor_observations()
-
-                            # use get with default None to safely handle missing sensors
-                            rgb = observations.get("color_sensor", None)
-                            semantic = observations.get("semantic_sensor", None)
-                            depth = observations.get("depth_sensor", None)
-
-                            if rgb is not None:
-                                if save_images:
-                                    # Save RGB/semantic preview as before
-                                    if semantic is not None:
-                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
-                                    else:
-                                        self.display_sample(rgb_obs=rgb)
-
-                                # Extract visible objects + relations
-                                frame_meta = self.extract_visible_objects(sim, observations)
-                                if frame_meta is not None:
-                                    processed_objs = self.postprocess_visible_objects(
-                                        frame_meta["visible_objects"],
-                                        pixel_percent_min=0.02,
-                                        mode="blacklist",
-                                        per_label_cluster_thresh_m=1.2,
-                                        top_k_per_label=3,
-                                        recompute_relations=True,
-                                    )
-
-                                    sensor_state = (
-                                        sim.get_agent(0)
-                                        .get_state()
-                                        .sensor_states["color_sensor"]
-                                    )
-                                    rot_mn = utils.quat_to_magnum(sensor_state.rotation)
-                                    T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
-
-                                    frame_data = {
-                                        "scene_index": sim.curr_scene_name,
-                                        "image_index": f"frame-{ix:06d}",
-                                        "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "objects": processed_objs["objects"],  
-                                        "spatial_relations": processed_objs["spatial_relations"],
-                                        "timestamp": datetime.datetime.now().isoformat(),
-                                    }
-
-                                    with open(f"output/frame_{ix:06d}.json", "w") as f:
-                                        json.dump(frame_data, f, indent=2)
-                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
-                            else:
-                                print("No color sensor found in observations.")
-
-            agent_state.position = initial_agent_state_position
-            agent_state.rotation = initial_agent_state_rotation
-            agent = sim.get_agent(self.agent_id)
-            agent.set_state(agent_state)
-
-    def print_scene_semantic_info(self) -> None:
-        scene = self.sim.semantic_scene
-        if scene is not None:
-            print(f"Scene has {len(scene.levels)} levels, {len(scene.regions)} regions and {len(scene.objects)} objects")
-
-            for region in scene.regions:
-                print(f"\nRegion id:{region.id}" f" center:{region.aabb.center}")
-                for obj in region.objects:
-                    print(f"\tObject id:{obj.id}, category:{obj.category.name()}," f" center:{self.compute_xyz_center(obj.aabb)}")
-
-    def compute_xyz_center(self, obj_aabb):
-        # ottieni i vertici min e max dell'AABB
-        vmin = (obj_aabb.min() if callable(getattr(obj_aabb, "min", None)) else obj_aabb.min)
-        vmax = (obj_aabb.max() if callable(getattr(obj_aabb, "max", None)) else obj_aabb.max)
-
-        # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
-        cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
-        cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
-        cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
-        return cx, cy, cz
-
-    def _get_bbox_color(self, obj_id: int) -> mn.Color4:
-        """
-        Returns a consistent color for the given semantic object id.
-        """
-        if obj_id in self._object_bbox_colors:
-            return self._object_bbox_colors[obj_id]
-
-        palette = d3_40_colors_rgb
-        palette_len = len(palette)
-        if palette_len == 0:
-            color = mn.Color4(1.0, 0.0, 0.0, 1.0)
-            self._object_bbox_colors[obj_id] = color
-            return color
-        try:
-            idx = int(obj_id) % palette_len
-        except (ValueError, TypeError):
-            idx = hash(str(obj_id)) % palette_len
-        rgb = palette[idx] / 255.0
-        color = mn.Color4(float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
-        self._object_bbox_colors[obj_id] = color
-        return color
-
-    def _project_to_screen(self, world_point: mn.Vector3) -> Optional[mn.Vector2]:
-        """
-        Project a world-space point to screen pixel coordinates.
-        """
-        if self.render_camera is None:
-            return None
-
-        cam = self.render_camera.render_camera
-        proj = cam.projection_matrix
-        cam_mat = cam.camera_matrix
-
-        # Transform point from world -> camera -> clip space
-        clip = proj.transform_point(cam_mat.transform_point(world_point))
-
-        # clip is already divided by w; no need to access clip.w
-        ndc = clip  # Normalized device coordinates (-1..1)
-
-        if not (-1.0 <= ndc.x <= 1.0 and -1.0 <= ndc.y <= 1.0 and -1.0 <= ndc.z <= 1.0):
-            return None
-
-        framebuffer = mn.Vector2(self.framebuffer_size)
-        x = (ndc.x * 0.5 + 0.5) * framebuffer[0]
-        y = (1.0 - (ndc.y * 0.5 + 0.5)) * framebuffer[1]
-        return mn.Vector2(x, y)
-
-    def _draw_bbox_label_overlay(self) -> None:
-        if not self._bbox_label_screen_positions:
-            return
-
-        mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
-        self.shader.bind_vector_texture(self.glyph_cache.texture)
-
-        framebuffer = mn.Vector2(self.framebuffer_size)
-        for label, screen_pos in self._bbox_label_screen_positions:
-            if not label:
-                continue
-
-            label_renderer = text.Renderer2D(self.display_font, self.glyph_cache, BaseViewer.DISPLAY_FONT_SIZE, text.Alignment.TOP_CENTER)
-            label_renderer.reserve(len(label))
-            label_renderer.render(label)
-
-            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(screen_pos)
-            self.shader.transformation_projection_matrix = transform
-            self.shader.color = mn.Color4(1.0, 1.0, 1.0, 1.0)
-            self.shader.draw(label_renderer.mesh)
-
-        mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
-
-    def _draw_object_bboxes(self, debug_line_render: Any, object_ids: list = None) -> None:
-    
-        """
-        Draw axis-aligned bounding boxes for every semantic object.
-        """
-        # print(f" _draw_object_bboxes called with object_ids: {object_ids}")
-        scene = self.sim.semantic_scene
-        if scene is None:
-            return
-
-        self._bbox_label_screen_positions.clear()
-        debug_line_render.set_line_width(2.5)
-        max_boxes = 20
-        target_labels = {"wall clock", "sofa", "armchair", "couch"}
-        candidates = []
-
-        
-
-        
-
-        if object_ids is None: 
-            obj_to_draw = scene.objects
-        else:
-            obj_to_draw = [obj for obj in scene.objects if str(obj.id).split("_")[-1] in object_ids]
-            if obj_to_draw != self.prev_ids:
-                print(f"Drawing bounding boxes for objects: {[obj.id for obj in obj_to_draw]}")
-        self.prev_ids = obj_to_draw
-
-        for obj in obj_to_draw:
-
-            label = ""
-            if obj.category is not None and hasattr(obj.category, "name"):
-                label = obj.category.name()
-            label_norm = label.strip().lower()
-            if object_ids is None and label_norm not in target_labels:
-                continue
-
-            if not label:
-                label = f"object_{obj.id}"
-
-            obb = getattr(obj, "obb", None)
-            if obb is None:
-                continue
-
-            center = mn.Vector3(obb.center)
-            half_extents = mn.Vector3(obb.half_extents)
-            rot_vec = mn.Vector4(obb.rotation)
-            rotation = mn.Quaternion(
-                mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
-            )
-
-            # Precompute the eight OBB corners in world space.
-            corner_offsets = [
-                mn.Vector3(-half_extents[0], -half_extents[1], -half_extents[2]),
-                mn.Vector3(half_extents[0], -half_extents[1], -half_extents[2]),
-                mn.Vector3(-half_extents[0], half_extents[1], -half_extents[2]),
-                mn.Vector3(half_extents[0], half_extents[1], -half_extents[2]),
-                mn.Vector3(-half_extents[0], -half_extents[1], half_extents[2]),
-                mn.Vector3(half_extents[0], -half_extents[1], half_extents[2]),
-                mn.Vector3(-half_extents[0], half_extents[1], half_extents[2]),
-                mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
-            ]
-            corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
-
-            volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
-            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-
-        edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
-
-        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
-        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
-            color = self._get_bbox_color(obj_id)
-
-            for edge in edges:
-                start = corners[edge[0]]
-                end = corners[edge[1]]
-                debug_line_render.draw_transformed_line(start, end, color)
-                debug_line_render.draw_transformed_line(start, end, color)
-
-            top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
-            screen_pos = self._project_to_screen(top_center)
-            if screen_pos is not None:
-                self._bbox_label_screen_positions.append((label, screen_pos))
-
-    def debug_draw(self):
-        """
-        Additional draw commands to be called during draw_event.
-        """
-        super().debug_draw()
-        if self.show_object_bboxes:
-            self._draw_object_bboxes(self.debug_line_render, self.objs_to_draw_ids)
-        else:
-            self._bbox_label_screen_positions.clear()
+                clusters.append({**visible_obj, 
+                                 "obj_str_ids": [obj_str_id], 
+                                 "cluster_id": cluster_cnt, 
+                                 "linear_size": visible_obj.get("linear_size", 0.0), 
+                                 "label_norm": label_norm})
+                cluster_cnt += 1
+        return clusters, cluster_cnt
 
     def draw_event(self, simulation_call: Optional[Callable] = None, global_call: Optional[Callable] = None, active_agent_id_and_sensor_name: Tuple[int, str] = (0, "color_sensor")) -> None:
         """
@@ -1041,11 +807,174 @@ class NewViewer(BaseViewer):
         # draw CPU/GPU usage data and other info to the app window
         mn.gl.default_framebuffer.bind()
         self.draw_text(self.render_camera.specification())
-        self._draw_bbox_label_overlay()
+        # self._draw_bbox_label_overlay()
 
         self.swap_buffers()
         Timer.next_frame()
         self.redraw()
+
+    def debug_draw(self):
+        """
+        Additional draw commands to be called during draw_event.
+        """
+        super().debug_draw()
+        if self.show_object_bboxes:
+            self._draw_object_bboxes(self.debug_line_render, self.objs_str_ids_to_draw)
+        else:
+            self._bbox_label_screen_positions.clear()
+
+
+    def _draw_object_bboxes(self, debug_line_render: Any, objs_str_ids_to_draw: list = None) -> None:
+    
+        """
+        Draw axis-aligned bounding boxes for every semantic object.
+        """
+        # print(f" _draw_object_bboxes called with objs_str_ids_to_draw: {objs_str_ids_to_draw}")
+        scene = self.sim.semantic_scene
+        if scene is None:
+            return
+
+        self._bbox_label_screen_positions.clear()
+        debug_line_render.set_line_width(2.5)
+        max_boxes = 20
+        target_labels = {"wall clock", "sofa", "armchair", "couch"}
+        candidates = []
+
+        if objs_str_ids_to_draw is None: 
+            obj_to_draw = scene.objects
+        else:
+            obj_to_draw = [obj for obj in scene.objects if obj.id in objs_str_ids_to_draw]
+            if obj_to_draw != self.prev_ids:
+                print(f"Drawing bounding boxes for objects: {[obj.id for obj in obj_to_draw]}")
+        self.prev_ids = obj_to_draw
+
+        for obj in obj_to_draw:
+
+            label = ""
+            if obj.category is not None and hasattr(obj.category, "name"):
+                label = obj.category.name()
+            label_norm = label.strip().lower()
+            if objs_str_ids_to_draw is None and label_norm not in target_labels:
+                continue
+
+            if not label:
+                label = f"object_{obj.id}"
+
+            obb = getattr(obj, "obb", None)
+            if obb is None:
+                continue
+
+            center = mn.Vector3(obb.center)
+            half_extents = mn.Vector3(obb.half_extents)
+            rot_vec = mn.Vector4(obb.rotation)
+            rotation = mn.Quaternion(
+                mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
+            )
+
+            # Precompute the eight OBB corners in world space.
+            corner_offsets = [
+                mn.Vector3(-half_extents[0], -half_extents[1], -half_extents[2]),
+                mn.Vector3(half_extents[0], -half_extents[1], -half_extents[2]),
+                mn.Vector3(-half_extents[0], half_extents[1], -half_extents[2]),
+                mn.Vector3(half_extents[0], half_extents[1], -half_extents[2]),
+                mn.Vector3(-half_extents[0], -half_extents[1], half_extents[2]),
+                mn.Vector3(half_extents[0], -half_extents[1], half_extents[2]),
+                mn.Vector3(-half_extents[0], half_extents[1], half_extents[2]),
+                mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
+            ]
+            corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
+
+            volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
+            # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
+            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
+
+        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
+            color = self._get_bbox_color(obj_id)
+
+            for edge in edges:
+                start = corners[edge[0]]
+                end = corners[edge[1]]
+                debug_line_render.draw_transformed_line(start, end, color)
+                debug_line_render.draw_transformed_line(start, end, color)
+
+            top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
+            screen_pos = self._project_to_screen(top_center)
+            if screen_pos is not None:
+                self._bbox_label_screen_positions.append((label, screen_pos))
+
+    def _get_bbox_color(self, obj_id: int) -> mn.Color4:
+        """
+        Returns a consistent color for the given semantic object id.
+        """
+        if obj_id in self._object_bbox_colors:
+            return self._object_bbox_colors[obj_id]
+
+        palette = d3_40_colors_rgb
+        palette_len = len(palette)
+        if palette_len == 0:
+            color = mn.Color4(1.0, 0.0, 0.0, 1.0)
+            self._object_bbox_colors[obj_id] = color
+            return color
+        try:
+            idx = int(obj_id) % palette_len
+        except (ValueError, TypeError):
+            idx = hash(str(obj_id)) % palette_len
+        rgb = palette[idx] / 255.0
+        color = mn.Color4(float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+        self._object_bbox_colors[obj_id] = color
+        return color
+    
+    def _project_to_screen(self, world_point: mn.Vector3) -> Optional[mn.Vector2]:
+        """
+        Project a world-space point to screen pixel coordinates.
+        """
+        if self.render_camera is None:
+            return None
+
+        cam = self.render_camera.render_camera
+        proj = cam.projection_matrix
+        cam_mat = cam.camera_matrix
+
+        # Transform point from world -> camera -> clip space
+        clip = proj.transform_point(cam_mat.transform_point(world_point))
+
+        # clip is already divided by w; no need to access clip.w
+        ndc = clip  # Normalized device coordinates (-1..1)
+
+        if not (-1.0 <= ndc.x <= 1.0 and -1.0 <= ndc.y <= 1.0 and -1.0 <= ndc.z <= 1.0):
+            return None
+
+        framebuffer = mn.Vector2(self.framebuffer_size)
+        x = (ndc.x * 0.5 + 0.5) * framebuffer[0]
+        y = (1.0 - (ndc.y * 0.5 + 0.5)) * framebuffer[1]
+        return mn.Vector2(x, y)
+    
+    def _draw_bbox_label_overlay(self) -> None:
+        if not self._bbox_label_screen_positions:
+            return
+
+        mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
+        self.shader.bind_vector_texture(self.glyph_cache.texture)
+
+        framebuffer = mn.Vector2(self.framebuffer_size)
+        for label, screen_pos in self._bbox_label_screen_positions:
+            if not label:
+                continue
+
+            label_renderer = text.Renderer2D(self.display_font, self.glyph_cache, BaseViewer.DISPLAY_FONT_SIZE, text.Alignment.TOP_CENTER)
+            label_renderer.reserve(len(label))
+            label_renderer.render(label)
+
+            transform = mn.Matrix3.projection(framebuffer) @ mn.Matrix3.translation(screen_pos)
+            self.shader.transformation_projection_matrix = transform
+            self.shader.color = mn.Color4(1.0, 1.0, 1.0, 1.0)
+            self.shader.draw(label_renderer.mesh)
+
+        mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
     def move_and_look(self, repetitions: int) -> None:
         """
@@ -1056,10 +985,25 @@ class NewViewer(BaseViewer):
         super().move_and_look(repetitions)
 
         self._process_queued_actions()  # process any queued actions from the other thread
+        
+    def _process_queued_actions(self):
+        """Execute actions enqueued from other threads."""
+        try:
+            while True:
+                action, args, kwargs = self.action_queue.get_nowait()
+                try:
+                    action(*args, **kwargs)
+                except Exception as e:
+                    print(f"Error executing queued action {action}: {e}")
+
+                self.action_queue.task_done()
+
+        except queue.Empty:
+            pass
 
     def print_agent_state(self) -> None:
         """
-        Logs the current agent's position and rotation in the simulator.
+    def print_agent_state(self) -> None: # Keep for debuggingn and rotation in the simulator.
         """
         agent = self.sim.get_agent(self.agent_id)
         agent_state = agent.get_state()
@@ -1309,7 +1253,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             if goal_pos.y < 2.0:
                 goal_pos.y = 0.163378  # Adjust height
 
-            viewer.enqueue_shortest_path(goal_pos)
+            viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos), {}))
             # output_q.put(f"Generating navigation instructions...")
             time.sleep(0.2)
 
@@ -1317,9 +1261,10 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
             
-            instructions, objs_to_draw_ids = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
-            # print("Objects to draw IDs:", objs_to_draw_ids)
-            viewer.set_objs_to_draw_ids(objs_to_draw_ids)
+            instructions, obj_str_ids_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
+            # print("Objects to draw IDs:", objs_str_ids_to_draw)
+            viewer.action_queue.put((viewer.set_objs_str_ids_to_draw, (obj_str_ids_to_draw,), {}))
+
             if instructions is None:
                 instructions = "Proceed to the " + room_name
 
