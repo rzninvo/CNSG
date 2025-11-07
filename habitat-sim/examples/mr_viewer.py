@@ -49,16 +49,10 @@ from habitat_sim.utils.settings import default_sim_settings, make_cfg
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from utils.generate_description import generate_path_description
-from utils.conversation_gui import * 
+from utils.conversation_gui import *
 
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
-
-
-
-
-
-
 
 
 # Initialize OpenAI client
@@ -101,7 +95,6 @@ class HabitatSimInteractiveViewer(Application):
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
 
         self.q_app = q_app
-
 
         self.cnt = 0
         self.action_queue = queue.Queue()
@@ -285,10 +278,26 @@ class HabitatSimInteractiveViewer(Application):
             else:
                 raise FileNotFoundError(f"Map file not found: {map_file_path}")
 
+            ignore_categories = [
+                "ceiling",
+                "floor",
+                "wall",
+                "handle",
+                "window frame",
+                "door frame",
+                "frame",
+                "unknown",
+                "stairs",
+                "staircase",
+                "stair",
+                "stairway",
+            ]
+            semantic_info = self.get_semantic_info(
+                semantic_path,
+                map_room_id_to_name=self.map_room_id_to_name,
+                ignore_categories=ignore_categories,
+            )
 
-            ignore_categories = ["ceiling", "floor", "wall", "handle", "window frame", "door frame", "frame", "unknown", "stairs", "staircase", "stair", "stairway"]
-            semantic_info = self.get_semantic_info(semantic_path,  map_room_id_to_name=self.map_room_id_to_name, ignore_categories=ignore_categories)
-            
             self.room_objects_occurences = semantic_info
             # print("\nSemantic information of the scene:")
             # print(semantic_info)
@@ -331,10 +340,11 @@ class HabitatSimInteractiveViewer(Application):
                 plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
         # plt.show(block=False)
 
-
         self.topdown_map_counter = getattr(self, "topdown_map_counter", 0)
-        plt.savefig(f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight")
-        self.topdown_map_counter += 1  
+        plt.savefig(
+            f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight"
+        )
+        self.topdown_map_counter += 1
         plt.close()
         # logger.info(f"Saved: output/topdown_map.png")
 
@@ -374,7 +384,7 @@ class HabitatSimInteractiveViewer(Application):
             self.output_counter = 0
 
         # incrementa contatore
-        
+
         filename = f"output/sample_output_{self.output_counter}.png"
         self.output_counter += 1
 
@@ -403,7 +413,7 @@ class HabitatSimInteractiveViewer(Application):
             for s in range(1, n_steps + 1):
                 new_point = p0 + direction * step_size * s
                 new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3: # NOTE removed
+        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3:  # NOTE removed
             new_points.append(points[-1])
         return np.array(new_points)
 
@@ -459,14 +469,18 @@ class HabitatSimInteractiveViewer(Application):
             except IndexError:
                 continue
 
-            label = obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            label = (
+                obj.category.name() if obj.category is not None else f"object_{obj_id}"
+            )
             # Prefer oriented bounding box if available
             obb = getattr(obj, "obb", None)
             if obb is not None:
                 center = mn.Vector3(obb.center)
                 half_extents = mn.Vector3(obb.half_extents)
                 rot_vec = mn.Vector4(obb.rotation)
-                rotation = mn.Quaternion(mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3])
+                rotation = mn.Quaternion(
+                    mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
+                )
 
                 # Compute oriented corners
                 corner_offsets = [
@@ -479,11 +493,22 @@ class HabitatSimInteractiveViewer(Application):
                     mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
                     mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
                 ]
-                corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
+                corners_world = [
+                    rotation.transform_vector(offset) + center
+                    for offset in corner_offsets
+                ]
 
                 bbox_world = [
-                    [float(min(v.x for v in corners_world)), float(min(v.y for v in corners_world)), float(min(v.z for v in corners_world))],
-                    [float(max(v.x for v in corners_world)), float(max(v.y for v in corners_world)), float(max(v.z for v in corners_world))]
+                    [
+                        float(min(v.x for v in corners_world)),
+                        float(min(v.y for v in corners_world)),
+                        float(min(v.z for v in corners_world)),
+                    ],
+                    [
+                        float(max(v.x for v in corners_world)),
+                        float(max(v.y for v in corners_world)),
+                        float(max(v.z for v in corners_world)),
+                    ],
                 ]
                 centroid_world = [float(center.x), float(center.y), float(center.z)]
             else:
@@ -491,12 +516,16 @@ class HabitatSimInteractiveViewer(Application):
                 aabb = obj.aabb
                 vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
                 vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
-                bbox_world = [[float(vmin[0]), float(vmin[1]), float(vmin[2])],
-                            [float(vmax[0]), float(vmax[1]), float(vmax[2])]]
+                bbox_world = [
+                    [float(vmin[0]), float(vmin[1]), float(vmin[2])],
+                    [float(vmax[0]), float(vmax[1]), float(vmax[2])],
+                ]
                 centroid_world = [float(x) for x in aabb.center()]
 
             # Convert centroid to camera coordinates
-            sensor_state = sim.get_agent(self.agent_id).get_state().sensor_states["color_sensor"]
+            sensor_state = (
+                sim.get_agent(self.agent_id).get_state().sensor_states["color_sensor"]
+            )
             rot_mn = utils.quat_to_magnum(sensor_state.rotation)
             T_world_cam = mn.Matrix4.from_(
                 rot_mn.inverted().to_matrix(),
@@ -514,7 +543,14 @@ class HabitatSimInteractiveViewer(Application):
                 "bbox_world": bbox_world,
                 "centroid_cam": centroid_cam.tolist(),
                 "distance_from_camera": dist,
+                "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
             }
+
+        print(f"[DEBUG] Visible Objects (size): ")
+        for obj_id, obj_data in visible_objects.items():
+            print(
+                f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m"
+            )
 
         # Compute spatial relations
         relations = self.compute_spatial_relations(visible_objects)
@@ -530,61 +566,58 @@ class HabitatSimInteractiveViewer(Application):
         max_distance=1.5,
         vertical_thresh=0.25,
         horizontal_bias=1.2,
+        size_ratio_thresh=3.0,
     ):
         """
-        Compute spatial relations between nearby objects.
+        Compute spatial relations between nearby objects, filtering out irrelevant ones.
 
-        Relations:
-        - 'left_of' / 'right_of'
-        - 'in_front_of' / 'behind'
-        - 'on_top_of' / 'beneath_of'
-
-        Args:
-            visible_objects: dict of objects (either raw or deduped)
-            max_distance: max Euclidean distance (m) in camera-space to consider
-            vertical_thresh: minimum vertical offset (m) to count as top/bottom
-            horizontal_bias: factor to slightly favor horizontal relations when
-                            x/z differences are much larger than y.
-
-        Returns:
-            A list of spatial relation dictionaries.
+        - Ignora relazioni tra oggetti con scala troppo diversa
+        (es. 'stairs' vs 'book').
+        - Favorisce relazioni tra oggetti visibili di scala comparabile.
+        - Usa la direzione più dominante per definire la relazione.
         """
+
         relations = []
         keys = list(visible_objects.keys())
         if len(keys) <= 1:
             return relations
 
-        # Precompute camera-space centroids
         centroids = {
             k: np.array(visible_objects[k]["centroid_cam"], dtype=float) for k in keys
         }
 
+        # Precompute size and filter out tiny/noisy objects
+        sizes = {k: float(visible_objects[k].get("linear_size", 0.0)) for k in keys}
+
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
-                obj_a = visible_objects[keys[i]]
-                obj_b = visible_objects[keys[j]]
-                ca, cb = centroids[keys[i]], centroids[keys[j]]
+                obj_a, obj_b = visible_objects[keys[i]], visible_objects[keys[j]]
+                size_a, size_b = sizes[keys[i]], sizes[keys[j]]
 
+                # Skip degenerate or extremely different sizes
+                if size_a <= 0 or size_b <= 0:
+                    continue
+                ratio = max(size_a, size_b) / min(size_a, size_b)
+                if ratio > size_ratio_thresh:
+                    # one object dominates too much, skip
+                    continue
+
+                ca, cb = centroids[keys[i]], centroids[keys[j]]
                 diff = cb - ca
                 dist = np.linalg.norm(diff)
                 if dist > max_distance:
-                    # too far apart - skip
                     continue
 
                 dx, dy, dz = diff
                 abs_dx, abs_dy, abs_dz = abs(dx), abs(dy), abs(dz)
 
-                # default relation: None until we find a dominant axis
+                # pick dominant spatial axis
                 rel_ab = None
-
-                # check vertical relation first
                 if (
                     abs_dy > vertical_thresh
                     and abs_dy > (abs_dx + abs_dz) / horizontal_bias
                 ):
                     rel_ab = "on_top_of" if dy > 0 else "beneath_of"
-
-                # otherwise, check horizontal plane
                 elif abs_dx > abs_dz:
                     rel_ab = "left_of" if dx > 0 else "right_of"
                 else:
@@ -600,6 +633,20 @@ class HabitatSimInteractiveViewer(Application):
                 )
 
         return relations
+
+    def compute_object_size(obj_entry: dict[str, any]) -> float:
+        """
+        Return approximate linear size (in meters) of an object based on its bounding box.
+        Works with bbox_world from extract_visible_objects.
+        """
+        bbox = obj_entry.get("bbox_world")
+        if not bbox or len(bbox) != 2:
+            return 0.0
+        vmin, vmax = np.array(bbox[0]), np.array(bbox[1])
+        dims = np.abs(vmax - vmin)  # [dx, dy, dz] in meters
+        volume = float(np.prod(dims))
+        linear_size = float(np.cbrt(volume))  # cubic root gives a single scalar size
+        return linear_size
 
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
@@ -786,7 +833,7 @@ class HabitatSimInteractiveViewer(Application):
             "spatial_relations": [ ... ]   # recomputed on deduped set (if requested)
             }
         """
-        # normalizing the labels + filtering them based on blacklist/whitelist + pixel area threshold
+        # 1) Normalizza + filtro base
         buckets = {}  # label_norm -> list[instance]
         for raw_id, inst in visible_objects.items():
             label_norm = self._normalize_label(inst["label"])
@@ -804,21 +851,22 @@ class HabitatSimInteractiveViewer(Application):
                     "pixel_count": inst["pixel_count"],
                     "pixel_percent": inst.get("pixel_percent", 0.0),
                     "centroid_world": inst["centroid_world"],
-                    "bbox_world": inst["bbox_world"],
+                    "bbox_world": inst.get("bbox_world"),  # opzionale
                     "centroid_cam": inst["centroid_cam"],
                     "distance_from_camera": inst["distance_from_camera"],
+                    "linear_size": float(inst.get("linear_size", 0.0)),  # <<— NEW
                     "raw_ids": {raw_id},
                 }
             )
 
-        # clustering per label
+        # 2) Clustering per label
         dedup_list = []
         for label_norm, insts in buckets.items():
             clusters = self._cluster_same_label(
                 insts, distance_thresh=per_label_cluster_thresh_m
             )
 
-            # (optional) keep only top-K largest clusters per label by pixel area
+            # (opzionale) top-K cluster per label
             if top_k_per_label is not None and len(clusters) > top_k_per_label:
                 clusters = sorted(
                     clusters, key=lambda x: x["pixel_count"], reverse=True
@@ -826,7 +874,7 @@ class HabitatSimInteractiveViewer(Application):
 
             dedup_list.extend(clusters)
 
-        # building an objects dict with stable uids
+        # 3) Build oggetti unici + stima linear_size di cluster
         objects = {}
         per_label_counts = {}
         for cl in dedup_list:
@@ -834,29 +882,51 @@ class HabitatSimInteractiveViewer(Application):
             per_label_counts[cl["label_norm"]] = cnt
             uid = f"{cl['label_norm']}_{cnt:02d}"
 
+            # linear_size del cluster: media pesata per pixel_count sulle raw_ids
+            # (robusta anche se _cluster_same_label non propaga linear_size)
+            raw_ids = list(cl.get("raw_ids", []))
+            if raw_ids:
+                sizes, weights = [], []
+                for rid in raw_ids:
+                    v = visible_objects.get(rid, {})
+                    sz = float(v.get("linear_size", 0.0))
+                    if sz > 0:
+                        sizes.append(sz)
+                        weights.append(float(v.get("pixel_count", 1)))
+                cluster_linear_size = (
+                    float(np.average(sizes, weights=weights))
+                    if sizes
+                    else float(cl.get("linear_size", 0.0))
+                )
+            else:
+                cluster_linear_size = float(cl.get("linear_size", 0.0))
+
             objects[uid] = {
                 "label": cl["label_norm"],
                 "pixel_count": int(cl["pixel_count"]),
                 "pixel_percent": float(cl["pixel_percent"]),
                 "centroid_world": [float(v) for v in cl["centroid_world"]],
-                "bbox_world": cl["bbox_world"],
+                "bbox_world": cl.get("bbox_world"),
                 "centroid_cam": cl["centroid_cam"],
                 "distance_from_camera": float(cl["distance_from_camera"]),
-                "merged_raw_ids": sorted(
-                    list(cl["raw_ids"])
-                ),  # traceability to original instances
+                "linear_size": cluster_linear_size,  # <<— NEW
+                "merged_raw_ids": sorted(list(cl["raw_ids"])),
             }
 
-        # recompute relations on the deduped set (camera-space centroids)
-        if recompute_relations:
-            relations = self.compute_spatial_relations(objects)
-        else:
-            relations = []
+        # 4) Relazioni ricalcolate sul set deduplicato
+        relations = (
+            self.compute_spatial_relations(objects) if recompute_relations else []
+        )
 
-        # sort objects by pixel_count descending for salience
+        # 5) Ordinamento: salienza primaria pixel_count, secondaria grandezza
         objects = dict(
             sorted(
-                objects.items(), key=lambda item: item[1]["pixel_count"], reverse=True
+                objects.items(),
+                key=lambda item: (
+                    item[1]["pixel_count"],
+                    item[1].get("linear_size", 0.0),
+                ),
+                reverse=True,
             )
         )
 
@@ -873,14 +943,13 @@ class HabitatSimInteractiveViewer(Application):
             initial_agent_state_position = agent_state.position
             initial_agent_state_rotation = agent_state.rotation
 
-
             path = habitat_sim.ShortestPath()
             path.requested_start = mn.Vector3(initial_agent_state_position)
             path.requested_end = goal
             found_path = sim.pathfinder.find_path(path)
             path_points = path.points
-            
-            print("Path found : " + str(found_path))  
+
+            print("Path found : " + str(found_path))
             print("Start : " + str(path.requested_start))
             print("Goal : " + str(path.requested_end))
             print("Path points : " + str(path_points))
@@ -893,12 +962,12 @@ class HabitatSimInteractiveViewer(Application):
             if os.path.exists(output_dir):
                 shutil.rmtree(output_dir)
             os.makedirs(output_dir, exist_ok=True)
-            
+
             if found_path:
                 if save_images:
                     meters_per_pixel = 0.025
                     height = sim.scene_aabb.y().min
-                
+
                     top_down_map = maps.get_topdown_map(
                         sim.pathfinder, height, meters_per_pixel=meters_per_pixel
                     )
@@ -918,10 +987,13 @@ class HabitatSimInteractiveViewer(Application):
                         for path_point in path_points
                     ]
                     grid_tangent = mn.Vector2(
-                        trajectory[1][1] - trajectory[0][1], trajectory[1][0] - trajectory[0][0]
+                        trajectory[1][1] - trajectory[0][1],
+                        trajectory[1][0] - trajectory[0][0],
                     )
                     path_initial_tangent = grid_tangent / grid_tangent.length()
-                    initial_angle = math.atan2(path_initial_tangent[0], path_initial_tangent[1])
+                    initial_angle = math.atan2(
+                        path_initial_tangent[0], path_initial_tangent[1]
+                    )
                     # draw the agent and trajectory on the map
                     maps.draw_path(top_down_map, trajectory)
                     maps.draw_agent(
@@ -953,7 +1025,6 @@ class HabitatSimInteractiveViewer(Application):
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
 
-
                             observations = sim.get_sensor_observations()
 
                             # use get with default None to safely handle missing sensors
@@ -965,7 +1036,9 @@ class HabitatSimInteractiveViewer(Application):
                                 if save_images:
                                     # Save RGB/semantic preview as before
                                     if semantic is not None:
-                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
+                                        self.display_sample(
+                                            rgb_obs=rgb, semantic_obs=semantic
+                                        )
                                     else:
                                         self.display_sample(rgb_obs=rgb)
 
@@ -1001,12 +1074,12 @@ class HabitatSimInteractiveViewer(Application):
                                         "spatial_relations": dedup["spatial_relations"],
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
-                                    
-
 
                                     with open(f"output/frame_{ix:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
+                                        print(
+                                            f"✅ Saved metadata: output/frame_{ix:06d}.json"
+                                        )
                             else:
                                 print("No color sensor found in observations.")
 
@@ -1202,7 +1275,9 @@ class HabitatSimInteractiveViewer(Application):
             center = mn.Vector3(obb.center)
             half_extents = mn.Vector3(obb.half_extents)
             rot_vec = mn.Vector4(obb.rotation)
-            rotation = mn.Quaternion(mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3])
+            rotation = mn.Quaternion(
+                mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
+            )
 
             # Precompute the eight OBB corners in world space.
             corner_offsets = [
@@ -1216,26 +1291,40 @@ class HabitatSimInteractiveViewer(Application):
                 mn.Vector3(half_extents[0], half_extents[1], half_extents[2]),
             ]
             corners = [
-                rotation.transform_vector(offset) + center
-                for offset in corner_offsets
+                rotation.transform_vector(offset) + center for offset in corner_offsets
             ]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
+            candidates.append(
+                (volume, obj.id, label, corners, center, rotation, half_extents)
+            )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
 
         edges = [
-            (0, 1), (0, 2), (0, 4),
-            (1, 3), (1, 5),
-            (2, 3), (2, 6),
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 3),
+            (2, 6),
             (3, 7),
-            (4, 5), (4, 6),
+            (4, 5),
+            (4, 6),
             (5, 7),
             (6, 7),
         ]
 
-        for volume, obj_id, label, corners, center, rotation, half_extents in candidates[:max_boxes]:
+        for (
+            volume,
+            obj_id,
+            label,
+            corners,
+            center,
+            rotation,
+            half_extents,
+        ) in candidates[:max_boxes]:
             color = self._get_bbox_color(obj_id)
 
             for edge in edges:
@@ -1247,9 +1336,11 @@ class HabitatSimInteractiveViewer(Application):
                     color,
                 )
 
-            top_center = center + rotation.transform_vector(
-                mn.Vector3(0.0, half_extents[1], 0.0)
-            ) + mn.Vector3(0.0, 0.05, 0.0)
+            top_center = (
+                center
+                + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0))
+                + mn.Vector3(0.0, 0.05, 0.0)
+            )
             screen_pos = self._project_to_screen(top_center)
             if screen_pos is not None:
                 self._bbox_label_screen_positions.append((label, screen_pos))
@@ -1290,7 +1381,7 @@ class HabitatSimInteractiveViewer(Application):
         at a fixed rate.
         """
         if self.q_app:
-            self.q_app.processEvents() 
+            self.q_app.processEvents()
 
         agent_acts_per_sec = self.fps
 
@@ -1333,7 +1424,11 @@ class HabitatSimInteractiveViewer(Application):
                         for sensor in agent_sensors:
                             spec_fn = getattr(sensor, "specification", None)
                             spec = spec_fn() if callable(spec_fn) else None
-                            if spec is not None and getattr(spec, "sensor_type", None) == habitat_sim.SensorType.COLOR:
+                            if (
+                                spec is not None
+                                and getattr(spec, "sensor_type", None)
+                                == habitat_sim.SensorType.COLOR
+                            ):
                                 color_sensor = sensor
                                 break
             if color_sensor is None:
@@ -1341,12 +1436,9 @@ class HabitatSimInteractiveViewer(Application):
                 return
             color_sensor.draw_observation()
             agent = self.sim.get_agent(self.agent_id)
-            self.render_camera = agent.scene_node.node_sensor_suite.get(
-                "color_sensor"
-            )
+            self.render_camera = agent.scene_node.node_sensor_suite.get("color_sensor")
             self.debug_draw()
             self.render_camera.render_target.blit_rgba_to_default()
-
 
         # draw CPU/GPU usage data and other info to the app window
         mn.gl.default_framebuffer.bind()
@@ -1363,7 +1455,7 @@ class HabitatSimInteractiveViewer(Application):
         """
         make_action_spec = habitat_sim.agent.ActionSpec
         make_actuation_spec = habitat_sim.agent.ActuationSpec
-        MOVE, LOOK = 0.04, 1.5 # TODO modified: originally 0.07, 1.5
+        MOVE, LOOK = 0.04, 1.5  # TODO modified: originally 0.07, 1.5
 
         # all of our possible actions' names
         action_list = [
@@ -2067,35 +2159,36 @@ class HabitatSimInteractiveViewer(Application):
 
     def draw_text(self, sensor_spec):
         pass
-#         # make magnum text background transparent for text
-#         mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
-#         mn.gl.Renderer.set_blend_function(
-#             mn.gl.Renderer.BlendFunction.ONE,
-#             mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
-#         )
 
-#         self.shader.bind_vector_texture(self.glyph_cache.texture)
-#         self.shader.transformation_projection_matrix = self.window_text_transform
-#         self.shader.color = [1.0, 1.0, 1.0]
+    #         # make magnum text background transparent for text
+    #         mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
+    #         mn.gl.Renderer.set_blend_function(
+    #             mn.gl.Renderer.BlendFunction.ONE,
+    #             mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
+    #         )
 
-#         sensor_type_string = str(sensor_spec.sensor_type.name)
-#         sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
-#         if self.mouse_interaction == MouseMode.LOOK:
-#             mouse_mode_string = "LOOK"
-#         elif self.mouse_interaction == MouseMode.GRAB:
-#             mouse_mode_string = "GRAB"
-#         self.window_text.render(
-#             f"""
-# {self.fps} FPS
-# Sensor Type: {sensor_type_string}
-# Sensor Subtype: {sensor_subtype_string}
-# Mouse Interaction Mode: {mouse_mode_string}
-#             """
-#         )
-#         self.shader.draw(self.window_text.mesh)
+    #         self.shader.bind_vector_texture(self.glyph_cache.texture)
+    #         self.shader.transformation_projection_matrix = self.window_text_transform
+    #         self.shader.color = [1.0, 1.0, 1.0]
 
-#         # Disable blending for text
-#         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
+    #         sensor_type_string = str(sensor_spec.sensor_type.name)
+    #         sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
+    #         if self.mouse_interaction == MouseMode.LOOK:
+    #             mouse_mode_string = "LOOK"
+    #         elif self.mouse_interaction == MouseMode.GRAB:
+    #             mouse_mode_string = "GRAB"
+    #         self.window_text.render(
+    #             f"""
+    # {self.fps} FPS
+    # Sensor Type: {sensor_type_string}
+    # Sensor Subtype: {sensor_subtype_string}
+    # Mouse Interaction Mode: {mouse_mode_string}
+    #             """
+    #         )
+    #         self.shader.draw(self.window_text.mesh)
+
+    #         # Disable blending for text
+    #         mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
     def print_help_text(self) -> None:
         """
@@ -2208,7 +2301,10 @@ Key Commands:
 
         messages = [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
+            {
+                "role": "user",
+                "content": user_input + "\n" + str(self.room_objects_occurences),
+            },
         ]
 
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
@@ -2337,7 +2433,6 @@ def get_goal_from_response(response: str) -> object:
     rule_number = int(response_list[0].strip())
     content = response_list[1].strip()
 
-    
     if rule_number == 1:
         try:
             room, obj = map(str.strip, content.split(",", 1))
@@ -2368,9 +2463,10 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
-    
 
-def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue):
+def user_input_logic_loop(
+    viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue
+):
     while True:
         try:
             user_input = input_q.get()
@@ -2386,22 +2482,32 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
                 response
             )  # * Handle response and distinguish cases
             print("Handled Response: ", goal_info)
-            response = response.split(".", 1)[1].strip() # Remove numbering from response for user display
+            response = response.split(".", 1)[
+                1
+            ].strip()  # Remove numbering from response for user display
             res_type = goal_info["type"]
 
             if res_type == "object_in_room":
                 target_name = goal_info["object"]
                 room_name = goal_info["room"]
-            elif res_type == "room_only" or res_type == "object_in_single_room" or res_type == "object_repeated_in_room":
+            elif (
+                res_type == "room_only"
+                or res_type == "object_in_single_room"
+                or res_type == "object_repeated_in_room"
+            ):
                 target_name = None
                 room_name = goal_info["room"]
-            elif res_type == "ambiguous_room" or res_type == "ambiguous_object_rooms" or res_type == "not_found" or res_type == "friendly_conversation":
+            elif (
+                res_type == "ambiguous_room"
+                or res_type == "ambiguous_object_rooms"
+                or res_type == "not_found"
+                or res_type == "friendly_conversation"
+            ):
                 print(goal_info["message"])
                 output_q.put(response)
                 continue
             else:
                 print(f"Unhandled goal type: {res_type}")
-            
 
             # * === SANITY CHECK ===
             if not viewer.check_object_in_room(target_name, room_name):
@@ -2414,14 +2520,10 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
             goal_pos = viewer.get_object_position(
                 object_name=target_name, room_name=room_name
             )
-            print(
-                f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}"
-            )
+            print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
 
             if goal_pos is None:
-                print(
-                    f"Warning: '{room_name}/{target_name}' not found in the scene."
-                )
+                print(f"Warning: '{room_name}/{target_name}' not found in the scene.")
                 continue
 
             if goal_pos.y < 2.0:
@@ -2431,15 +2533,15 @@ def user_input_logic_loop(viewer: HabitatSimInteractiveViewer, input_q: queue.Qu
             # output_q.put(f"Generating navigation instructions...")
             time.sleep(0.3)
 
-
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False)
+            instructions = generate_path_description(
+                input_dir, user_input=user_input, model="gpt-4o", dry_run=False
+            )
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)
-
 
         except EOFError:
             break
@@ -2536,22 +2638,26 @@ if __name__ == "__main__":
     # start the application
     # HabitatSimInteractiveViewer(sim_settings).exec()
 
-
     input_from_gui_q = queue.Queue()
     output_to_gui_q = queue.Queue()
 
     # 1. Crea la GUI di Tkinter nel thread principale
     #    (ma non avviarla ancora con mainloop)
     q_app = QApplication(sys.argv or [])
-    gui_window = create_gui(input_from_gui_q, output_to_gui_q, window_width=args.width*3//5, window_height=args.height)
+    gui_window = create_gui(
+        input_from_gui_q,
+        output_to_gui_q,
+        window_width=args.width * 3 // 5,
+        window_height=args.height,
+    )
     gui_window.show()
 
     viewer = HabitatSimInteractiveViewer(sim_settings, q_app=q_app)
 
     logic_thread = threading.Thread(
-        target=user_input_logic_loop, 
-        args=(viewer, input_from_gui_q, output_to_gui_q), 
-        daemon=True
+        target=user_input_logic_loop,
+        args=(viewer, input_from_gui_q, output_to_gui_q),
+        daemon=True,
     )
     logic_thread.start()
 
