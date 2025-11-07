@@ -546,11 +546,11 @@ class HabitatSimInteractiveViewer(Application):
                 "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
             }
 
-        print(f"[DEBUG] Visible Objects (size): ")
-        for obj_id, obj_data in visible_objects.items():
-            print(
-                f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m"
-            )
+        # print(f"[DEBUG] Visible Objects (size): ")
+        # for obj_id, obj_data in visible_objects.items():
+        #     print(
+        #         f"  ID {obj_id}: {obj_data['label']}, linear_size={obj_data['linear_size']:.2f} m"
+        #     )
 
         # Compute spatial relations
         relations = self.compute_spatial_relations(visible_objects)
@@ -634,7 +634,7 @@ class HabitatSimInteractiveViewer(Application):
 
         return relations
 
-    def compute_object_size(obj_entry: dict[str, any]) -> float:
+    def compute_object_size(self, obj_entry: dict[str, any]) -> float:
         """
         Return approximate linear size (in meters) of an object based on its bounding box.
         Works with bbox_world from extract_visible_objects.
@@ -656,17 +656,18 @@ class HabitatSimInteractiveViewer(Application):
             "ceiling",
             "floor",
             "window frame",
-            "door frame",
             "frame",
             "unknown",
         }:
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
-            return "doorway"
+            return "door"
 
         if l in {"stairs", "stair", "step", "stairway"}:
-            return "staircase"
+            return "stairs"
+        
+        # TODO add more classes synonyms/groupings as needed
 
         return l
 
@@ -689,10 +690,11 @@ class HabitatSimInteractiveViewer(Application):
                 blacklist
                 or [
                     "wall",
-                    "floor",
                     "ceiling",
+                    "floor",
                     "frame",
                     "window frame",
+                    "frame",
                     "unknown",
                     "ceiling_light",
                     "light",
@@ -726,19 +728,19 @@ class HabitatSimInteractiveViewer(Application):
         # ground-plane distance using world x,z (index 0 and 2)
         return math.hypot(a[0] - b[0], a[2] - b[2])
 
-    def _merge_aabbs(self, aabb_a, aabb_b):
-        # each aabb: [[xmin,ymin,zmin],[xmax,ymax,zmax]]
+
+    def merge_obbs(self, obb_a, obb_b):
         return [
             [
-                min(aabb_a[0][0], aabb_b[0][0]),
-                min(aabb_a[0][1], aabb_b[0][1]),
-                min(aabb_a[0][2], aabb_b[0][2]),
+                min(obb_a[0][0], obb_b[0][0]),
+                min(obb_a[0][1], obb_b[0][1]),
+                min(obb_a[0][2], obb_b[0][2]),
             ],
             [
-                max(aabb_a[1][0], aabb_b[1][0]),
-                max(aabb_a[1][1], aabb_b[1][1]),
-                max(aabb_a[1][2], aabb_b[1][2]),
-            ],
+                max(obb_a[1][0], obb_b[1][0]),
+                max(obb_a[1][1], obb_b[1][1]),
+                max(obb_a[1][2], obb_b[1][2]),
+            ]
         ]
 
     def _cluster_same_label(self, instances, distance_thresh=1.0):
@@ -790,7 +792,7 @@ class HabitatSimInteractiveViewer(Application):
                     )
 
                     # union bbox
-                    cl["bbox_world"] = self._merge_aabbs(
+                    cl["bbox_world"] = self.merge_obbs(
                         cl["bbox_world"], inst["bbox_world"]
                     )
 
@@ -860,7 +862,7 @@ class HabitatSimInteractiveViewer(Application):
             )
 
         # 2) Clustering per label
-        dedup_list = []
+        clusters_list = []
         for label_norm, insts in buckets.items():
             clusters = self._cluster_same_label(
                 insts, distance_thresh=per_label_cluster_thresh_m
@@ -872,12 +874,12 @@ class HabitatSimInteractiveViewer(Application):
                     clusters, key=lambda x: x["pixel_count"], reverse=True
                 )[:top_k_per_label]
 
-            dedup_list.extend(clusters)
+            clusters_list.extend(clusters)
 
         # 3) Build oggetti unici + stima linear_size di cluster
         objects = {}
         per_label_counts = {}
-        for cl in dedup_list:
+        for cl in clusters_list:
             cnt = per_label_counts.get(cl["label_norm"], 0) + 1
             per_label_counts[cl["label_norm"]] = cnt
             uid = f"{cl['label_norm']}_{cnt:02d}"
@@ -886,15 +888,14 @@ class HabitatSimInteractiveViewer(Application):
             # (robusta anche se _cluster_same_label non propaga linear_size)
             raw_ids = list(cl.get("raw_ids", []))
             if raw_ids:
-                sizes, weights = [], []
+                sizes = []
                 for rid in raw_ids:
                     v = visible_objects.get(rid, {})
                     sz = float(v.get("linear_size", 0.0))
                     if sz > 0:
                         sizes.append(sz)
-                        weights.append(float(v.get("pixel_count", 1)))
                 cluster_linear_size = (
-                    float(np.average(sizes, weights=weights))
+                    float(np.sum(sizes))
                     if sizes
                     else float(cl.get("linear_size", 0.0))
                 )
@@ -923,7 +924,7 @@ class HabitatSimInteractiveViewer(Application):
             sorted(
                 objects.items(),
                 key=lambda item: (
-                    item[1]["pixel_count"],
+                    # item[1]["pixel_count"],
                     item[1].get("linear_size", 0.0),
                 ),
                 reverse=True,
@@ -1047,7 +1048,7 @@ class HabitatSimInteractiveViewer(Application):
                                     sim, observations
                                 )
                                 if frame_meta is not None:
-                                    dedup = self.postprocess_visible_objects(
+                                    processed_objs = self.postprocess_visible_objects(
                                         frame_meta["visible_objects"],
                                         pixel_percent_min=0.02,
                                         mode="blacklist",
@@ -1070,8 +1071,8 @@ class HabitatSimInteractiveViewer(Application):
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{ix:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "objects": dedup["objects"],  # deduped version
-                                        "spatial_relations": dedup["spatial_relations"],
+                                        "objects": processed_objs["objects"],  
+                                        "spatial_relations": processed_objs["spatial_relations"],
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
 
@@ -2463,6 +2464,7 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
+    
 
 def user_input_logic_loop(
     viewer: HabitatSimInteractiveViewer, input_q: queue.Queue, output_q: queue.Queue
@@ -2474,40 +2476,48 @@ def user_input_logic_loop(
             if not user_input:
                 continue
 
+            llm_enabled = False
             # output_q.put("Processing your request...")
+            if not llm_enabled:
+                try:
+                    target_name, room_name = user_input.split("/")[0].strip(), user_input.split("/")[1].strip()
+                    output_q.put(f"Navigating to {room_name}/{target_name}...")
+                except Exception as e:
+                    print("Error parsing input without LLM. Please use 'object/room' format.")
+                    continue
+            else:            
+                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+                print("Response from ChatGPT: ", response)
+                goal_info = get_goal_from_response(
+                    response
+                )  # * Handle response and distinguish cases
+                print("Handled Response: ", goal_info)
+                response = response.split(".", 1)[
+                    1
+                ].strip()  # Remove numbering from response for user display
+                res_type = goal_info["type"]
 
-            response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
-            print("Response from ChatGPT: ", response)
-            goal_info = get_goal_from_response(
-                response
-            )  # * Handle response and distinguish cases
-            print("Handled Response: ", goal_info)
-            response = response.split(".", 1)[
-                1
-            ].strip()  # Remove numbering from response for user display
-            res_type = goal_info["type"]
-
-            if res_type == "object_in_room":
-                target_name = goal_info["object"]
-                room_name = goal_info["room"]
-            elif (
-                res_type == "room_only"
-                or res_type == "object_in_single_room"
-                or res_type == "object_repeated_in_room"
-            ):
-                target_name = None
-                room_name = goal_info["room"]
-            elif (
-                res_type == "ambiguous_room"
-                or res_type == "ambiguous_object_rooms"
-                or res_type == "not_found"
-                or res_type == "friendly_conversation"
-            ):
-                print(goal_info["message"])
-                output_q.put(response)
-                continue
-            else:
-                print(f"Unhandled goal type: {res_type}")
+                if res_type == "object_in_room":
+                    target_name = goal_info["object"]
+                    room_name = goal_info["room"]
+                elif (
+                    res_type == "room_only"
+                    or res_type == "object_in_single_room"
+                    or res_type == "object_repeated_in_room"
+                ):
+                    target_name = None
+                    room_name = goal_info["room"]
+                elif (
+                    res_type == "ambiguous_room"
+                    or res_type == "ambiguous_object_rooms"
+                    or res_type == "not_found"
+                    or res_type == "friendly_conversation"
+                ):
+                    print(goal_info["message"])
+                    output_q.put(response)
+                    continue
+                else:
+                    print(f"Unhandled goal type: {res_type}")
 
             # * === SANITY CHECK ===
             if not viewer.check_object_in_room(target_name, room_name):
@@ -2531,14 +2541,16 @@ def user_input_logic_loop(
 
             viewer.enqueue_shortest_path(goal_pos)
             # output_q.put(f"Generating navigation instructions...")
-            time.sleep(0.3)
+            time.sleep(0.2)
 
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            instructions = generate_path_description(
-                input_dir, user_input=user_input, model="gpt-4o", dry_run=False
-            )
+            
+            instructions = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
+            if instructions is None:
+                instructions = "Proceed to the " + room_name
+
             print("\n--- GENERATED DESCRIPTION ---\n")
             print(instructions)
             output_q.put(instructions)

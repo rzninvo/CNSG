@@ -222,19 +222,18 @@ def load_frames(input_dir: Path, max_frames: int) -> List[Dict[str, Any]]:
     return frames
 
 
-def distance_preference(distance: float | None) -> float:
-    if distance is None:
-        return 0.6
-    if distance <= 0:
-        return 0.3
-    diff = abs(distance - 4.0)
+def get_distance_score(distance: float, target_distance: float = 3.0) -> float:
+    if distance == 0:
+        return 0.2
+    
+    diff = abs(distance - target_distance)
     if diff <= 1.0:
         return 1.0
     if diff <= 2.0:
         return 0.75
     if diff <= 3.0:
         return 0.5
-    return 0.3
+    return 0.2
 
 
 def distance_bucket(distance: float | None) -> str | None:
@@ -245,16 +244,12 @@ def distance_bucket(distance: float | None) -> str | None:
     if distance < 3:
         return "near"
     if distance <= 5:
-        return "mid-range"
+        return "mid-distance"
     if distance <= 6:
         return "slightly far"
     return "far"
 
 
-def describe_relative_position(cam_coords):
-    x, y, z = cam_coords
-    horiz = "right" if x > 0.5 else "left" if x < -0.5 else "ahead"
-    return horiz
 
 
 def format_object_entry(obj: Dict[str, Any]) -> str | None:
@@ -290,28 +285,31 @@ def format_object_entry(obj: Dict[str, Any]) -> str | None:
             direction = horiz
         else:
             direction = "center"
+        
+        position = f"{direction}, {distance_bucket(obj.get('distance_from_camera'))}" # TODO test if better with distance 
 
-        return f"{label} ({direction})"
+        return f"{label} ({position})"
 
 
 def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
     label = str(obj.get("label", "")).strip().lower()
-    percent = obj.get("pixel_percent")
+    size = obj.get("linear_size", 0.0)
+    # percent = obj.get("pixel_percent")
     distance = obj.get("distance_from_camera")
 
-    percent_val = float(percent) if isinstance(percent, (float, int)) else 0.0
+    # percent_val = float(percent) if isinstance(percent, (float, int)) else 0.0
     distance_val = float(distance) if isinstance(distance, (float, int)) else 0.0
+    distance_val = max(distance_val, 0.0)
 
-    preference = distance_preference(distance_val if distance_val > 0 else None)
-    relevance = RELEVANCE_SCORES_OBJECTS.get(label, 0.2)  # default relevance if missing
+    distance_score = get_distance_score(distance_val, target_distance=4.0)
+    relevance = RELEVANCE_SCORES_OBJECTS.get(label, 0.5)
 
-    scored_percent = percent_val * preference * relevance
+    scored_percent = size * distance_score * relevance
+
     return (
         scored_percent,
-        relevance,
-        percent_val,
-        -distance_val if distance_val > 0 else 0.0,
-    )
+        size,
+        )
 
 
 def extract_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str]:
@@ -320,10 +318,12 @@ def extract_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str
         label = str(obj.get("label", "")).lower()
         if label in IGNORED_LABELS:
             continue
+        obj["priority_score"] = object_priority(obj)[0]
         candidates.append(obj)
+        
 
     candidates.sort(key=object_priority, reverse=True)
-
+    
     results: List[str] = []
     for obj in candidates[:limit]:
         formatted = format_object_entry(obj)
@@ -496,8 +496,9 @@ def generate_path_description(
     summaries = summarise_frames(frames)
     prompt = build_prompt(scene_index, summaries, user_input)
 
-    if dry_run:
-        return prompt
+    print(prompt)
+    if dry_run: 
+        return None
 
     return generate_description(prompt, model)
 
