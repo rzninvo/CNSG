@@ -570,15 +570,61 @@ class HabitatSimInteractiveViewer(Application):
     ):
         """
         Compute spatial relations between nearby objects, filtering out irrelevant ones.
-
         - Ignora relazioni tra oggetti con scala troppo diversa
-        (es. 'stairs' vs 'book').
-        - Favorisce relazioni tra oggetti visibili di scala comparabile.
-        - Usa la direzione più dominante per definire la relazione.
+        - Favorisce relazioni tra oggetti visibili di scala comparabile
+        - Usa la direzione più dominante per definire la relazione
+        - Applica regole semantiche per oggetti specifici (es. tavoli, porte, ecc.)
         """
+
+        # Definisci quali relazioni sono ammissibili per certi oggetti
+        # Formato: "object_label": {"allowed": [...]}
+        SEMANTIC_RULES = {
+            "table": {
+                "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
+            },
+            "desk": {
+                "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
+            },
+            "door": {
+                "allowed": [
+                    "on_top_of",
+                    "left_of",
+                    "right_of",
+                    "in_front_of",
+                ],
+            },
+            "window": {
+                "allowed": [
+                    "on_top_of",
+                    "left_of",
+                    "right_of",
+                ],
+            },
+            "ceiling": {
+                "allowed": ["beneath_of"],
+            },
+            "floor": {
+                "allowed": ["on_top_of"],
+            },
+        }
+
+        def is_relation_valid(obj_label, relation):
+            """
+            Verifica se una relazione è semanticamente valida per un dato oggetto.
+            """
+            if obj_label not in SEMANTIC_RULES:
+                return True  # Se non ci sono regole, accetta tutto
+
+            rules = SEMANTIC_RULES[obj_label]
+
+            if "allowed" in rules and relation not in rules["allowed"]:
+                return False
+
+            return True
 
         relations = []
         keys = list(visible_objects.keys())
+
         if len(keys) <= 1:
             return relations
 
@@ -586,7 +632,6 @@ class HabitatSimInteractiveViewer(Application):
             k: np.array(visible_objects[k]["centroid_cam"], dtype=float) for k in keys
         }
 
-        # Precompute size and filter out tiny/noisy objects
         sizes = {k: float(visible_objects[k].get("linear_size", 0.0)) for k in keys}
 
         for i in range(len(keys)):
@@ -594,24 +639,24 @@ class HabitatSimInteractiveViewer(Application):
                 obj_a, obj_b = visible_objects[keys[i]], visible_objects[keys[j]]
                 size_a, size_b = sizes[keys[i]], sizes[keys[j]]
 
-                # Skip degenerate or extremely different sizes
                 if size_a <= 0 or size_b <= 0:
                     continue
+
                 ratio = max(size_a, size_b) / min(size_a, size_b)
                 if ratio > size_ratio_thresh:
-                    # one object dominates too much, skip
                     continue
 
                 ca, cb = centroids[keys[i]], centroids[keys[j]]
                 diff = cb - ca
                 dist = np.linalg.norm(diff)
+
                 if dist > max_distance:
                     continue
 
                 dx, dy, dz = diff
                 abs_dx, abs_dy, abs_dz = abs(dx), abs(dy), abs(dz)
 
-                # pick dominant spatial axis
+                # Calcola la relazione dominante
                 rel_ab = None
                 if (
                     abs_dy > vertical_thresh
@@ -622,6 +667,11 @@ class HabitatSimInteractiveViewer(Application):
                     rel_ab = "left_of" if dx > 0 else "right_of"
                 else:
                     rel_ab = "in_front_of" if dz < 0 else "behind"
+
+                # Verifica la validità semantica per entrambi gli oggetti
+                # (obj_b è il "subject", obj_a è l'"object" nella relazione)
+                if not is_relation_valid(obj_a["label"], rel_ab):
+                    continue
 
                 relations.append(
                     {

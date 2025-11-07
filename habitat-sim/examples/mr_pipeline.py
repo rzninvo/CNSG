@@ -66,7 +66,6 @@ from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
 
-
 # Initialize OpenAI client
 try:
     from dotenv import load_dotenv
@@ -81,6 +80,8 @@ except Exception as e:
 
 
 class NewViewer(BaseViewer):
+    MOVE, LOOK = 0.04, 1.5  # New definition for these two attributes
+
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
         scene_path = sim_settings["scene"]
         super().__init__(sim_settings)
@@ -88,7 +89,6 @@ class NewViewer(BaseViewer):
 
         self.cnt = 0
         self.action_queue = queue.Queue()
-
 
         # draw object bounding boxes when enabled
         self.show_object_bboxes = False
@@ -1191,24 +1191,9 @@ class NewViewer(BaseViewer):
         """
         Additional draw commands to be called during draw_event.
         """
-        if self.debug_bullet_draw:
-            render_cam = self.render_camera.render_camera
-            proj_mat = render_cam.projection_matrix.__matmul__(render_cam.camera_matrix)
-            self.sim.physics_debug_draw(proj_mat)
-
-        debug_line_render = self.sim.get_debug_line_render()
-        if self.contact_debug_draw:
-            self.draw_contact_debug(debug_line_render)
-
-        if self.semantic_region_debug_draw:
-            if len(self.debug_semantic_colors) != len(self.sim.semantic_scene.regions):
-                for region in self.sim.semantic_scene.regions:
-                    self.debug_semantic_colors[region.id] = mn.Color4(
-                        mn.Vector3(np.random.random(3))
-                    )
-            self.draw_region_debug(debug_line_render)
+        super().debug_draw()
         if self.show_object_bboxes:
-            self._draw_object_bboxes(debug_line_render)
+            self._draw_object_bboxes(self.debug_line_render)
         else:
             self._bbox_label_screen_positions.clear()
 
@@ -1290,51 +1275,6 @@ class NewViewer(BaseViewer):
         self.swap_buffers()
         Timer.next_frame()
         self.redraw()
-
-    def default_agent_config(self) -> habitat_sim.agent.AgentConfiguration:
-        """
-        Set up our own agent and agent controls
-        """
-        make_action_spec = habitat_sim.agent.ActionSpec
-        make_actuation_spec = habitat_sim.agent.ActuationSpec
-        MOVE, LOOK = 0.04, 1.5  # TODO modified: originally 0.07, 1.5
-
-        # all of our possible actions' names
-        action_list = [
-            "move_left",
-            "turn_left",
-            "move_right",
-            "turn_right",
-            "move_backward",
-            "look_up",
-            "move_forward",
-            "look_down",
-            "move_down",
-            "move_up",
-        ]
-
-        action_space: Dict[str, habitat_sim.agent.ActionSpec] = {}
-
-        # build our action space map
-        for action in action_list:
-            actuation_spec_amt = MOVE if "move" in action else LOOK
-            action_spec = make_action_spec(
-                action, make_actuation_spec(actuation_spec_amt)
-            )
-            action_space[action] = action_spec
-
-        sensor_spec: List[habitat_sim.sensor.SensorSpec] = self.cfg.agents[
-            self.agent_id
-        ].sensor_specifications
-
-        agent_config = habitat_sim.agent.AgentConfiguration(
-            height=1.5,
-            radius=0.1,
-            sensor_specifications=sensor_spec,
-            action_space=action_space,
-            body_type="cylinder",
-        )
-        return agent_config
 
     def move_and_look(self, repetitions: int) -> None:
         """

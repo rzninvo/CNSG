@@ -46,6 +46,8 @@ class HabitatSimInteractiveViewer(Application):
     # CPU and GPU usage info
     DISPLAY_FONT_SIZE = 16.0
 
+    MOVE, LOOK = 0.07, 1.5
+
     def __init__(self, sim_settings: Dict[str, Any]) -> None:
         self.sim_settings: Dict[str:Any] = sim_settings
 
@@ -254,9 +256,9 @@ class HabitatSimInteractiveViewer(Application):
             proj_mat = render_cam.projection_matrix.__matmul__(render_cam.camera_matrix)
             self.sim.physics_debug_draw(proj_mat)
 
-        debug_line_render = self.sim.get_debug_line_render()
+        self.debug_line_render = self.sim.get_debug_line_render()
         if self.contact_debug_draw:
-            self.draw_contact_debug(debug_line_render)
+            self.draw_contact_debug(self.debug_line_render)
 
         if self.semantic_region_debug_draw:
             if len(self.debug_semantic_colors) != len(self.sim.semantic_scene.regions):
@@ -264,7 +266,7 @@ class HabitatSimInteractiveViewer(Application):
                     self.debug_semantic_colors[region.id] = mn.Color4(
                         mn.Vector3(np.random.random(3))
                     )
-            self.draw_region_debug(debug_line_render)
+            self.draw_region_debug(self.debug_line_render)
 
     def draw_event(
         self,
@@ -327,7 +329,7 @@ class HabitatSimInteractiveViewer(Application):
         """
         make_action_spec = habitat_sim.agent.ActionSpec
         make_actuation_spec = habitat_sim.agent.ActuationSpec
-        MOVE, LOOK = 0.07, 1.5
+        # MOVE, LOOK = 0.07, 1.5
 
         # all of our possible actions' names
         action_list = [
@@ -347,7 +349,7 @@ class HabitatSimInteractiveViewer(Application):
 
         # build our action space map
         for action in action_list:
-            actuation_spec_amt = MOVE if "move" in action else LOOK
+            actuation_spec_amt = self.MOVE if "move" in action else self.LOOK
             action_spec = make_action_spec(
                 action, make_actuation_spec(actuation_spec_amt)
             )
