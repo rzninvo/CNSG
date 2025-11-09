@@ -81,7 +81,7 @@ RELEVANCE_SCORES_OBJECTS = {
     "shirt": 0.3,
     "bag": 0.4,
     "newspaper": 0.6,
-    "balustrade": 0.7,
+    "balustrade": 0.1,
     "stairs": 1.0,
     "window curtain": 0.6,
     "curtain rod": 0.2,
@@ -147,16 +147,16 @@ RELEVANCE_SCORES_OBJECTS = {
 @dataclass
 class FrameSummary:
     name: str
-    objects: Sequence[str]
+    clusters: Sequence[str]
     relations: Sequence[str]
 
-    def to_prompt_line(self, num_objs_per_frame = 2) -> str:
-        if not self.objects:
+    def to_prompt_line(self, num_clusters_per_frame = 2) -> str:
+        if not self.clusters:
             return f"{self.name}: Limited visibility in this frame."
 
 
-        object_part = ", ".join(self.objects[:num_objs_per_frame])
-        rel_part = "; ".join(self.relations[:num_objs_per_frame]) if self.relations else ""
+        object_part = ", ".join(self.clusters[:num_clusters_per_frame])
+        rel_part = "; ".join(self.relations[:num_clusters_per_frame]) if self.relations else ""
 
         description = f"In {self.name}, you see {object_part}"
         if rel_part:
@@ -250,18 +250,16 @@ def distance_bucket(distance: float | None) -> str | None:
         return "slightly far"
     return "far"
 
-
-
-
-def format_object_entry(obj: Dict[str, Any]) -> str | None:
-    label = str(obj.get("label", "")).strip()
+def format_object_entry(cluster: Dict[str, Any]) -> str | None:
+    label = str(cluster.get("label", "")).strip()
+    cluster_str_id = str(cluster['cluster_str_id']).strip()
     if not label or label.lower() in IGNORED_LABELS:
         return None
 
     # View-based positioning
     direction = None
     # View-based positioning from centroid_cam (x, y)
-    centroid = obj.get("centroid_cam")
+    centroid = cluster.get("centroid_cam")
     if isinstance(centroid, list) and len(centroid) >= 2:
         x, y = centroid[0], centroid[1]
         if y > 0.3:
@@ -287,15 +285,15 @@ def format_object_entry(obj: Dict[str, Any]) -> str | None:
         else:
             direction = "center"
         
-        position = f"{direction}, {distance_bucket(obj.get('distance_from_camera'))}" # TODO test if better with distance 
+        position = f"{direction}, {distance_bucket(cluster.get('distance_from_camera'))}" # TODO test if better with distance 
 
-        return f"{label} ({position})"
+        return f"{cluster_str_id} ({position})"
 
 
 def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
     label = str(obj.get("label", "")).strip().lower()
     size = obj.get("linear_size", 0.0)
-    # percent = obj.get("pixel_percent")
+    pixel_percent = obj.get("pixel_percent")
     distance = obj.get("distance_from_camera")
 
     # percent_val = float(percent) if isinstance(percent, (float, int)) else 0.0
@@ -305,7 +303,7 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
     distance_score = get_distance_score(distance_val, target_distance=4.0)
     relevance = RELEVANCE_SCORES_OBJECTS.get(label, 0.5)
 
-    scored_percent = size * distance_score * relevance
+    scored_percent = pixel_percent * distance_score * relevance
 
     return (
         scored_percent,
@@ -313,21 +311,23 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
         )
 
 
-def select_n_objects(visible_objects: Dict[str, Any], limit: int = 3) -> List[str]:
+def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: str = "") -> List[str]:
     candidates: List[Dict[str, Any]] = []
-    for obj in visible_objects.values():
-        label = str(obj.get("label", "")).lower()
-        if label in IGNORED_LABELS:
+    for cluster in clusters.values():
+        label = str(cluster.get("label", "")).lower()
+        cluster_str_id = str(cluster['cluster_str_id']).lower()
+        if label == target_object.lower() and target_object != "":
+            cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
+        if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
-        obj["priority_score"] = object_priority(obj)[0]
-        candidates.append(obj)
-        
+        cluster["priority_score"] = object_priority(cluster)[0]
+        candidates.append(cluster)
 
-    candidates.sort(key=object_priority, reverse=True)
+    candidates.sort(key=object_priority, reverse=True) # * This will make sure that if the target object is present, it will be first
     
     results: List[str] = []
-    for obj in candidates[:limit]:
-        formatted = format_object_entry(obj)
+    for cluster in candidates[:limit]:
+        formatted = format_object_entry(cluster)
         if formatted:
             results.append(formatted)
     return results, candidates[:limit]
@@ -349,65 +349,81 @@ def extract_relations(
             "next_to": "next to",
         }
         return table.get(relation, relation.replace("_", " "))
-    objs_str_ids: List[str] = []
+    clusters = {}
     filtered: List[str] = []
     for item in relationships:
         subj = item.get("subject", "")
         rel = item.get("relation", "")
         obj = item.get("object", "")
-        subj_label = subj["label"]
-        obj_label = obj["label"]
+        subj_str_id = subj.get("cluster_str_id", "")
+        obj_str_id = obj.get("cluster_str_id", "")
 
         if not subj or not rel or not obj:
             continue
-        if subj_label.lower() in IGNORED_LABELS or obj_label.lower() in IGNORED_LABELS:
+        if subj_str_id.lower() in IGNORED_LABELS or obj_str_id.lower() in IGNORED_LABELS:
             continue
         natural_rel = natural_direction(rel)
-        filtered.append(f"{subj_label} is {natural_rel} {obj_label}")
-        objs_str_ids += subj.get("obj_str_ids", []) + obj.get("obj_str_ids", [])
+        filtered.append(f"{subj_str_id} is {natural_rel} {obj_str_id}")
+
+        if subj_str_id not in clusters:
+            clusters[subj_str_id] = []
+        if obj_str_id not in clusters:
+            clusters[obj_str_id] = []
+            
+        clusters[subj_str_id] += subj.get("obj_str_ids", [])
+        clusters[obj_str_id] += obj.get("obj_str_ids", [])
         if len(filtered) >= limit:
             break
-    return filtered, objs_str_ids
+    return filtered, clusters
 
 
-def summarise_frames(frames: Sequence[Dict[str, Any]], num_objs_per_frame = 2) -> List[FrameSummary]:
+def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 2, target_name: str = "") -> List[FrameSummary]:
     summaries: List[FrameSummary] = []
-
-    obj_str_ids_to_draw = set()
+    clusters_to_draw = {}
 
     for frame in frames:
-        name = str(frame.get("image_index") or frame.get("frame", "frame")).strip()
-        objects = frame.get("objects", {})
+        name = str(frame.get("image_index"))
+        clusters = frame.get("objects", {})
         spatial_relations = frame.get("spatial_relations", [])
 
-        phrases, selected_objects = select_n_objects(objects, num_objs_per_frame)
-        relations, obj_str_ids = extract_relations(spatial_relations)
+        phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name)
+        relations, clusters_in_relations = extract_relations(spatial_relations)
+            
+        # clusters_to_draw = {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...}
 
-        for obj_str_id in obj_str_ids:
-            obj_str_ids_to_draw.add(obj_str_id)
 
-        print("Frame", name, "objects:", selected_objects)
-        for obj in selected_objects:
-            if "obj_str_ids" in obj:
-                obj_str_ids = obj.get("obj_str_ids")
-                for obj_str_id in obj_str_ids:
-                    obj_str_ids_to_draw.add(obj_str_id)
+        # print("Frame", name, "objects:", selected_objects)
+        for cluster in selected_clusters:
+            cluster_str_id = cluster.get("cluster_str_id", "")
+            obj_str_ids = cluster.get("obj_str_ids", [])
+            print("Selected Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
+            if cluster_str_id in clusters_to_draw:
+                clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
+            else:
+                clusters_to_draw[cluster_str_id] = obj_str_ids
+        
+        for cluster_str_id, obj_str_ids in clusters_in_relations.items():
+            print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
+            if cluster_str_id in clusters_to_draw:
+                clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
+            else:
+                clusters_to_draw[cluster_str_id] = obj_str_ids
 
-        print("IDs in frame", name, ":", list(obj_str_ids_to_draw))
+        print("IDs in frame", name, ":", clusters_to_draw)
 
         summaries.append(
             FrameSummary(
                 name=name,
-                objects=phrases,
+                clusters=phrases,
                 relations=relations,
             )
         )
     # print("All collected IDs:", raw_ids)
-    return summaries, list(obj_str_ids_to_draw)
+    return summaries, clusters_to_draw
 
 
 def build_prompt(
-    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_objs_per_frame: int = 2
+    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2
 ) -> str:
     intro_lines = [
         "You are a navigation assistant helping someone retrace a short walk through a home.",
@@ -425,7 +441,7 @@ def build_prompt(
     scene_line = (
         f"Scene index: {scene_index}" if scene_index else "Scene index: unknown"
     )
-    observation_lines = "\n".join(summary.to_prompt_line(num_objs_per_frame=num_objs_per_frame) for summary in summaries)
+    observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
 
     return textwrap.dedent(
         f"""
@@ -507,6 +523,7 @@ def generate_path_description(
     model: str = "gpt-4o-mini",
     max_frames: int = 40,
     dry_run: bool = False,
+    target_name: str = "",
 ) -> str:
     """
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
@@ -514,15 +531,17 @@ def generate_path_description(
     """
     frames = load_frames(input_dir, max_frames)
     scene_index = frames[0].get("scene_index")
-    num_objs_per_frame = 2
-    summaries, obj_str_ids_to_draw = summarise_frames(frames, num_objs_per_frame=num_objs_per_frame)
-    prompt = build_prompt(scene_index, summaries, user_input, num_objs_per_frame=num_objs_per_frame)
+    num_clusters_per_frame = 2
+    summaries, clusters_to_draw = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
+    prompt = build_prompt(scene_index, summaries, user_input, num_clusters_per_frame=num_clusters_per_frame)
 
     print(prompt)
+    print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
     if dry_run: 
-        return None, obj_str_ids_to_draw
+        return None, clusters_to_draw
+    
 
-    return generate_description(prompt, model), obj_str_ids_to_draw
+    return generate_description(prompt, model), clusters_to_draw
 
 
 if __name__ == "__main__":

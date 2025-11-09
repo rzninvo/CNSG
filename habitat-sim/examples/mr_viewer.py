@@ -77,9 +77,11 @@ class NewViewer(BaseViewer):
         scene_path = sim_settings["scene"]
         super().__init__(sim_settings)
         self.q_app = q_app
-        self.objs_str_ids_to_draw = None # List of 'Numbers' e.g. ['1', '645', ...]
-        self.prev_ids = None
+        self.objects = {}
+        self.clusters_to_draw = None # List of 'Numbers' e.g. ['1', '645', ...]
+        self.prev_objs_to_draw = None
         self.action_queue = queue.Queue()
+        self.scene = self.sim.semantic_scene        
 
         # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
@@ -118,7 +120,13 @@ class NewViewer(BaseViewer):
 
         self.room_objects_occurences = semantic_info
 
+        self.objects = self.get_objs_from_sim()
+        self.cluster_cnt = 0
+        self.clusters = self.cluster_objs(distance_thresh=1.2)
+
+
         # self.print_scene_semantic_info()
+
 
     def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
         semantic_info = {}
@@ -167,12 +175,147 @@ class NewViewer(BaseViewer):
         cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
         cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
         return cx, cy, cz
+    
 
-    def set_objs_str_ids_to_draw(self, objs_str_ids_to_draw: List[str]):
-        self.objs_str_ids_to_draw = objs_str_ids_to_draw
-        # print(f"Updated objs_str_ids_to_draw: {self.objs_str_ids_to_draw}")    
+    def get_objs_from_sim(self):
+        objects = {}
+        if self.scene is not None:
+            
+            for sim_obj in self.scene.objects:
+                obb = getattr(sim_obj, "obb", None)
 
-    def shortest_path(self, sim, goal: mn.Vector3):  # TODO REMOVE ALL THE PRINTS
+                if obb is not None:
+                    center = mn.Vector3(obb.center)
+                    half_extents = mn.Vector3(obb.half_extents)
+                    rot_vec = mn.Vector4(obb.rotation)
+                    rotation = mn.Quaternion(
+                        mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
+                    )
+
+                    # Compute oriented corners
+                    corner_offsets = [
+                        mn.Vector3(-half_extents.x, -half_extents.y, -half_extents.z),
+                        mn.Vector3(half_extents.x, -half_extents.y, -half_extents.z),
+                        mn.Vector3(-half_extents.x, half_extents.y, -half_extents.z),
+                        mn.Vector3(half_extents.x, half_extents.y, -half_extents.z),
+                        mn.Vector3(-half_extents.x, -half_extents.y, half_extents.z),
+                        mn.Vector3(half_extents.x, -half_extents.y, half_extents.z),
+                        mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
+                        mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
+                    ]
+                    corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
+
+                    bbox_world = [
+                        [
+                            float(min(v.x for v in corners_world)),
+                            float(min(v.y for v in corners_world)),
+                            float(min(v.z for v in corners_world)),
+                        ],
+                        [
+                            float(max(v.x for v in corners_world)),
+                            float(max(v.y for v in corners_world)),
+                            float(max(v.z for v in corners_world)),
+                        ],
+                    ]
+                    centroid_world = [float(center.x), float(center.y), float(center.z)]
+
+                    objects[sim_obj.id] = {
+                        "obj_str_id": sim_obj.id,
+                        "obj_num_id": int(sim_obj.id.split("_")[-1]),
+                        "sim_obj" : sim_obj,
+                        "label": sim_obj.category.name() if sim_obj.category is not None else f"sim_object_{sim_obj.id}",
+                        "centroid_world": centroid_world,
+                        "bbox_world": bbox_world,
+                        "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
+                        }
+                
+        return objects
+    
+    def cluster_objs(self, distance_thresh=1.0):
+        buckets = {}  # {label_norm : list[obj_str_ids]
+        for obj in self.objects.values():
+            obj_str_id = obj.get("obj_str_id")
+            label_norm = self._normalize_label(obj.get("label"))
+            if not self._is_informative(label_norm, mode="blacklist"):
+                continue
+
+            buckets.setdefault(label_norm, []).append(obj_str_id)
+
+
+        clusters_list = []
+        for label_norm, obj_str_ids in buckets.items():
+            current_clusters = self._cluster_same_label(obj_str_ids, label_norm, distance_thresh=distance_thresh)
+            clusters_list.extend(current_clusters)
+
+        clusters = {}
+        for cluster in clusters_list:
+            label = cluster["label"]
+            cluster_str_id = f"{label}_{self.cluster_cnt}"
+            cluster["cluster_str_id"] = cluster_str_id
+            clusters[cluster_str_id] = cluster
+            self.cluster_cnt += 1
+
+        return clusters
+    
+    def _cluster_same_label(self, obj_str_ids, label_norm, distance_thresh=1.0):
+        clusters = []
+        def xz_dist(a, b):
+            return math.sqrt((a[0]-b[0])**2 + (a[2]-b[2])**2)  # ignore Y
+        
+        def merge_obbs(obb_a, obb_b):
+            return [
+                [
+                    min(obb_a[0][0], obb_b[0][0]),
+                    min(obb_a[0][1], obb_b[0][1]),
+                    min(obb_a[0][2], obb_b[0][2]),
+                ],
+                [
+                    max(obb_a[1][0], obb_b[1][0]),
+                    max(obb_a[1][1], obb_b[1][1]),
+                    max(obb_a[1][2], obb_b[1][2]),
+                ]
+            ]
+        
+        for obj_str_id in obj_str_ids:
+            assigned = False
+            obj = self.objects[obj_str_id]
+            for cluster in clusters:
+                if (xz_dist(obj["centroid_world"], cluster["centroid_world"]) <= distance_thresh):
+                    count_cluster = len(cluster["obj_str_ids"])
+                    # centroid (world)
+                    new_cx = (cluster["centroid_world"][0] * count_cluster + obj["centroid_world"][0]) / (count_cluster + 1)
+                    new_cy = (cluster["centroid_world"][1] * count_cluster + obj["centroid_world"][1]) / (count_cluster + 1)
+                    new_cz = (cluster["centroid_world"][2] * count_cluster + obj["centroid_world"][2]) / (count_cluster + 1)
+                    cluster["centroid_world"] = [new_cx, new_cy, new_cz]
+
+                    # union bbox
+                    cluster["bbox_world"] = merge_obbs(cluster["bbox_world"], obj["bbox_world"])
+
+                    cluster["linear_size"] += obj.get("linear_size") 
+                    # track raw semantic ids merged
+                    cluster["obj_str_ids"].append(obj_str_id) 
+                    assigned = True
+                    break
+
+            if not assigned:
+                clusters.append({"obj_str_ids": [obj_str_id],
+                                 "label": label_norm,
+                                "centroid_world": obj["centroid_world"],
+                                "bbox_world": obj["bbox_world"], 
+                                "linear_size": obj.get("linear_size", 0.0),
+                                })
+                                 
+        return clusters
+        
+
+        
+
+
+    def set_clusters_to_draw(self, clusters_to_draw: List[str]):
+        self.clusters_to_draw = clusters_to_draw
+        # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")    
+
+    def shortest_path(self, sim, goal: mn.Vector3): 
         if not sim.pathfinder.is_loaded:
             print("Pathfinder not initialized, aborting.")
         else:
@@ -258,30 +401,25 @@ class NewViewer(BaseViewer):
                                 # Extract visible objects + relations
                                 visible_objs = self.extract_visible_objs(sim, observations)
                                 if visible_objs is not None:
-                                    processed_objs = self.postprocess_visible_objects(
-                                        visible_objs,
-                                        pixel_percent_min=0.02,
-                                        mode="blacklist",
-                                        per_label_cluster_thresh_m=1.2,
-                                        top_k_per_label=3,
-                                    )
-
+                                    visible_clusters = self.cluster_visible_objs(visible_objs, pixel_percent_min=0.02,)
+                                    
+                                    processed_visible_clusters = self.process_visible_clusters(visible_clusters)
 
                                     sensor_state = (
-                                        sim.get_agent(0)
+                                        sim.get_agent(self.agent_id)
                                         .get_state()
                                         .sensor_states["color_sensor"]
                                     )
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
                                     T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
 
-                                    print(f"[PLUTO] Oggetti: {processed_objs}")
+                                    # print(f"[PLUTO] Oggetti: {processed_objs}")
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{ix:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
-                                        "objects": processed_objs,  
-                                        "spatial_relations": self.compute_spatial_relations(processed_objs),
+                                        "objects": processed_visible_clusters,  #! NOTE we use "objects" even if they are clusters
+                                        "spatial_relations": self.compute_spatial_relations(processed_visible_clusters, sim.get_agent(self.agent_id).get_state()),
                                         "timestamp": datetime.datetime.now().isoformat(),
                                     }
 
@@ -314,7 +452,7 @@ class NewViewer(BaseViewer):
             for s in range(1, n_steps + 1):
                 new_point = p0 + direction * step_size * s
                 new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3:  # NOTE removed
+        if np.linalg.norm(new_points[-1] - points[-1]) > 0.8: 
             new_points.append(points[-1])
         return np.array(new_points)
 
@@ -385,66 +523,23 @@ class NewViewer(BaseViewer):
 
         semantic = observations["semantic_sensor"]
         total_pixels = semantic.size
-        num_ids, counts = np.unique(semantic, return_counts=True)
+        obj_num_ids, counts = np.unique(semantic, return_counts=True)
 
         visible_objects = {}
-        # print("semantic ids", ids)
-        for obj_num_id, pixel_count in zip(num_ids, counts): # obj_num_id is 'Number'
+
+
+        for obj_num_id, pixel_count in zip(obj_num_ids, counts): # obj_num_id is an int
             if obj_num_id == 0 or pixel_count < 50:
                 continue  # skip background/noise/small fragments
 
             try:
                 sim_obj = sim.semantic_scene.objects[obj_num_id]
             except IndexError:
+                print(f"[WARNING] Object with num_id {obj_num_id} not found in semantic scene.")
                 continue
-
-            label = (sim_obj.category.name() if sim_obj.category is not None else f"sim_object_{obj_num_id}")
-            # Prefer oriented bounding box if available
-            obb = getattr(sim_obj, "obb", None)
-            if obb is not None:
-                center = mn.Vector3(obb.center)
-                half_extents = mn.Vector3(obb.half_extents)
-                rot_vec = mn.Vector4(obb.rotation)
-                rotation = mn.Quaternion(
-                    mn.Vector3(rot_vec[0], rot_vec[1], rot_vec[2]), rot_vec[3]
-                )
-
-                # Compute oriented corners
-                corner_offsets = [
-                    mn.Vector3(-half_extents.x, -half_extents.y, -half_extents.z),
-                    mn.Vector3(half_extents.x, -half_extents.y, -half_extents.z),
-                    mn.Vector3(-half_extents.x, half_extents.y, -half_extents.z),
-                    mn.Vector3(half_extents.x, half_extents.y, -half_extents.z),
-                    mn.Vector3(-half_extents.x, -half_extents.y, half_extents.z),
-                    mn.Vector3(half_extents.x, -half_extents.y, half_extents.z),
-                    mn.Vector3(-half_extents.x, half_extents.y, half_extents.z),
-                    mn.Vector3(half_extents.x, half_extents.y, half_extents.z),
-                ]
-                corners_world = [rotation.transform_vector(offset) + center for offset in corner_offsets]
-
-                bbox_world = [
-                    [
-                        float(min(v.x for v in corners_world)),
-                        float(min(v.y for v in corners_world)),
-                        float(min(v.z for v in corners_world)),
-                    ],
-                    [
-                        float(max(v.x for v in corners_world)),
-                        float(max(v.y for v in corners_world)),
-                        float(max(v.z for v in corners_world)),
-                    ],
-                ]
-                centroid_world = [float(center.x), float(center.y), float(center.z)]
-            else:
-                # fallback to aabb if obb missing
-                aabb = sim_obj.aabb
-                vmin = aabb.min() if callable(getattr(aabb, "min", None)) else aabb.min
-                vmax = aabb.max() if callable(getattr(aabb, "max", None)) else aabb.max
-                bbox_world = [
-                    [float(vmin[0]), float(vmin[1]), float(vmin[2])],
-                    [float(vmax[0]), float(vmax[1]), float(vmax[2])],
-                ]
-                centroid_world = [float(x) for x in aabb.center()]
+            
+            obj = self.objects.get(sim_obj.id)
+            centroid_world = obj.get("centroid_world")
 
             # Convert centroid to camera coordinates
             sensor_state = (
@@ -460,22 +555,17 @@ class NewViewer(BaseViewer):
             dist = float(np.linalg.norm(centroid_cam))
 
             obj_str_id = str(sim_obj.id)  # -> Eg. 'wall_clock_231'
+            # print(f"[MINNIE] Visible obj: id={obj_str_id}, label={label}, pixels={pixel_count}, centroid_world={centroid_world}, dist={dist:.2f}m")
             visible_objects[obj_str_id] = {
-                "sim_obj": sim_obj, 
-                "label": label,
+                **obj, # "sim_obj", "obj_str_id", "obj_num_id", "label", "centroid_world", "bbox_world", "linear_size"
                 "pixel_count": int(pixel_count),
                 "pixel_percent": float(100 * pixel_count / total_pixels),
-                "centroid_world": centroid_world,
-                "bbox_world": bbox_world,
                 "centroid_cam": centroid_cam.tolist(),
                 "distance_from_camera": dist,
-                "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
             }
 
-
-
-        return visible_objects
-    
+        return dict(sorted(visible_objects.items(), key=lambda item: (item[1].get("pixel_count", 0.0),),reverse=True,))
+        
     def compute_object_size(self, obj_entry: dict[str, any]) -> float:
         """
         Return approximate linear size (in meters) of an object based on its bounding box.
@@ -490,7 +580,7 @@ class NewViewer(BaseViewer):
         linear_size = float(np.cbrt(volume))  # cubic root gives a single scalar size
         return linear_size
 
-    def compute_spatial_relations(self, visible_objects, max_distance=1.5, vertical_thresh=0.25, horizontal_bias=1.2, size_ratio_thresh=3.0):
+    def compute_spatial_relations(self, visible_clusters, agent_state, max_distance=1.5, vertical_thresh=0.25, horizontal_bias=1.2, size_ratio_thresh=3.0):
         """
         Compute spatial relations between nearby objects, filtering out irrelevant ones.
         - Ignora relazioni tra oggetti con scala troppo diversa
@@ -498,65 +588,51 @@ class NewViewer(BaseViewer):
         - Usa la direzione più dominante per definire la relazione
         - Applica regole semantiche per oggetti specifici (es. tavoli, porte, ecc.)
         """
-
-        # Definisci quali relazioni sono ammissibili per certi oggetti
-        # Formato: "object_label": {"allowed": [...]}
+        # EXAMPLE
         SEMANTIC_RULES = {
-            "table": {
-                "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
-            },
-            "desk": {
-                "allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],
-            },
-            "door": {
-                "allowed": ["on_top_of", "left_of", "right_of", "in_front_of"],
-            },
-            "window": {
-                "allowed": [ "on_top_of", "left_of", "right_of"],
-            },
-            "ceiling": {
-                "allowed": ["beneath_of"],
-            },
-            "floor": {
-                "allowed": ["on_top_of"],
-            },
+            "table": {"allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],},
+            "desk": {"allowed": ["on_top_of", "beneath_of", "left_of", "right_of"],},
+            "door": {"allowed": ["on_top_of", "left_of", "right_of", "in_front_of"],},
+            "window": {"allowed": [ "on_top_of", "left_of", "right_of"],},
+            "ceiling": {"allowed": ["beneath_of"],},
+            "floor": {"allowed": ["on_top_of"],},
         }
+
+        agent_position = agent_state.position
+        agent_rotation = utils.quat_to_magnum(agent_state.rotation)
 
         def is_relation_valid(obj_label, relation):
             """
             Verifica se una relazione è semanticamente valida per un dato oggetto.
             """
             if obj_label not in SEMANTIC_RULES:
-                return True  # Se non ci sono regole, accetta tutto
-
+                return True
             rules = SEMANTIC_RULES[obj_label]
-
             if "allowed" in rules and relation not in rules["allowed"]:
                 return False
-
             return True
 
         relations = []
-        keys = list(visible_objects.keys())
+        keys = list(visible_clusters.keys())
 
         if len(keys) <= 1:
             return relations
 
         centroids = {
-            k: np.array(visible_objects[k]["centroid_cam"], dtype=float) for k in keys
+            k: np.array(visible_clusters[k]["centroid_cam"], dtype=float) for k in keys
         }
 
-        sizes = {k: float(visible_objects[k].get("linear_size", 0.0)) for k in keys}
+        sizes = {k: float(visible_clusters[k].get("linear_size", 0.0)) for k in keys}
 
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
-                obj_a, obj_b = visible_objects[keys[i]], visible_objects[keys[j]]
+                obj_a, obj_b = visible_clusters[keys[i]], visible_clusters[keys[j]]
                 size_a, size_b = sizes[keys[i]], sizes[keys[j]]
 
                 if size_a <= 0 or size_b <= 0:
                     continue
 
-                ratio = max(size_a, size_b) / min(size_a, size_b)
+                ratio = max(size_a, size_b) / min(size_a, size_b) # TODO why this? check
                 if ratio > size_ratio_thresh:
                     continue
 
@@ -587,7 +663,9 @@ class NewViewer(BaseViewer):
                 relations.append(
                     {
                         "subject": obj_a,
+                        "subject_str_id": keys[i],
                         "object": obj_b,
+                        "object_str_id": keys[j],
                         "relation": rel_ab,
                         "distance_m": round(float(dist), 3),
                     }
@@ -595,60 +673,144 @@ class NewViewer(BaseViewer):
 
         return relations
     
-    def postprocess_visible_objects(self, visible_objs: dict, *, pixel_percent_min=0.02, mode="blacklist", blacklist=None, whitelist=None, per_label_cluster_thresh_m=1.0, top_k_per_label=None):
+  
+
+    def cluster_visible_objs(self, visible_objs: dict, *, pixel_percent_min=0.02):
         """
-        - visible_objects: the dict produced by extract_visible_objs_and_relations()["visible_objects"]
-        Returns:
-            {
-            "objects": { "<uid>": {...} },
-            "spatial_relations": [ ... ]   # recomputed on deduped set (if requested)
-            }
+        Cluster visible objects based on label and proximity.
+        Returns a dict of clustered objects with relevant info.
         """
-        buckets = {}  # {label_norm : list[obj_str_ids]
-        for obj_str_id, visible_obj in visible_objs.items():
-            label_norm = self._normalize_label(visible_obj["label"])
-            if not self._is_informative(label_norm, mode=mode, blacklist=blacklist, whitelist=whitelist):
+        # Initialize dictionary to aggregate visible data per cluster
+        visible_clusters = {}
+        total_visible_pixels = sum(v["pixel_count"] for v in visible_objs.values())
+
+        # Find the cluster for each visible object and aggregate data
+        for visible_obj in visible_objs.values():
+            cluster_str_id = None
+            for cluster in self.clusters.values():
+                if visible_obj["obj_str_id"] in cluster["obj_str_ids"]:
+                    cluster_str_id = cluster["cluster_str_id"]
+                    break
+
+            if cluster_str_id is None:
+                continue  # Skip if no cluster found
+
+            # Initialize cluster data if first time seeing this cluster
+            if cluster_str_id not in visible_clusters:
+                cluster = self.clusters[cluster_str_id]
+                visible_clusters[cluster_str_id] = {
+                    "cluster_str_id": cluster_str_id,
+                    "label_norm": cluster["label"],  # Assumed key based on final structure
+                    "pixel_count": 0,
+                    "pixel_percent": 0.0,
+                    "centroid_world_sum": np.zeros(3),
+                    "centroid_cam_sum": np.zeros(3),
+                    "distance_from_camera_sum": 0.0,
+                    "obj_count": 0,
+                    "bbox_worlds": [],
+                    "linear_size": 0.0,  # Sum of linear_size of visible objects
+                    "obj_str_ids": [],   # Only visible object IDs
+                }
+            
+            visible_cluster = visible_clusters[cluster_str_id]
+            
+            # Sum scalar values
+            visible_cluster["pixel_count"] += visible_obj["pixel_count"]
+            visible_cluster["distance_from_camera_sum"] += visible_obj["distance_from_camera"]
+            visible_cluster["linear_size"] += visible_obj["linear_size"]
+            visible_cluster["obj_count"] += 1
+            
+            # Sum vector/list values
+            visible_cluster["centroid_world_sum"] += np.array(visible_obj["centroid_world"])
+            visible_cluster["centroid_cam_sum"] += np.array(visible_obj["centroid_cam"])
+            
+            # Collect for merging
+            visible_cluster["bbox_worlds"].append(visible_obj["bbox_world"])
+            
+            # Collect visible IDs
+            visible_cluster["obj_str_ids"].append(visible_obj["obj_str_id"])
+
+        
+        # 2. Finalize calculations and apply filter
+        updated_visible_clusters = {}
+
+        for cluster_str_id, visible_cluster in visible_clusters.items():
+            # Calculate averages and percentages
+            if visible_cluster["obj_count"] == 0:
                 continue
-            if visible_obj.get("pixel_percent", 0.0) < pixel_percent_min:
+                
+            visible_cluster["pixel_percent"] = 100 * visible_cluster["pixel_count"] / total_visible_pixels
+
+            # Apply minimum pixel percentage filter
+            if visible_cluster["pixel_percent"] < pixel_percent_min:
                 continue
-
-            buckets.setdefault(label_norm, []).append(obj_str_id)
-
-        clusters_list = []
-        cluster_cnt = 0
-        for label_norm, obj_str_ids in buckets.items():
-            clusters, cluster_cnt = self._cluster_same_label(obj_str_ids, visible_objs, cluster_cnt, label_norm, distance_thresh=per_label_cluster_thresh_m)
-
-            # (opzionale) top-K cluster per label
-            if top_k_per_label is not None and len(clusters) > top_k_per_label:
-                clusters = sorted(clusters, key=lambda x: x["pixel_count"], reverse=True)[:top_k_per_label]
-
-            clusters_list.extend(clusters)
-
-        objects = {}
-        for cluster in clusters_list:
-            uid = f"{cluster['label_norm']}_{cluster['cluster_id']}"
-            objects[uid] = {
-                "label": cluster["label_norm"],
-                "pixel_count": int(cluster["pixel_count"]),
-                "pixel_percent": float(cluster["pixel_percent"]),
-                "centroid_world": [float(v) for v in cluster["centroid_world"]],
-                "bbox_world": cluster.get("bbox_world"),
-                "centroid_cam": cluster["centroid_cam"],
-                "distance_from_camera": float(cluster["distance_from_camera"]),
-                "linear_size": cluster["linear_size"],
-                "obj_str_ids": sorted(cluster["obj_str_ids"]),
+                
+            # Calculate centroids and distance averages
+            avg_centroid_world = (visible_cluster["centroid_world_sum"] / visible_cluster["obj_count"]).tolist()
+            avg_centroid_cam = (visible_cluster["centroid_cam_sum"] / visible_cluster["obj_count"]).tolist()
+            avg_distance_from_camera = visible_cluster["distance_from_camera_sum"] / visible_cluster["obj_count"]
+            
+            # Merge bounding boxes
+              
+            def _merge_bboxes(bboxes):
+                """
+                Merges a list of bounding boxes (min_x, min_y, min_z, max_x, max_y, max_z)
+                into a single encompassing bounding box.
+                """
+                if not bboxes:
+                    return None
+                
+                # Convert to NumPy array for easier min/max calculation
+                np_bboxes = np.array(bboxes)
+                
+                # Calculate min corners (0:3) and max corners (3:6) across all bboxes
+                min_corners = np.min(np_bboxes[:, :3], axis=0)
+                max_corners = np.max(np_bboxes[:, 3:], axis=0)
+                
+                return np.concatenate((min_corners, max_corners)).tolist()
+            
+            merged_bbox = _merge_bboxes(visible_cluster["bbox_worlds"])
+            
+            # Build final structure
+            updated_visible_clusters[cluster_str_id] = {
+                "cluster_str_id": cluster_str_id,
+                "label": visible_cluster["label_norm"],
+                "pixel_count": int(visible_cluster["pixel_count"]),
+                "pixel_percent": float(visible_cluster["pixel_percent"]),
+                "centroid_world": [float(v) for v in avg_centroid_world],
+                "bbox_world": merged_bbox,
+                "centroid_cam": [float(v) for v in avg_centroid_cam],
+                "distance_from_camera": float(avg_distance_from_camera),
+                # Sum of linear_size of visible objects
+                "linear_size": visible_cluster["linear_size"], 
+                # List of obj_str_ids that are currently visible
+                "obj_str_ids": sorted(visible_cluster["obj_str_ids"]), 
             }
 
 
-        processed_objs = dict(sorted(objects.items(), key=lambda item: (item[1].get("linear_size", 0.0),),reverse=True,))
+        # 3. Sort the resulting dictionary by pixel_count (descending)
+        visible_clusters = dict(sorted(updated_visible_clusters.items(), key=lambda item: item[1].get("pixel_count", 0.0),reverse=True,))
 
-        return processed_objs
+        return visible_clusters
+
+    def process_visible_clusters(self, visible_clusters: dict) -> dict:
+        """
+        Process clustered objects into a list of dicts with relevant info.
+        Also filters out objects and do more interesting computations if needed.
+        """
+
+        # The input is already sorted by pixel_count descending
+        # * 1. We can simply use the top-10 most visible objects
+        visible_clusters_list = list(visible_clusters.items())[:10]
+        visible_clusters = {key: value for key, value in visible_clusters_list}
+
+        # * 2. Further processing can be done here if needed
+        return visible_clusters
 
     def _normalize_label(self, label: str) -> str:
         """Normalize object labels to handle synonyms and groupings."""
         l = label.strip().lower()
-        if l in {"wall", "ceiling", "floor", "window frame", "door frame", "frame", "unknown"}:
+        if l in {"wall", "ceiling", "floor", "window frame", "frame", "unknown"}:
             return l
 
         if l in {"door", "doorway", "door frame", "attic door"}:
@@ -675,7 +837,7 @@ class NewViewer(BaseViewer):
             whitelist = set(whitelist or ["doorway", "staircase", "elevator", "escalator", "corridor", "intersection", "railing", "exit_sign", "sign", "sofa", "table", "wardrobe", "balcony", "bridge"])
             return label_norm in whitelist
         
-    def _cluster_same_label(self, obj_str_ids, visible_objs, cluster_cnt, label_norm, distance_thresh=1.0):
+    def _cluster_visible_same_label(self, obj_str_ids, visible_objs, cluster_cnt, label_norm, distance_thresh=1.0):
         """
         Greedy clustering per label on ground plane.
         - obj_str_ids: list of dicts with keys:
@@ -788,6 +950,7 @@ class NewViewer(BaseViewer):
                 try:
                     color_sensor = agent_sensors["color_sensor"]  # type: ignore[index]
                 except Exception:
+                    print("Falling back to searching for color sensor...")
                     if isinstance(agent_sensors, (list, tuple)):
                         for sensor in agent_sensors:
                             spec_fn = getattr(sensor, "specification", None)
@@ -819,20 +982,37 @@ class NewViewer(BaseViewer):
         """
         super().debug_draw()
         if self.show_object_bboxes:
-            self._draw_object_bboxes(self.debug_line_render, self.objs_str_ids_to_draw)
+            self._draw_object_bboxes(self.debug_line_render, self.clusters_to_draw)
         else:
             self._bbox_label_screen_positions.clear()
 
 
-    def _draw_object_bboxes(self, debug_line_render: Any, objs_str_ids_to_draw: list = None) -> None:
+    def _draw_object_bboxes(self, debug_line_render: Any, clusters_to_draw: list = None) -> None:
     
         """
         Draw axis-aligned bounding boxes for every semantic object.
         """
         # print(f" _draw_object_bboxes called with objs_str_ids_to_draw: {objs_str_ids_to_draw}")
+        # clusters_to_draw: {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...} 
         scene = self.sim.semantic_scene
         if scene is None:
             return
+    
+
+        objs_to_draw = []
+
+        if clusters_to_draw is not None:
+            for cluster_str_id, obj_str_ids in clusters_to_draw.items():
+                for obj_str_id in obj_str_ids: 
+                    sim_obj = self.objects[obj_str_id]["sim_obj"]
+                    objs_to_draw.append((sim_obj, cluster_str_id))
+            if objs_to_draw != self.prev_objs_to_draw:
+                for sim_obj, cluster_str_id in objs_to_draw:
+                    print(f"Cluster {cluster_str_id} includes object ID {sim_obj.id}")
+                # print("Objs to draw", objs_to_draw)
+        else:
+            for sim_obj in scene.objects:
+                objs_to_draw.append((sim_obj, sim_obj.id))     
 
         self._bbox_label_screen_positions.clear()
         debug_line_render.set_line_width(2.5)
@@ -840,27 +1020,27 @@ class NewViewer(BaseViewer):
         target_labels = {"wall clock", "sofa", "armchair", "couch"}
         candidates = []
 
-        if objs_str_ids_to_draw is None: 
-            obj_to_draw = scene.objects
-        else:
-            obj_to_draw = [obj for obj in scene.objects if obj.id in objs_str_ids_to_draw]
-            if obj_to_draw != self.prev_ids:
-                print(f"Drawing bounding boxes for objects: {[obj.id for obj in obj_to_draw]}")
-        self.prev_ids = obj_to_draw
+        # objs_str_ids_to_draw = ["kitchen shelf_654"] # ['couch_186', 'chair_318', 'chair_319', 'refrigerator_323', 'kitchen cabinet_324', 'worktop_336', 'kitchen cabinet_351', 'chair_445', 'chair_446', 'table_452', 'kitchen shelf_654']
 
-        for obj in obj_to_draw:
+
+
+        
+        self.prev_objs_to_draw = objs_to_draw
+        
+
+        for (sim_obj, str_id) in objs_to_draw:
 
             label = ""
-            if obj.category is not None and hasattr(obj.category, "name"):
-                label = obj.category.name()
+            if sim_obj.category is not None and hasattr(sim_obj.category, "name"):
+                label = sim_obj.category.name()
             label_norm = label.strip().lower()
-            if objs_str_ids_to_draw is None and label_norm not in target_labels:
+            if clusters_to_draw is None and label_norm not in target_labels:
                 continue
 
             if not label:
-                label = f"object_{obj.id}"
+                label = f"object_{sim_obj.id}"
 
-            obb = getattr(obj, "obb", None)
+            obb = getattr(sim_obj, "obb", None)
             if obb is None:
                 continue
 
@@ -886,14 +1066,17 @@ class NewViewer(BaseViewer):
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
             # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
-            candidates.append((volume, obj.id, label, corners, center, rotation, half_extents))
+            candidates.append((volume, str_id, label, corners, center, rotation, half_extents))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
+        # print("Len candidates", len(candidates))
 
         edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
 
-        for (volume, obj_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
-            color = self._get_bbox_color(obj_id)
+        for (volume, str_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
+            color = self._get_bbox_color(str_id)
+            # if objs_to_draw != self.prev_objs_to_draw:
+            #     print("Color", color)
 
             for edge in edges:
                 start = corners[edge[0]]
@@ -912,17 +1095,31 @@ class NewViewer(BaseViewer):
         """
         if obj_id in self._object_bbox_colors:
             return self._object_bbox_colors[obj_id]
+        
+        VIVID_PALETTE_RGB = [
+            [230, 25, 75], [60, 180, 75], [255, 225, 25], [0, 130, 200], # Red, Green, Yellow, Blue
+            [245, 130, 48], [145, 30, 180], [70, 240, 240], [240, 50, 230], # Orange, Purple, Cyan, Magenta
+            [170, 110, 40], [255, 250, 200], [128, 0, 0], [154, 99, 36], # Brown, Beige, Maroon, Olive
+            [128, 128, 0], [0, 0, 128], [0, 0, 0], [170, 255, 195], # Teal, Navy, Black, Mint
+            [255, 215, 180], [255, 255, 255] # Pink, White
+        ]
 
-        palette = d3_40_colors_rgb
+        # palette = 
+        palette = np.array(VIVID_PALETTE_RGB)
         palette_len = len(palette)
         if palette_len == 0:
             color = mn.Color4(1.0, 0.0, 0.0, 1.0)
             self._object_bbox_colors[obj_id] = color
             return color
-        try:
-            idx = int(obj_id) % palette_len
-        except (ValueError, TypeError):
-            idx = hash(str(obj_id)) % palette_len
+        
+        if isinstance(obj_id, str):
+            idx = hash(obj_id) % palette_len
+        elif isinstance(obj_id, int):
+            idx = obj_id % palette_len
+        else:
+            raise ValueError(f"Unsupported obj_id type: {type(obj_id)}")
+       
+    
         rgb = palette[idx] / 255.0
         color = mn.Color4(float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
         self._object_bbox_colors[obj_id] = color
@@ -991,10 +1188,10 @@ class NewViewer(BaseViewer):
         try:
             while True:
                 action, args, kwargs = self.action_queue.get_nowait()
-                try:
-                    action(*args, **kwargs)
-                except Exception as e:
-                    print(f"Error executing queued action {action}: {e}")
+                # try:
+                action(*args, **kwargs)
+                # except Exception as e:
+                #     print(f"Error executing queued action {action}: {e}")
 
                 self.action_queue.task_done()
 
@@ -1002,9 +1199,6 @@ class NewViewer(BaseViewer):
             pass
 
     def print_agent_state(self) -> None:
-        """
-    def print_agent_state(self) -> None: # Keep for debuggingn and rotation in the simulator.
-        """
         agent = self.sim.get_agent(self.agent_id)
         agent_state = agent.get_state()
         print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
@@ -1255,15 +1449,14 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
             viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos), {}))
             # output_q.put(f"Generating navigation instructions...")
-            time.sleep(0.2)
+            time.sleep(0.4)
 
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
             
-            instructions, obj_str_ids_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled)
-            # print("Objects to draw IDs:", objs_str_ids_to_draw)
-            viewer.action_queue.put((viewer.set_objs_str_ids_to_draw, (obj_str_ids_to_draw,), {}))
+            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled, target_name=target_name)
+            viewer.action_queue.put((viewer.set_clusters_to_draw, (clusters_to_draw,), {}))
 
             if instructions is None:
                 instructions = "Proceed to the " + room_name

@@ -1,0 +1,60 @@
+
+self.objects = {"obj_str_id1":obj1, "obj_str_id2":obj2, ... }
+
+obj1 = {
+    "sim_obj" : sim_obj1,
+    "obj_str_id": sim_obj1.id,
+    "obj_num_id": int(sim_obj1.id.split("_")[-1]),
+    "label": sim_obj1.category.name() if sim_obj1.category is not None else f"sim_object_{sim_obj1.id}",
+    "centroid_world": centroid_world,
+    "bbox_world": bbox_world,
+    "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
+    }
+
+
+self.clusters = {"cluster_str_id1": cluster1, "cluster_str_id2":cluster2, ... }
+
+cluster1 = {
+    "cluster_str_id" : f"{cluster["lable"]}_{self.cluster_cnt}"
+    "obj_str_ids" : ["obj_str_id1", "obj_str_id2", ...]
+    "label": lable_norm
+    "centroid_world": avg_centroids_world,
+    "bbox_world": merged_bboxs_world,
+    "linear_size": ,
+}
+
+visible_objects = {"obj_str_id1": visible_obj1, "obj_str_id2":visible_obj2, ...}
+
+visible_obj1 = {
+    # NORMAL OBJECT
+    "sim_obj" : sim_obj1,
+    "obj_str_id": sim_obj1.id,
+    "obj_num_id": int(sim_obj1.id.split("_")[-1]),
+    "label": sim_obj1.category.name() if sim_obj1.category is not None else f"sim_object_{sim_obj1.id}",
+    "centroid_world": centroid_world,
+    "bbox_world": bbox_world,
+    "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
+    # ADDITIONAL INFO
+    "pixel_count": int(pixel_count),
+    "pixel_percent": float(100 * pixel_count / total_pixels),
+    "centroid_cam": centroid_cam.tolist(),
+    "distance_from_camera": dist,
+    }
+
+
+visible_clusters =  {"cluster_str_id1": visible_cluster1, "cluster_str_id2":visible_cluster2, ... }
+
+visible_cluster1 = {
+    "cluster_str_id": cluster_str_id,
+    "label": visible_cluster["label_norm"],
+    "pixel_count": int(visible_cluster["pixel_count"]),
+    "pixel_percent": float(visible_cluster["pixel_percent"]),
+    "centroid_world": [float(v) for v in avg_centroid_world],
+    "bbox_world": merged_bbox, # of visible_objs in that cluster
+    "centroid_cam": [float(v) for v in avg_centroid_cam], 
+    "distance_from_camera": float(avg_distance_from_camera),
+    # Sum of linear_size of visible objects
+    "linear_size": visible_cluster["linear_size"], 
+    # List of obj_str_ids that are currently visible
+    "obj_str_ids": sorted(visible_cluster["obj_str_ids"]), 
+}
