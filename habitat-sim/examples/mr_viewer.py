@@ -71,7 +71,7 @@ except Exception as e:
 
 
 class NewViewer(BaseViewer):
-    MOVE, LOOK = 0.04, 1.5  # New definition for these two attributes
+    MOVE, LOOK = 0.07, 1.5  # New definition for these two attributes
 
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication) -> None:
         scene_path = sim_settings["scene"]
@@ -1020,10 +1020,9 @@ class NewViewer(BaseViewer):
                 for obj_str_id in obj_str_ids: 
                     sim_obj = self.objects[obj_str_id]["sim_obj"]
                     objs_to_draw.append((sim_obj, cluster_str_id))
-            if objs_to_draw != self.prev_objs_to_draw:
-                for sim_obj, cluster_str_id in objs_to_draw:
-                    print(f"Cluster {cluster_str_id} includes object ID {sim_obj.id}")
-                # print("Objs to draw", objs_to_draw)
+            # if objs_to_draw != self.prev_objs_to_draw:
+                # for sim_obj, cluster_str_id in objs_to_draw:
+                #     print(f"Cluster {cluster_str_id} includes object ID {sim_obj.id}")
         else:
             for sim_obj in scene.objects:
                 objs_to_draw.append((sim_obj, sim_obj.id))     
@@ -1401,7 +1400,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             if not user_input:
                 continue
 
-            llm_enabled = False
+            llm_enabled = True
             # output_q.put("Processing your request...")
             if not llm_enabled:
                 try:
@@ -1464,7 +1463,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
             viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos), {}))
             # output_q.put(f"Generating navigation instructions...")
-            time.sleep(0.4)
+            time.sleep(0.6)
 
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())

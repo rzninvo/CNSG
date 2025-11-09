@@ -316,7 +316,7 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
     for cluster in clusters.values():
         label = str(cluster.get("label", "")).lower()
         cluster_str_id = str(cluster['cluster_str_id']).lower()
-        if label == target_object.lower() and target_object != "":
+        if target_object and label == target_object.lower() and target_object != "":
             cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
         if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
@@ -396,14 +396,14 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
         for cluster in selected_clusters:
             cluster_str_id = cluster.get("cluster_str_id", "")
             obj_str_ids = cluster.get("obj_str_ids", [])
-            print("Selected Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
+            # print("Selected Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
             if cluster_str_id in clusters_to_draw:
                 clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
             else:
                 clusters_to_draw[cluster_str_id] = obj_str_ids
         
         for cluster_str_id, obj_str_ids in clusters_in_relations.items():
-            print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
+            # print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
             if cluster_str_id in clusters_to_draw:
                 clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
             else:
@@ -421,6 +421,20 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
     # print("All collected IDs:", raw_ids)
     return summaries, clusters_to_draw
 
+import re
+def clean_text_from_ids(text: str) -> str:
+    """
+    Removes '_<ID>' (underscore followed by one or more digits) from a string.
+    """
+    # Regex pattern: _ (underscore) followed by \d+ (one or more digits)
+    # The re.sub() function replaces all matches with an empty string ('').
+    cleaned_text = re.sub(r"_\d+", "", text)
+    
+    # Optional: Remove any double spaces that might result from the removal 
+    # (e.g., if "obj_123 text" becomes "obj  text")
+    cleaned_text = re.sub(r"  +", " ", cleaned_text).strip()
+    
+    return cleaned_text
 
 def build_prompt(
     scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2
@@ -433,7 +447,8 @@ def build_prompt(
         "You can mention positions like left/right, in front of, next to, behind.",
         "Prefer common, easily recognized landmarks like large furniture, doors, appliances, and windows. Avoid small, decorative, or rarely used objects like mats, lamps, or soap bottles.",
         "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
-        "Avoid saying the object is not visible in the observation. Assume it is always visible in the last 1 or 2 observations.", # TODO added
+        "Avoid saying the object is not visible in the observation. Assume it is always visible in the last 1 or 2 observations.",
+        "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
         f"User question: {user_input}",
     ]
 
@@ -539,9 +554,17 @@ def generate_path_description(
     print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
     if dry_run: 
         return None, clusters_to_draw
-    
 
-    return generate_description(prompt, model), clusters_to_draw
+    description = generate_description(prompt, model)
+
+    clusters_to_draw_final = {}
+    for cluster_str_id in clusters_to_draw:
+        if cluster_str_id in description:
+            clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
+
+    description = clean_text_from_ids(description)
+
+    return description, clusters_to_draw_final
 
 
 if __name__ == "__main__":
