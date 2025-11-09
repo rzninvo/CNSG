@@ -259,8 +259,8 @@ class NewViewer(BaseViewer):
     
     def _cluster_same_label(self, obj_str_ids, label_norm, distance_thresh=1.0):
         clusters = []
-        def xz_dist(a, b):
-            return math.sqrt((a[0]-b[0])**2 + (a[2]-b[2])**2)  # ignore Y
+        def xyz_dist(a, b):
+            return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
         
         def merge_obbs(obb_a, obb_b):
             return [
@@ -280,7 +280,7 @@ class NewViewer(BaseViewer):
             assigned = False
             obj = self.objects[obj_str_id]
             for cluster in clusters:
-                if (xz_dist(obj["centroid_world"], cluster["centroid_world"]) <= distance_thresh):
+                if (xyz_dist(obj["centroid_world"], cluster["centroid_world"]) <= distance_thresh):
                     count_cluster = len(cluster["obj_str_ids"])
                     # centroid (world)
                     new_cx = (cluster["centroid_world"][0] * count_cluster + obj["centroid_world"][0]) / (count_cluster + 1)
@@ -401,7 +401,7 @@ class NewViewer(BaseViewer):
                                 # Extract visible objects + relations
                                 visible_objs = self.extract_visible_objs(sim, observations)
                                 if visible_objs is not None:
-                                    visible_clusters = self.cluster_visible_objs(visible_objs, pixel_percent_min=0.02,)
+                                    visible_clusters = self.cluster_visible_objs(visible_objs, pixel_percent_min=0.02, visible_objs_only=True)
                                     
                                     processed_visible_clusters = self.process_visible_clusters(visible_clusters)
 
@@ -675,7 +675,7 @@ class NewViewer(BaseViewer):
     
   
 
-    def cluster_visible_objs(self, visible_objs: dict, *, pixel_percent_min=0.02):
+    def cluster_visible_objs(self, visible_objs: dict, *, pixel_percent_min=0.02, visible_objs_only=True) -> dict:
         """
         Cluster visible objects based on label and proximity.
         Returns a dict of clustered objects with relevant info.
@@ -728,7 +728,21 @@ class NewViewer(BaseViewer):
             visible_cluster["bbox_worlds"].append(visible_obj["bbox_world"])
             
             # Collect visible IDs
-            visible_cluster["obj_str_ids"].append(visible_obj["obj_str_id"])
+            visible_cluster["obj_str_ids"].append(visible_obj["obj_str_id"]), 
+        
+
+        if not visible_objs_only:
+            for cluster_str_id, visible_cluster in visible_clusters.items():
+                
+                full_cluster = self.clusters[cluster_str_id]
+
+                visible_cluster["obj_str_ids"] = full_cluster["obj_str_ids"]
+                visible_cluster["obj_count"] = len(visible_cluster["obj_str_ids"])
+                visible_cluster["centroid_world_sum"] = np.array(full_cluster["centroid_world"]) * visible_cluster["obj_count"]
+                visible_cluster["linear_size"] = full_cluster["linear_size"]
+                visible_cluster["bbox_worlds"] = [full_cluster["bbox_world"]]
+
+
 
         
         # 2. Finalize calculations and apply filter
@@ -1016,7 +1030,7 @@ class NewViewer(BaseViewer):
 
         self._bbox_label_screen_positions.clear()
         debug_line_render.set_line_width(2.5)
-        max_boxes = 20
+        max_boxes = 100
         target_labels = {"wall clock", "sofa", "armchair", "couch"}
         candidates = []
 
@@ -1113,7 +1127,8 @@ class NewViewer(BaseViewer):
             return color
         
         if isinstance(obj_id, str):
-            idx = hash(obj_id) % palette_len
+            num_id = int(obj_id.split("_")[-1])
+            idx = hash(num_id) % palette_len
         elif isinstance(obj_id, int):
             idx = obj_id % palette_len
         else:
