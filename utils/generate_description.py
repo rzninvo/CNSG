@@ -463,18 +463,19 @@ def build_prompt(
     scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2
 ) -> str:
     intro_lines = [
-        "You are a navigation assistant helping someone retrace a short walk through a home.",
-        "You will see a sequence of snapshots with visible objects and spatial relationships.",
+        "You are a navigation assistant helping me reach a target goal inside a building.",
+        "You will see a sequence of frames data with visible objects, including floor, relative position to the viewer, the distance to the viewer and the name of the room they belong to.",
         "The frames are taken in chronological order along the path from the start to the target location.",
-        "Use the spatial layout of the objects to describe the path clearly and naturally.",
-        "Write a single human-sounding description of the walk — fluent and easy to follow.",
-        "You can mention positions like left/right, in front of, next to, behind, etc.",
-        "Prefer common, easily recognized landmarks like large furniture, doors, appliances, and windows. Avoid small, decorative, or rarely used objects like mats, lamps, or soap bottles.",
+        "Write a human-sounding description of the walk, fluent and easy to follow for a real person.",
         "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
+        "You must imagine to guide me from start to end of the path.",
+        "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation and movement in the building.",
+        "If the path goes through stairs, just mention 'go up / down to stairs to reach the $room_name' without mentioning objects in the stairs area.",
+        "If you see the target location or object, you have to directly mention it and stop referencing other objects.",
+        "Only reference objects that appear in the observations. Avoid embellishments or invented objects.",
         "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
-        "You must guide me from start to end.",
-        "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation.",
         f"User question: {user_input}",
+        "Here are the observations from the path:"
     ]
 
     header = "\n".join(intro_lines)
