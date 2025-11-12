@@ -179,9 +179,52 @@ class NewViewer(BaseViewer):
 
     def get_objs_from_sim(self):
         objects = {}
+        objs_rooms = {}
+        rooms_floors = {} # 
+        rooms_heights = []
+        for region in self.scene.regions:
+            region_id = region.id.strip("_").lower() if region and region.id else ""
+            room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
+            if "unknown" in room_name.lower():
+                continue 
+            room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
+            rooms_heights.append(room_height)
+            for obj in region.objects:
+                objs_rooms[obj.id] = room_name
+        
+        # Remove duplicates from heights
+        rooms_heights = list(set(rooms_heights))
+
+        # Sort heights ascending
+        rooms_heights.sort()
+
+        # Assign floor level to each room based on height (and add at floors_rooms)
+        for region in self.scene.regions:
+            region_id = region.id.strip("_").lower() if region and region.id else ""
+            room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
+            if "unknown" in room_name.lower():
+                continue
+
+            room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
+            # Get the floor number based on the index of the room_height in the room_heights list
+            floor_number = rooms_heights.index(room_height)  # Floors start at 0
+            # print(f"Room: {room_name}, Height: {room_height}, Floor number: {floor_number}")
+            rooms_floors[room_name] = floor_number
+
+        # ^ Debug print per rooms_floors
+        # print("Rooms and their floor numbers:")
+        # for room, floor in rooms_floors.items():
+        #     print(f"Room: {room}, Floor: {floor}")
+
         if self.scene is not None:
             
             for sim_obj in self.scene.objects:
+                if "unknown" in sim_obj.id.lower():
+                    continue 
+                room_name = objs_rooms.get(sim_obj.id, "unknown_room")
+                if "unknown" in room_name.lower():
+                    continue
+                
                 obb = getattr(sim_obj, "obb", None)
 
                 if obb is not None:
@@ -227,7 +270,9 @@ class NewViewer(BaseViewer):
                         "centroid_world": centroid_world,
                         "bbox_world": bbox_world,
                         "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
-                        }
+                        "room": room_name,
+                        "floor_number": rooms_floors[room_name],
+                    }
                 
         return objects
     
@@ -303,6 +348,8 @@ class NewViewer(BaseViewer):
                                 "centroid_world": obj["centroid_world"],
                                 "bbox_world": obj["bbox_world"], 
                                 "linear_size": obj.get("linear_size", 0.0),
+                                "room": obj["room"],
+                                "floor_number": obj["floor_number"],
                                 })
                                  
         return clusters
@@ -315,7 +362,7 @@ class NewViewer(BaseViewer):
         self.clusters_to_draw = clusters_to_draw
         # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")    
 
-    def shortest_path(self, sim, goal: mn.Vector3): 
+    def shortest_path(self, sim, goal: mn.Vector3, target_object: str = ""): 
         if not sim.pathfinder.is_loaded:
             print("Pathfinder not initialized, aborting.")
         else:
@@ -403,7 +450,7 @@ class NewViewer(BaseViewer):
                                 if visible_objs is not None:
                                     visible_clusters = self.cluster_visible_objs(visible_objs, pixel_percent_min=0.02, visible_objs_only=True)
                                     
-                                    processed_visible_clusters = self.process_visible_clusters(visible_clusters)
+                                    processed_visible_clusters = self.process_visible_clusters(visible_clusters, target_object)
 
                                     sensor_state = (
                                         sim.get_agent(self.agent_id)
@@ -539,6 +586,8 @@ class NewViewer(BaseViewer):
                 continue
             
             obj = self.objects.get(sim_obj.id)
+            if obj is None:
+                continue
             centroid_world = obj.get("centroid_world")
 
             # Convert centroid to camera coordinates
@@ -557,7 +606,7 @@ class NewViewer(BaseViewer):
             obj_str_id = str(sim_obj.id)  # -> Eg. 'wall_clock_231'
             # print(f"[MINNIE] Visible obj: id={obj_str_id}, label={label}, pixels={pixel_count}, centroid_world={centroid_world}, dist={dist:.2f}m")
             visible_objects[obj_str_id] = {
-                **obj, # "sim_obj", "obj_str_id", "obj_num_id", "label", "centroid_world", "bbox_world", "linear_size"
+                **obj, # "sim_obj", "obj_str_id", "obj_num_id", "label", "centroid_world", "bbox_world", "linear_size", "room", "floor_number"
                 "pixel_count": int(pixel_count),
                 "pixel_percent": float(100 * pixel_count / total_pixels),
                 "centroid_cam": centroid_cam.tolist(),
@@ -710,6 +759,8 @@ class NewViewer(BaseViewer):
                     "bbox_worlds": [],
                     "linear_size": 0.0,  # Sum of linear_size of visible objects
                     "obj_str_ids": [],   # Only visible object IDs
+                    "room": cluster["room"],
+                    "floor_number": cluster["floor_number"],
                 }
             
             visible_cluster = visible_clusters[cluster_str_id]
@@ -799,6 +850,8 @@ class NewViewer(BaseViewer):
                 "linear_size": visible_cluster["linear_size"], 
                 # List of obj_str_ids that are currently visible
                 "obj_str_ids": sorted(visible_cluster["obj_str_ids"]), 
+                "room": visible_cluster["room"],
+                "floor_number": visible_cluster["floor_number"],
             }
 
 
@@ -807,17 +860,24 @@ class NewViewer(BaseViewer):
 
         return visible_clusters
 
-    def process_visible_clusters(self, visible_clusters: dict) -> dict:
+    def process_visible_clusters(self, visible_clusters: dict, target_object: str = "") -> dict:
         """
         Process clustered objects into a list of dicts with relevant info.
         Also filters out objects and do more interesting computations if needed.
         """
 
         # The input is already sorted by pixel_count descending
-        # * 1. We can simply use the top-10 most visible objects
+        # * 1. We can simply use the top-10 most visible clusters
         visible_clusters_list = list(visible_clusters.items())[:10]
-        visible_clusters = {key: value for key, value in visible_clusters_list}
 
+        for cluster_str_id, visible_cluster in visible_clusters.items():
+            # Further processing per cluster can be done here if needed
+            if target_object and visible_cluster["label"] == target_object and target_object != "":
+                visible_clusters_list.insert(0, (cluster_str_id, visible_cluster))
+                visible_clusters_list.pop()  # remove last to keep size
+                
+        visible_clusters = {key: value for key, value in visible_clusters_list}
+            
         # * 2. Further processing can be done here if needed
         return visible_clusters
 
@@ -1461,7 +1521,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             if goal_pos.y < 2.0:
                 goal_pos.y = 0.163378  # Adjust height
 
-            viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos), {}))
+            viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos, target_name), {}))
             # output_q.put(f"Generating navigation instructions...")
             time.sleep(0.6)
 

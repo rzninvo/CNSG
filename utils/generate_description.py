@@ -243,7 +243,7 @@ def distance_bucket(distance: float | None) -> str | None:
     if distance < 1:
         return "very close"
     if distance < 3:
-        return "near"
+        return "close"
     if distance <= 5:
         return "mid-distance"
     if distance <= 6:
@@ -253,21 +253,19 @@ def distance_bucket(distance: float | None) -> str | None:
 def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     label = str(cluster.get("label", "")).strip()
     cluster_str_id = str(cluster['cluster_str_id']).strip()
-    if not label or label.lower() in IGNORED_LABELS:
-        return None
 
     # View-based positioning
     direction = None
     # View-based positioning from centroid_cam (x, y)
-    centroid = cluster.get("centroid_cam")
-    if isinstance(centroid, list) and len(centroid) >= 2:
-        x, y = centroid[0], centroid[1]
+    centroid_cam = cluster.get("centroid_cam") # Position of the object in the camera pose
+    if isinstance(centroid_cam, list) and len(centroid_cam) >= 2:
+        x, y = centroid_cam[0], centroid_cam[1]
         if y > 0.3:
             vert = "upper"
         elif y < -0.3:
             vert = "lower"
         else:
-            vert = ""
+            vert = "center"
 
         if x < -0.3:
             horiz = "left"
@@ -276,18 +274,20 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
         else:
             horiz = "center"
 
-        if vert and horiz != "center":
-            direction = f"{vert}-{horiz}"
-        elif vert:
-            direction = vert
-        elif horiz:
-            direction = horiz
-        else:
+        if vert == "center" and horiz == "center":
             direction = "center"
+        else:
+            direction = f"{vert}-{horiz}"
         
-        position = f"{direction}, {distance_bucket(cluster.get('distance_from_camera'))}" # TODO test if better with distance 
+        position = f"(relative position: {direction}), (distance: {distance_bucket(cluster.get('distance_from_camera'))})"
 
-        return f"{cluster_str_id} ({position})"
+        # Add information about the room name and the floor number
+        room = cluster.get("room", "").strip()
+        floor_number = cluster.get("floor_number")
+        if room and floor_number is not None:
+            position += f", (room: {room}), (floor: {floor_number})"
+
+        return f"{cluster_str_id} [{position}]"
 
 
 def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
@@ -316,14 +316,16 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
     for cluster in clusters.values():
         label = str(cluster.get("label", "")).lower()
         cluster_str_id = str(cluster['cluster_str_id']).lower()
-        if target_object and label == target_object.lower() and target_object != "":
+        # print("Evaluating cluster:", cluster_str_id, "label:", label, "target_object:", target_object)
+        cluster["priority_score"] = object_priority(cluster)[0]
+        if target_object and label.lower().strip() == target_object.lower().strip() and target_object != "":
             cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
         if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
-        cluster["priority_score"] = object_priority(cluster)[0]
         candidates.append(cluster)
 
-    candidates.sort(key=object_priority, reverse=True) # * This will make sure that if the target object is present, it will be first
+    # Sort by priority score (higher is better), then by size (higher is better)
+    candidates.sort(key=lambda c: (c["priority_score"], c.get("linear_size", 0.0)), reverse=True)
     
     results: List[str] = []
     for cluster in candidates[:limit]:
@@ -336,6 +338,7 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
 def extract_relations(
     relationships: Iterable[Dict[str, Any]], limit: int = 2
 ) -> List[str]:
+    # TODO -> need to have better relations
     def natural_direction(relation: str) -> str:
         # Converts relation labels to natural expressions
         table = {
@@ -415,7 +418,7 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
             FrameSummary(
                 name=name,
                 clusters=phrases,
-                relations=relations,
+                relations=[],
             )
         )
     # print("All collected IDs:", raw_ids)
@@ -442,13 +445,14 @@ def build_prompt(
     intro_lines = [
         "You are a navigation assistant helping someone retrace a short walk through a home.",
         "You will see a sequence of snapshots with visible objects and spatial relationships.",
+        "The frames are taken in chronological order along the path from the start to the target location.",
         "Use the spatial layout of the objects to describe the path clearly and naturally.",
         "Write a single human-sounding description of the walk — fluent and easy to follow.",
-        "You can mention positions like left/right, in front of, next to, behind.",
+        "You can mention positions like left/right, in front of, next to, behind, etc.",
         "Prefer common, easily recognized landmarks like large furniture, doors, appliances, and windows. Avoid small, decorative, or rarely used objects like mats, lamps, or soap bottles.",
         "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
-        "Avoid saying the object is not visible in the observation. Assume it is always visible in the last 1 or 2 observations.",
         "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
+        "You must guide me from start to end.",
         f"User question: {user_input}",
     ]
 
@@ -491,7 +495,7 @@ def generate_description(prompt: str, model: str) -> str:
         {"role": "user", "content": prompt},
     ]
 
-    kwargs = {"model": model, "temperature": 0.6, "max_tokens": 400}
+    kwargs = {"model": model, "temperature": 0.6}
 
     try:
         if hasattr(openai, "OpenAI"):
@@ -565,6 +569,13 @@ def generate_path_description(
     description = clean_text_from_ids(description)
 
     return description, clusters_to_draw_final
+
+def generate_relevance_scores(clusters) -> List[tuple[str, float]]:
+    """
+    Generate a score for each of the clusters (clusters use the format inside the frames JSON). They are a dictionary of cluster_str_id -> cluster info.
+    """
+    pass
+
 
 
 if __name__ == "__main__":

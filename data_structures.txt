@@ -9,6 +9,8 @@ obj1 = {
     "centroid_world": centroid_world,
     "bbox_world": bbox_world,
     "linear_size": self.compute_object_size({"bbox_world": bbox_world}),
+    "room": room_name
+    "floor_number": floor_number
     }
 
 
@@ -21,6 +23,8 @@ cluster1 = {
     "centroid_world": avg_centroids_world,
     "bbox_world": merged_bboxs_world,
     "linear_size": ,
+    "room": room_name
+    "floor_number": floor_number
 }
 
 visible_objects = {"obj_str_id1": visible_obj1, "obj_str_id2":visible_obj2, ...}
@@ -39,6 +43,8 @@ visible_obj1 = {
     "pixel_percent": float(100 * pixel_count / total_pixels),
     "centroid_cam": centroid_cam.tolist(),
     "distance_from_camera": dist,
+    "room": room_name
+    "floor_number": floor_number
     }
 
 
@@ -57,4 +63,6 @@ visible_cluster1 = {
     "linear_size": visible_cluster["linear_size"], 
     # List of obj_str_ids that are currently visible
     "obj_str_ids": sorted(visible_cluster["obj_str_ids"]), 
+    "room": room_name
+    "floor_number": floor_number
 }
