@@ -29,120 +29,119 @@ IGNORED_LABELS = {
 
 RELEVANCE_SCORES_OBJECTS = {
     "door": 0.8,
-    "chandelier": 0.8,
+    "chandelier": 0,
     "wardrobe": 0.7,
     "tv": 0.8,
-    "cabinet": 0.7,
-    "blanket": 0.2,
-    "pad": 0.2,
+    "cabinet": 0.6,
+    "blanket": 0,
+    "pad": 0,
     "bed": 0.6,
-    "pillow": 0.5,
-    "nightstand": 0.8,
-    "book": 0.7,
-    "table lamp": 0.6,
-    "plush toy": 0.8,
-    "window": 0.7,
+    "pillow": 0,
+    "nightstand": 0.6,
+    "book": 0,
+    "table lamp": 0.4,
+    "plush toy": 0,
+    "window": 0.3,
     "armchair": 0.8,
-    "mat": 0.2,
-    "towel": 0.5,
-    "bucket": 0.2,
-    "tap": 0.2,
-    "hand soap": 0.2,
-    "toilet": 0.8,
-    "toilet brush": 0.4,
+    "mat": 0,
+    "towel": 0,
+    "bucket": 0,
+    "tap": 0,
+    "hand soap": 0,
+    "toilet": 0.7,
+    "toilet brush": 0,
     "lamp": 0.3,
-    "shower curtain": 0.2,
-    "curtain": 0.5,
-    "photo": 0.7,
-    "toy": 0.8,
-    "board": 0.6,
-    "ventilation": 0.2,
-    "attic door": 0.2,
-    "light": 0.3,
-    "vent": 0.3,
-    "bicycle": 0.9,
-    "box": 0.6,
+    "shower curtain": 0,
+    "curtain": 0,
+    "photo": 0,
+    "toy": 0,
+    "board": 0,
+    "ventilation": 0,
+    "attic door": 0,
+    "light": 0,
+    "vent": 0,
+    "bicycle": 0.6,
+    "box": 0,
     "couch": 0.7,
-    "basket": 0.6,
-    "magazine": 0.8,
-    "stack of papers": 0.4,
-    "picture": 0.7,
-    "folder": 0.7,
+    "basket": 0,
+    "magazine": 0,
+    "stack of papers": 0,
+    "picture": 0.2,
+    "folder": 0,
     "table": 0.9,
-    "chair": 0.9,
-    "handbag": 0.5,
-    "pc tower": 0.7,
-    "trashcan": 0.7,
-    "computer desk": 1.0,
-    "printer": 0.8,
-    "telephone": 0.8,
+    "chair": 0.8,
+    "handbag": 0,
+    "pc tower": 0,
+    "trashcan": 0,
+    "computer desk": 0.7,
+    "printer": 0.5,
+    "telephone": 0.5,
     "desk lamp": 0.5,
-    "plant": 0.7,
-    "shirt": 0.3,
-    "bag": 0.4,
-    "newspaper": 0.6,
-    "balustrade": 0.1,
-    "stairs": 1.0,
-    "window curtain": 0.6,
-    "curtain rod": 0.2,
-    "speaker": 0.5,
-    "led tv": 1.0,
-    "fireplace": 1.0,
-    "flower": 0.7,
-    "decorative plate": 0.8,
-    "floor mat": 0.3,
-    "pillar": 0.3,
-    "fire alarm": 0.2,
-    "alarm control": 0.3,
-    "ceiling vent": 0.2,
-    "wall clock": 0.8,
-    "flag": 0.8,
-    "kitchen appliance": 0.7,
-    "coffee mug": 0.6,
+    "plant": 0,
+    "shirt": 0,
+    "bag": 0,
+    "newspaper": 0,
+    "balustrade": 0,
+    "stairs": 0.8,
+    "window curtain": 0,
+    "curtain rod": 0,
+    "speaker": 0,
+    "led tv": 0.8,
+    "fireplace": 0.8,
+    "flower": 0,
+    "decorative plate": 0,
+    "floor mat": 0,
+    "pillar": 0,
+    "fire alarm": 0,
+    "alarm control": 0,
+    "ceiling vent": 0,
+    "wall clock": 0.5,
+    "flag": 0.4,
+    "kitchen appliance": 0,
+    "coffee mug": 0,
     "worktop": 0.5,
     "sink": 0.7,
-    "knife holder": 0.5,
+    "knife holder": 0,
     "microwave": 0.7,
-    "kitchen countertop item": 0.3,
+    "kitchen countertop item": 0,
     "oven and stove": 0.8,
-    "fruit bowl": 0.4,
+    "fruit bowl": 0,
     "dishwasher": 0.8,
     "bath sink": 0.7,
-    "toilet paper": 0.5,
-    "toilet seat": 0.6,
-    "door handle": 0.4,
+    "toilet paper": 0,
+    "toilet seat": 0,
+    "door handle": 0,
     "bathroom shelf": 0.3,
-    "doormat": 0.2,
-    "ventilation hood": 0.2,
-    "dresser": 0.6,
-    "casket": 0.1,
-    "wall hanging decoration": 0.3,
-    "laundry basket": 0.6,
-    "electric box": 0.2,
-    "electrical controller": 0.2,
-    "tissue box": 0.2,
-    "shower dial": 0.3,
+    "doormat": 0,
+    "ventilation hood": 0,
+    "dresser": 0,
+    "casket": 0,
+    "wall hanging decoration": 0,
+    "laundry basket": 0,
+    "electric box": 0,
+    "electrical controller": 0,
+    "tissue box": 0,
+    "shower dial": 0,
     "bath": 0.8,
-    "bathroom cabinet": 0.4,
-    "bathroom accessory": 0.2,
-    "mirror": 0.9,
-    "soap bottle": 0.3,
-    "mirror frame": 0.3,
-    "wall lamp": 0.3,
-    "shoe": 0.5,
-    "iron board": 0.7,
-    "iron": 0.8,
-    "clothes": 0.5,
-    "clothes hanger rod": 0.2,
-    "case": 0.6,
-    "storage box": 0.3,
-    "briefcase": 0.6,
-    "backpack": 0.6,
-    "boxes": 0.4,
+    "bathroom cabinet": 0.5,
+    "bathroom accessory": 0,
+    "mirror": 0.8,
+    "soap bottle": 0,
+    "mirror frame": 0.2,
+    "wall lamp": 0.5,
+    "shoe": 0,
+    "iron board": 0,
+    "iron": 0,
+    "clothes": 0,
+    "clothes hanger rod": 0,
+    "case": 0,
+    "storage box": 0,
+    "briefcase": 0,
+    "backpack": 0,
+    "boxes": 0,
     "kitchen shelf": 0.7,
-    "bottle of soap": 0.2,
+    "bottle of soap": 0,
 }
-
 
 @dataclass
 class FrameSummary:
@@ -384,21 +383,42 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
     summaries: List[FrameSummary] = []
     clusters_to_draw = {}
 
+    # for each room get the top num_clusters_per_frame clusters based on relevance scores 
+    # (no more than num_clusters_per_room clusters can be selected from the same room)
+    # dictionary room_name -> [cluster1, cluster2, ...]
+
+    # objs_in_room: Dict[str, List] = {}
+
     for frame in frames:
         name = str(frame.get("image_index"))
         clusters = frame.get("objects", {})
         spatial_relations = frame.get("spatial_relations", [])
 
         phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name)
+        
         relations, clusters_in_relations = extract_relations(spatial_relations)
             
         # clusters_to_draw = {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...}
-
 
         # print("Frame", name, "objects:", selected_objects)
         for cluster in selected_clusters:
             cluster_str_id = cluster.get("cluster_str_id", "")
             obj_str_ids = cluster.get("obj_str_ids", [])
+
+            # # Get room name (where this cluster belongs) and update the objs_in_room dictionary
+            # room_name = cluster["room"].strip()
+            # if room_name not in objs_in_room:
+            #     objs_in_room[room_name] = []
+            # if cluster not in objs_in_room[room_name]:
+            #     objs_in_room[room_name].append(cluster)
+            # else:
+            #     # Need to update the existing cluster info
+            #     for idx, existing_cluster in enumerate(objs_in_room[room_name]):
+            #         if existing_cluster["cluster_str_id"] == cluster_str_id:
+            #             if cluster["pixel_count"] > existing_cluster["pixel_count"]:
+            #                 objs_in_room[room_name][idx] = cluster
+            #                 break
+
             # print("Selected Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
             if cluster_str_id in clusters_to_draw:
                 clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
@@ -453,6 +473,7 @@ def build_prompt(
         "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
         "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
         "You must guide me from start to end.",
+        "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation.",
         f"User question: {user_input}",
     ]
 
