@@ -417,7 +417,7 @@ class NewViewer(BaseViewer):
                 display_path_agent_renders = True  # @param{type:"boolean"}
                 if display_path_agent_renders:
                     # print("Rendering observations at path points:")
-                    tangent = path_points[1] - path_points[0]
+                    tangent = path_points[1] - path_points[0] #! TODO check this caused out of index error
                     agent_state = habitat_sim.AgentState()
                     for ix, point in enumerate(path_points):
                         if ix < len(path_points) - 1:
@@ -877,6 +877,8 @@ class NewViewer(BaseViewer):
                 visible_clusters_list.pop()  # remove last to keep size
                 
         visible_clusters = {key: value for key, value in visible_clusters_list}
+
+        print(f"[PLUTO] Processed visible clusters: {[v['label'] for v in visible_clusters.values()]}")
             
         # * 2. Further processing can be done here if needed
         return visible_clusters
@@ -1528,8 +1530,9 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             ############ Generate Instruction ###############
             # print("Current working dir:", os.getcwd())
             input_dir = Path(os.getcwd()) / "output"
-            
-            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=not llm_enabled, target_name=target_name)
+            print("[MINNIE] Target name: ", target_name)
+            print("[MINNIE] Room name: ", room_name)
+            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
             viewer.action_queue.put((viewer.set_clusters_to_draw, (clusters_to_draw,), {}))
 
             if instructions is None:

@@ -312,12 +312,16 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
 
 def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: str = "") -> List[str]:
     candidates: List[Dict[str, Any]] = []
+    print(f"[PIPPO] Selecting top {limit} clusters. Target object: '{target_object}'")
     for cluster in clusters.values():
         label = str(cluster.get("label", "")).lower()
         cluster_str_id = str(cluster['cluster_str_id']).lower()
         # print("Evaluating cluster:", cluster_str_id, "label:", label, "target_object:", target_object)
         cluster["priority_score"] = object_priority(cluster)[0]
+        print("Cluster:", cluster_str_id, "Label:", label, "Priority Score:", cluster["priority_score"])
+        
         if target_object and label.lower().strip() == target_object.lower().strip() and target_object != "":
+            print(f"[PLUTO] Found target object '{target_object}' in cluster '{cluster_str_id}'. Setting highest priority.")
             cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
         if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
@@ -425,12 +429,12 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
             else:
                 clusters_to_draw[cluster_str_id] = obj_str_ids
         
-        for cluster_str_id, obj_str_ids in clusters_in_relations.items():
-            # print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
-            if cluster_str_id in clusters_to_draw:
-                clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
-            else:
-                clusters_to_draw[cluster_str_id] = obj_str_ids
+        # for cluster_str_id, obj_str_ids in clusters_in_relations.items():
+        #     # print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
+        #     if cluster_str_id in clusters_to_draw:
+        #         clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
+        #     else:
+        #         clusters_to_draw[cluster_str_id] = obj_str_ids
 
         print("IDs in frame", name, ":", clusters_to_draw)
 
@@ -460,7 +464,7 @@ def clean_text_from_ids(text: str) -> str:
     return cleaned_text
 
 def build_prompt(
-    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2
+    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2, target: str = ""
 ) -> str:
     intro_lines = [
         "You are a navigation assistant helping me reach a target goal inside a building.",
@@ -468,13 +472,14 @@ def build_prompt(
         "The frames are taken in chronological order along the path from the start to the target location.",
         "Write a human-sounding description of the walk, fluent and easy to follow for a real person.",
         "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
-        "You must imagine to guide me from start to end of the path.",
+        # "You must imagine to guide me from start to end of the path.",
         "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation and movement in the building.",
         "If the path goes through stairs, just mention 'go up / down to stairs to reach the $room_name' without mentioning objects in the stairs area.",
         "If you see the target location or object, you have to directly mention it and stop referencing other objects.",
         "Only reference objects that appear in the observations. Avoid embellishments or invented objects.",
         "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
         f"User question: {user_input}",
+        # f"Target: {target}\n"
         "Here are the observations from the path:"
     ]
 
@@ -565,6 +570,7 @@ def generate_path_description(
     max_frames: int = 40,
     dry_run: bool = False,
     target_name: str = "",
+    room_name: str = "",
 ) -> str:
     """
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
@@ -574,7 +580,7 @@ def generate_path_description(
     scene_index = frames[0].get("scene_index")
     num_clusters_per_frame = 2
     summaries, clusters_to_draw = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
-    prompt = build_prompt(scene_index, summaries, user_input, num_clusters_per_frame=num_clusters_per_frame)
+    prompt = build_prompt(scene_index, summaries, user_input, num_clusters_per_frame=num_clusters_per_frame, target=target_name if target_name else room_name)
 
     print(prompt)
     print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
