@@ -304,8 +304,23 @@ class NewViewer(BaseViewer):
     
     def _cluster_same_label(self, obj_str_ids, label_norm, distance_thresh=1.0):
         clusters = []
-        def xyz_dist(a, b):
-            return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
+        
+        def bbox_distance(bbox_a, bbox_b):
+            """
+            Calcola la distanza minima tra due bounding boxes 3D.
+            Ogni bbox è nel formato [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            """
+            # Estrai i punti min e max per entrambi i bbox
+            min_a, max_a = bbox_a[0], bbox_a[1]
+            min_b, max_b = bbox_b[0], bbox_b[1]
+            
+            # Calcola la distanza lungo ogni asse
+            dx = max(0, max(min_a[0] - max_b[0], min_b[0] - max_a[0]))
+            dy = max(0, max(min_a[1] - max_b[1], min_b[1] - max_a[1]))
+            dz = max(0, max(min_a[2] - max_b[2], min_b[2] - max_a[2]))
+            
+            # Distanza euclidea 3D
+            return math.sqrt(dx*dx + dy*dy + dz*dz)
         
         def merge_obbs(obb_a, obb_b):
             return [
@@ -325,7 +340,8 @@ class NewViewer(BaseViewer):
             assigned = False
             obj = self.objects[obj_str_id]
             for cluster in clusters:
-                if (xyz_dist(obj["centroid_world"], cluster["centroid_world"]) <= distance_thresh):
+                # Usa la distanza tra bbox invece che tra centroidi
+                if (bbox_distance(obj["bbox_world"], cluster["bbox_world"]) <= distance_thresh):
                     count_cluster = len(cluster["obj_str_ids"])
                     # centroid (world)
                     new_cx = (cluster["centroid_world"][0] * count_cluster + obj["centroid_world"][0]) / (count_cluster + 1)

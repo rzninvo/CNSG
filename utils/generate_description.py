@@ -593,7 +593,7 @@ def generate_path_description(
     for cluster_str_id in clusters_to_draw:
         if cluster_str_id in description:
             clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
-
+    print("\n Descrition before cleaning:", description)
     description = clean_text_from_ids(description)
 
     return description, clusters_to_draw_final
