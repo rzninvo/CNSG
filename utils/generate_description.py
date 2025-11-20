@@ -13,9 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 from dotenv import load_dotenv
-
-from huggingface_hub import hf_hub_download
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
 load_dotenv()
@@ -205,30 +202,6 @@ def parse_args() -> argparse.Namespace:
         help="Generate and print the prompt without calling the ChatGPT API.",
     )
     return parser.parse_args()
-
-_LOCAL_MODEL = None
-_LOCAL_TOKENIZER = None
-
-def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
-    global _LOCAL_MODEL, _LOCAL_TOKENIZER
-    if _LOCAL_MODEL is not None:
-        print("[LOCAL-LLM] Model already loaded, reusing the cached instance.")
-        return _LOCAL_MODEL, _LOCAL_TOKENIZER
-
-    print("[INFO] Loading HF model (cached if present)...")
-    print(f"[LOCAL-LLM] Loading model from HuggingFace repo: {repo_id}")
-    print("[LOCAL-LLM] Step 1/3: Loading tokenizer...")
-    _LOCAL_TOKENIZER = AutoTokenizer.from_pretrained(repo_id)
-
-    print("[LOCAL-LLM] Step 2/3: Loading model weights (this may take a while)...")
-    _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
-        repo_id,
-        dtype=torch.float16,
-        device_map="auto",
-    )
-    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {_LOCAL_MODEL.device}")
-    print("[LOCAL-LLM] Ready for inference.")
-    return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
 def load_frames(input_dir: Path, max_frames: int) -> List[Dict[str, Any]]:
     if not input_dir.exists():
@@ -526,8 +499,8 @@ def build_prompt(
     ).strip()
 
 
-def generate_description(prompt: str, model: str, backend: str = "openai") -> str:
-    if backend == "openai":
+def generate_description(prompt: str, model = None, tokenizer = None) -> str:
+    if model == None or tokenizer == None:
         print("[INFO] Generating description using OpenAI ChatGPT API...")
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -551,7 +524,7 @@ def generate_description(prompt: str, model: str, backend: str = "openai") -> st
             {"role": "user", "content": prompt},
         ]
 
-        kwargs = {"model": model, "temperature": 0.6}
+        kwargs = {"model": "gpt-4o", "temperature": 0.6}
 
         try:
             if hasattr(openai, "OpenAI"):
@@ -564,11 +537,7 @@ def generate_description(prompt: str, model: str, backend: str = "openai") -> st
             return response.choices[0]["message"]["content"].strip()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
-    elif backend == "local":
-        print("[INFO] Generating description using local model...")
-        model, tokenizer = load_local_model()
-        print("[INFO] Model and tokenizer loaded.")
-
+    else:
         messages = [
             {"role": "user", "content": prompt},
         ]
@@ -582,8 +551,6 @@ def generate_description(prompt: str, model: str, backend: str = "openai") -> st
 
         outputs = model.generate(**inputs, max_new_tokens=300)
         print(f"[INFO]: {tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:])}")
-    else:
-        raise SystemExit(f"Unsupported backend: {backend}. It has to be either 'openai' or 'local'.")
 
 
 def write_output(output_path: Path, description: str) -> None:
@@ -613,7 +580,8 @@ def main() -> None:
 def generate_path_description(
     input_dir: Path,
     user_input: str,
-    model: str = "gpt-4o-mini",
+    model,
+    tokenizer,
     max_frames: int = 40,
     dry_run: bool = False,
     target_name: str = "",
@@ -634,7 +602,12 @@ def generate_path_description(
     if dry_run: 
         return None, clusters_to_draw
 
-    description = generate_description(prompt, model, backend="local")
+    if model == None or tokenizer == None:
+        print("[generate_path_description] - Using OpenAI backend for description generation.")
+        description = generate_description(prompt)
+    else:
+        print("[generate_path_description] - Using Local LLM backend for description generation.")
+        description = generate_description(prompt, model, tokenizer)
 
     clusters_to_draw_final = {}
     for cluster_str_id in clusters_to_draw:

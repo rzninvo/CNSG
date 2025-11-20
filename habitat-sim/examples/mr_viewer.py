@@ -56,6 +56,10 @@ from utils.conversation_gui import *
 from habitat.utils.visualizations import maps
 from habitat_sim.utils.common import d3_40_colors_rgb
 
+from huggingface_hub import hf_hub_download
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
 
 # Initialize OpenAI client
 try:
@@ -1548,7 +1552,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             input_dir = Path(os.getcwd()) / "output"
             print("[MINNIE] Target name: ", target_name)
             print("[MINNIE] Room name: ", room_name)
-            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model="gpt-4o", dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
+            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
             viewer.action_queue.put((viewer.set_clusters_to_draw, (clusters_to_draw,), {}))
 
             if instructions is None:
@@ -1561,6 +1565,29 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
         except EOFError:
             break
 
+_LOCAL_MODEL = None
+_LOCAL_TOKENIZER = None
+
+def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
+    global _LOCAL_MODEL, _LOCAL_TOKENIZER
+    if _LOCAL_MODEL is not None:
+        print("[LOCAL-LLM] Model already loaded, reusing the cached instance.")
+        return _LOCAL_MODEL, _LOCAL_TOKENIZER
+
+    print("[INFO] Loading HF model (cached if present)...")
+    print(f"[LOCAL-LLM] Loading model from HuggingFace repo: {repo_id}")
+    print("[LOCAL-LLM] Step 1/3: Loading tokenizer...")
+    _LOCAL_TOKENIZER = AutoTokenizer.from_pretrained(repo_id)
+
+    print("[LOCAL-LLM] Step 2/3: Loading model weights (this may take a while)...")
+    _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
+        repo_id,
+        dtype=torch.float16,
+        device_map="auto",
+    )
+    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {_LOCAL_MODEL.device}")
+    print("[LOCAL-LLM] Ready for inference.")
+    return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
 if __name__ == "__main__":
     import argparse
@@ -1625,6 +1652,12 @@ if __name__ == "__main__":
         type=int,
         help="Vertical resolution of the window.",
     )
+    parser.add_argument(
+        "--backend",
+        default="openai",
+        type=str,
+        help="LLM backend to use: openai (default), local.",
+    )
 
     args = parser.parse_args()
 
@@ -1675,6 +1708,15 @@ if __name__ == "__main__":
         daemon=True,
     )
     logic_thread.start()
+
+    # * Depending on the backend flag, load the local model
+    if args.backend.lower() == "local":
+        try:
+            model, tokenizer = load_local_model()
+            print("[mr_viewer.py main] Local model loaded and ready.")
+        except Exception as e:
+            print(f"[mr_viewer.py main] Error loading local model: {e}")
+            sys.exit(1)
 
     viewer.exec()
 
