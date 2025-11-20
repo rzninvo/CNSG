@@ -212,15 +212,22 @@ _LOCAL_TOKENIZER = None
 def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
     global _LOCAL_MODEL, _LOCAL_TOKENIZER
     if _LOCAL_MODEL is not None:
+        print("[LOCAL-LLM] Model already loaded, reusing the cached instance.")
         return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
     print("[INFO] Loading HF model (cached if present)...")
+    print(f"[LOCAL-LLM] Loading model from HuggingFace repo: {repo_id}")
+    print("[LOCAL-LLM] Step 1/3: Loading tokenizer...")
     _LOCAL_TOKENIZER = AutoTokenizer.from_pretrained(repo_id)
+
+    print("[LOCAL-LLM] Step 2/3: Loading model weights (this may take a while)...")
     _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
         repo_id,
         torch_dtype=torch.float16,
         device_map="auto",
     )
+    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {device_str}")
+    print("[LOCAL-LLM] Ready for inference.")
     return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
 def load_frames(input_dir: Path, max_frames: int) -> List[Dict[str, Any]]:
@@ -560,34 +567,21 @@ def generate_description(prompt: str, model: str, backend: str = "openai") -> st
     elif backend == "local":
         print("[INFO] Generating description using local model...")
         model, tokenizer = load_local_model()
+        print("[INFO] Model and tokenizer loaded.")
 
-        system_msg = (
-            "You are a precise navigation assistant. Only reference landmarks that appear "
-            "in the observations. Avoid embellishments or invented objects."
-        )
-        full_prompt = (
-            f"<|system|>\n{system_msg}\n"
-            f"<|user|>\n{prompt}\n"
-            f"<|assistant|>\n"
-        )
+        messages = [
+            {"role": "user", "content": prompt},
+        ]
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(model.device)
 
-        inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                temperature=0.6,
-            )
-
-        decoded = tokenizer.decode(outputs[0], skip_special_tokens=False)
-
-        if "<|assistant|>" in decoded:
-            reply = decoded.split("<|assistant|>", 1)[1].strip()
-        else:
-            reply = decoded
-
-        return reply.strip()
+        outputs = model.generate(**inputs, max_new_tokens=300)
+        print(f"[INFO]: {tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:])}")
     else:
         raise SystemExit(f"Unsupported backend: {backend}. It has to be either 'openai' or 'local'.")
 
