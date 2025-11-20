@@ -14,6 +14,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 from dotenv import load_dotenv
 
+from huggingface_hub import hf_hub_download
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 load_dotenv()
 
 # Structural labels do not help with navigation cues.
@@ -202,6 +205,22 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+_LOCAL_MODEL = None
+_LOCAL_TOKENIZER = None
+
+def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
+    global _LOCAL_MODEL, _LOCAL_TOKENIZER
+    if _LOCAL_MODEL is not None:
+        return _LOCAL_MODEL, _LOCAL_TOKENIZER
+
+    print("[INFO] Loading HF model (cached if present)...")
+    _LOCAL_TOKENIZER = AutoTokenizer.from_pretrained(repo_id)
+    _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
+        repo_id,
+        torch_dtype=torch.float16,
+        device_map="auto",
+    )
+    return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
 def load_frames(input_dir: Path, max_frames: int) -> List[Dict[str, Any]]:
     if not input_dir.exists():
@@ -499,42 +518,77 @@ def build_prompt(
     ).strip()
 
 
-def generate_description(prompt: str, model: str) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise SystemExit("OPENAI_API_KEY environment variable is not set.")
+def generate_description(prompt: str, model: str, backend: str = "openai") -> str:
+    if backend == "openai":
+        print("[INFO] Generating description using OpenAI ChatGPT API...")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise SystemExit("OPENAI_API_KEY environment variable is not set.")
 
-    try:
-        import openai  # type: ignore
-    except ImportError as exc:
-        raise SystemExit(
-            "The openai package is required. Install it via 'pip install openai'."
-        ) from exc
+        try:
+            import openai  # type: ignore
+        except ImportError as exc:
+            raise SystemExit(
+                "The openai package is required. Install it via 'pip install openai'."
+            ) from exc
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a precise navigation assistant. Only reference landmarks that appear "
-                "in the observations. Avoid embellishments or invented objects."
-            ),
-        },
-        {"role": "user", "content": prompt},
-    ]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise navigation assistant. Only reference landmarks that appear "
+                    "in the observations. Avoid embellishments or invented objects."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
 
-    kwargs = {"model": model, "temperature": 0.6}
+        kwargs = {"model": model, "temperature": 0.6}
 
-    try:
-        if hasattr(openai, "OpenAI"):
-            client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(messages=messages, **kwargs)
-            return response.choices[0].message.content.strip()
+        try:
+            if hasattr(openai, "OpenAI"):
+                client = openai.OpenAI(api_key=api_key)
+                response = client.chat.completions.create(messages=messages, **kwargs)
+                return response.choices[0].message.content.strip()
 
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(messages=messages, **kwargs)
-        return response.choices[0]["message"]["content"].strip()
-    except Exception as exc:  # noqa: BLE001
-        raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
+            openai.api_key = api_key
+            response = openai.ChatCompletion.create(messages=messages, **kwargs)
+            return response.choices[0]["message"]["content"].strip()
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
+    elif backend == "local":
+        print("[INFO] Generating description using local model...")
+        model, tokenizer = load_local_model()
+
+        system_msg = (
+            "You are a precise navigation assistant. Only reference landmarks that appear "
+            "in the observations. Avoid embellishments or invented objects."
+        )
+        full_prompt = (
+            f"<|system|>\n{system_msg}\n"
+            f"<|user|>\n{prompt}\n"
+            f"<|assistant|>\n"
+        )
+
+        inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                temperature=0.6,
+            )
+
+        decoded = tokenizer.decode(outputs[0], skip_special_tokens=False)
+
+        if "<|assistant|>" in decoded:
+            reply = decoded.split("<|assistant|>", 1)[1].strip()
+        else:
+            reply = decoded
+
+        return reply.strip()
+    else:
+        raise SystemExit(f"Unsupported backend: {backend}. It has to be either 'openai' or 'local'.")
 
 
 def write_output(output_path: Path, description: str) -> None:
@@ -561,8 +615,6 @@ def main() -> None:
 
 
 # * Used as API
-
-
 def generate_path_description(
     input_dir: Path,
     user_input: str,
@@ -587,7 +639,7 @@ def generate_path_description(
     if dry_run: 
         return None, clusters_to_draw
 
-    description = generate_description(prompt, model)
+    description = generate_description(prompt, model, backend="local")
 
     clusters_to_draw_final = {}
     for cluster_str_id in clusters_to_draw:
