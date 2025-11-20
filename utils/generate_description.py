@@ -223,10 +223,10 @@ def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
     print("[LOCAL-LLM] Step 2/3: Loading model weights (this may take a while)...")
     _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
         repo_id,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         device_map="auto",
     )
-    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {device_str}")
+    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {_LOCAL_MODEL.device}")
     print("[LOCAL-LLM] Ready for inference.")
     return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
