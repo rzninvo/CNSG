@@ -89,6 +89,7 @@ class NewViewer(BaseViewer):
 
         # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
+        self.show_room_bboxes = False
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
 
@@ -126,7 +127,8 @@ class NewViewer(BaseViewer):
 
         self.objects = self.get_objs_from_sim()
         self.cluster_cnt = 0
-        self.clusters = self.cluster_objs(distance_thresh=1.2)
+        self.clusters = self.cluster_objs(distance_thresh=0.5)
+        self.rooms = self.get_rooms_from_sim()
 
 
         # self.print_scene_semantic_info()
@@ -280,6 +282,61 @@ class NewViewer(BaseViewer):
                 
         return objects
     
+    def get_rooms_from_sim(self):
+        rooms = {}
+        ignore_categories = ["ceiling", "floor", "wall", "handle", "window", "frame", "unknown", "stair"]
+
+        for region in self.scene.regions:
+        
+            region_id = region.id.strip("_").lower() if region and region.id else ""
+            room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
+            if "unknown" in room_name.lower():
+                continue 
+
+            # build the bbox of the room from its objects
+            for obj in region.objects:
+                obj_str_id = obj.id
+                for cat in ignore_categories:
+                    if cat in obj_str_id.lower():
+                        obj_str_id = None
+                        break
+                if obj_str_id is None:
+                    continue
+                if obj_str_id not in self.objects:
+                    continue
+
+                obj_data = self.objects[obj_str_id]
+                if "bbox_world" not in obj_data:
+                    continue
+                obj_bbox = obj_data["bbox_world"]
+
+                diff_x = obj_bbox[1][0] - obj_bbox[0][0]
+                diff_y = obj_bbox[1][1] - obj_bbox[0][1]
+                diff_z = obj_bbox[1][2] - obj_bbox[0][2]
+                volume = diff_x * diff_y * diff_z
+                if volume == 0:
+                    continue
+                if "bbox_world" not in rooms.get(region_id, {}):
+                    rooms[region_id] = {
+                        "bbox_world": obj_bbox
+                    }
+                else:
+                    
+                    room_bbox = rooms[region_id]["bbox_world"]
+                    # update room bbox to include obj bbox
+                    room_bbox[0][0] = min(room_bbox[0][0], obj_bbox[0][0])
+                    room_bbox[0][1] = min(room_bbox[0][1], obj_bbox[0][1])
+                    room_bbox[0][2] = min(room_bbox[0][2], obj_bbox[0][2])
+                    room_bbox[1][0] = max(room_bbox[1][0], obj_bbox[1][0])
+                    room_bbox[1][1] = max(room_bbox[1][1], obj_bbox[1][1])
+                    room_bbox[1][2] = max(room_bbox[1][2], obj_bbox[1][2])
+                    rooms[region_id]["bbox_world"] = room_bbox
+
+
+            rooms[region_id]["region_id"] = region_id
+            rooms[region_id]["name"] = room_name
+        return rooms
+    
     def cluster_objs(self, distance_thresh=1.0):
         buckets = {}  # {label_norm : list[obj_str_ids]
         for obj in self.objects.values():
@@ -404,7 +461,6 @@ class NewViewer(BaseViewer):
             print("Goal : " + str(path.requested_end))
             print("Path points : " + str(path_points))
 
-            path_points = self.densify_path(path_points, step_size=3.0)
 
             save_images = False
 
@@ -414,6 +470,7 @@ class NewViewer(BaseViewer):
             os.makedirs(output_dir, exist_ok=True)
 
             if found_path:
+                path_points = self.densify_path(path_points, step_size=3.0)
                 if save_images:
                     meters_per_pixel = 0.025
                     height = sim.scene_aabb.y().min
@@ -436,16 +493,44 @@ class NewViewer(BaseViewer):
                 # @markdown 4. (optional) Place agent and render images at trajectory points (if found).
                 display_path_agent_renders = True  # @param{type:"boolean"}
                 if display_path_agent_renders:
-                    # print("Rendering observations at path points:")
-                    tangent = path_points[1] - path_points[0] #! TODO check this caused out of index error
-                    agent_state = habitat_sim.AgentState()
-                    for ix, point in enumerate(path_points):
-                        if ix < len(path_points) - 1:
-                            tangent = path_points[ix + 1] - point
+                    for i, point in enumerate(path_points):
+                        if i < len(path_points) - 1:
+                            tangent = path_points[i + 1] - point
                             agent_state.position = point
-                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0, 1.0, 0]))
+                            tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0.0, 1.0, 0]))
                             tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
                             agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
+
+                            if i == 0:
+                                # Compute initial angle for eventual "Turn to your right / left" instructions
+                                # Need to get the angle between the initial_rotation and agent_state.rotation around Y axis
+                                initial_rot_matrix = utils.quat_to_magnum(initial_agent_state_rotation).to_matrix()
+                                tangent_rot_matrix = utils.quat_to_magnum(agent_state.rotation).to_matrix()
+                                # Get forward vectors (row 2 is the forward direction in Magnum's convention)
+                                initial_forward = mn.Vector3(initial_rot_matrix[2][0], initial_rot_matrix[2][1], initial_rot_matrix[2][2])
+                                tangent_forward = mn.Vector3(tangent_rot_matrix[2][0], tangent_rot_matrix[2][1], tangent_rot_matrix[2][2])
+                                # Project on XZ plane (ignore Y component)
+                                initial_forward_proj = mn.Vector3(initial_forward[0], 0.0, initial_forward[2]).normalized()
+                                tangent_forward_proj = mn.Vector3(tangent_forward[0], 0.0, tangent_forward[2]).normalized()
+                                
+                                # Calculate angle using dot product
+                                dot_product = mn.math.dot(initial_forward_proj, tangent_forward_proj)
+                                angle = math.acos(np.clip(dot_product, -1.0, 1.0))
+                                
+                                # Calculate cross product to determine turn direction (left or right)
+                                cross_product = mn.math.cross(initial_forward_proj, tangent_forward_proj)
+                                # If Y component of cross product is positive, turn is to the left; if negative, to the right
+                                if 45.0 < math.degrees(angle) < 135.0:
+                                    if cross_product[1] > 0:
+                                        turn_direction = "left"
+                                    else:
+                                        turn_direction = "right"
+                                elif math.degrees(angle) <= 45.0:
+                                    turn_direction = "forward"
+                                else:
+                                    turn_direction = "behind"
+                                
+                                # print(f"\n\n[PAPERINO] Initial angle to first path segment: {math.degrees(angle):.2f} degrees ({turn_direction})\n\n")
 
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
@@ -480,26 +565,87 @@ class NewViewer(BaseViewer):
                                     rot_mn = utils.quat_to_magnum(sensor_state.rotation)
                                     T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
 
+                                    # add a field in frame data with the room name where the agent is located in that frame
+                                    current_room = self.get_room_from_position(agent_state.position) # TODO doesn't work -> try to fix it
+
                                     # print(f"[PLUTO] Oggetti: {processed_objs}")
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
-                                        "image_index": f"frame-{ix:06d}",
+                                        "image_index": f"frame-{i:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
+                                        "current_room": current_room,
                                         "objects": processed_visible_clusters,  #! NOTE we use "objects" even if they are clusters
                                         "spatial_relations": self.compute_spatial_relations(processed_visible_clusters, sim.get_agent(self.agent_id).get_state()),
                                         "timestamp": datetime.datetime.now().isoformat(),
+                                        "turn_direction": turn_direction if i == 0 else "none",
                                     }
 
-                                    with open(f"output/frame_{ix:06d}.json", "w") as f:
+                                    with open(f"output/frame_{i:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
-                                        print(f"✅ Saved metadata: output/frame_{ix:06d}.json")
+                                        print(f"✅ Saved metadata: output/frame_{i:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
-
+            else: 
+                print("No path found to the goal.")
             agent_state.position = initial_agent_state_position
             agent_state.rotation = initial_agent_state_rotation
             agent = sim.get_agent(self.agent_id)
             agent.set_state(agent_state)
+
+    def get_room_from_position(self, position: mn.Vector3) -> str:
+        """
+        Trova tutte le stanze che contengono la posizione e seleziona quella più probabile
+        basandosi sulla distanza dall'oggetto più vicino in quelle stanze.
+        """
+        candidate_rooms = []
+        
+        # Trova tutte le stanze candidate che contengono la posizione
+        for room in self.rooms.values():
+            bbox = room.get("bbox_world", None)
+            if bbox is None:
+                continue
+            
+            # Verifica se la posizione è dentro il bbox
+            if (bbox[0][0] <= position[0] <= bbox[1][0] and
+                bbox[0][1] <= position[1] <= bbox[1][1] and
+                bbox[0][2] <= position[2] <= bbox[1][2]):
+                
+                candidate_rooms.append(room)
+        
+        if not candidate_rooms:
+            return "unknown_room"
+        
+        # Se c'è solo una stanza candidata, ritornala direttamente
+        if len(candidate_rooms) == 1:
+            return candidate_rooms[0].get("name", "unknown_room")
+        
+        # Se ci sono più stanze candidate, trova quella con l'oggetto più vicino
+        min_distance = float('inf')
+        selected_room = None
+        
+        for room in candidate_rooms:
+            room_name = room.get("name", "unknown_room")
+            
+            # Trova tutti gli oggetti in questa stanza
+            for obj in self.objects.values():
+                if obj.get("room") == room_name:
+                    obj_centroid = obj.get("centroid_world")
+                    if obj_centroid is None:
+                        continue
+                    
+                    # Calcola la distanza dall'oggetto alla posizione
+                    distance = np.linalg.norm(
+                        np.array([position[0], position[1], position[2]]) - 
+                        np.array(obj_centroid)
+                    )
+                    
+                    # Aggiorna la stanza selezionata se questo oggetto è più vicino
+                    if distance < min_distance:
+                        min_distance = distance
+                        selected_room = room_name
+        
+        return selected_room if selected_room else "unknown_room"
+        
         
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
         points = np.array(path_points)
@@ -519,7 +665,9 @@ class NewViewer(BaseViewer):
             for s in range(1, n_steps + 1):
                 new_point = p0 + direction * step_size * s
                 new_points.append(new_point)
-        if np.linalg.norm(new_points[-1] - points[-1]) > 0.8: 
+        if np.linalg.norm(new_points[-1] - points[-1]) > 0.3: 
+            new_points.append(points[-1])
+        if len(new_points) < 2:
             new_points.append(points[-1])
         return np.array(new_points)
 
@@ -1082,6 +1230,86 @@ class NewViewer(BaseViewer):
         else:
             self._bbox_label_screen_positions.clear()
 
+        if self.show_room_bboxes:
+            self._draw_room_bboxes(self.debug_line_render)
+
+
+    def _draw_room_bboxes(self, debug_line_render: Any) -> None:
+        """
+        Draw bounding boxes for all rooms in self.rooms.
+        """
+        if not self.rooms:
+            return
+        
+        debug_line_render.set_line_width(3.0)
+        
+        # Define a color palette for rooms
+        ROOM_COLORS = [
+            mn.Color4(1.0, 0.0, 0.0, 0.8),    # Red
+            mn.Color4(0.0, 1.0, 0.0, 0.8),    # Green
+            mn.Color4(0.0, 0.0, 1.0, 0.8),    # Blue
+            mn.Color4(1.0, 1.0, 0.0, 0.8),    # Yellow
+            mn.Color4(1.0, 0.0, 1.0, 0.8),    # Magenta
+            mn.Color4(0.0, 1.0, 1.0, 0.8),    # Cyan
+            mn.Color4(1.0, 0.5, 0.0, 0.8),    # Orange
+            mn.Color4(0.5, 0.0, 1.0, 0.8),    # Purple
+            mn.Color4(0.0, 0.5, 0.5, 0.8),    # Teal
+            mn.Color4(0.5, 0.5, 0.0, 0.8),    # Olive
+        ]
+        
+        for idx, (region_id, room) in enumerate(self.rooms.items()):
+            if room.get("name") != "entryway": #! TODO check
+                continue
+            bbox = room.get("bbox_world")
+            if bbox is None or len(bbox) != 2:
+                continue
+            
+            # Extract min and max corners
+            min_corner = mn.Vector3(bbox[0][0], bbox[0][1], bbox[0][2])
+            max_corner = mn.Vector3(bbox[1][0], bbox[1][1], bbox[1][2])
+            
+            # Define the 8 corners of the bounding box
+            corners = [
+                mn.Vector3(min_corner[0], min_corner[1], min_corner[2]),  # 0
+                mn.Vector3(max_corner[0], min_corner[1], min_corner[2]),  # 1
+                mn.Vector3(min_corner[0], max_corner[1], min_corner[2]),  # 2
+                mn.Vector3(max_corner[0], max_corner[1], min_corner[2]),  # 3
+                mn.Vector3(min_corner[0], min_corner[1], max_corner[2]),  # 4
+                mn.Vector3(max_corner[0], min_corner[1], max_corner[2]),  # 5
+                mn.Vector3(min_corner[0], max_corner[1], max_corner[2]),  # 6
+                mn.Vector3(max_corner[0], max_corner[1], max_corner[2]),  # 7
+            ]
+            
+            # Define the 12 edges of the bounding box
+            edges = [
+                (0, 1), (0, 2), (0, 4),
+                (1, 3), (1, 5),
+                (2, 3), (2, 6),
+                (3, 7),
+                (4, 5), (4, 6),
+                (5, 7),
+                (6, 7),
+            ]
+            
+            # Select color for this room
+            color = ROOM_COLORS[idx % len(ROOM_COLORS)]
+            
+            # Draw all edges
+            for edge in edges:
+                start = corners[edge[0]]
+                end = corners[edge[1]]
+                debug_line_render.draw_transformed_line(start, end, color)
+            
+            # Optionally, add room name label at the center top of the bbox
+            center = mn.Vector3(
+                (min_corner[0] + max_corner[0]) / 2.0,
+                max_corner[1] + 0.1,  # Slightly above the top
+                (min_corner[2] + max_corner[2]) / 2.0
+            )
+            screen_pos = self._project_to_screen(center)
+            room_name = room.get("name", region_id)
+            if screen_pos is not None:
+                self._bbox_label_screen_positions.append((room_name, screen_pos))
 
     def _draw_object_bboxes(self, debug_line_render: Any, clusters_to_draw: list = None) -> None:
     
@@ -1111,17 +1339,14 @@ class NewViewer(BaseViewer):
 
         self._bbox_label_screen_positions.clear()
         debug_line_render.set_line_width(2.5)
-        max_boxes = 100
-        target_labels = {"wall clock", "sofa", "armchair", "couch"}
+        target_labels = []
+        max_boxes = 1000
         candidates = []
-
-        # objs_str_ids_to_draw = ["kitchen shelf_654"] # ['couch_186', 'chair_318', 'chair_319', 'refrigerator_323', 'kitchen cabinet_324', 'worktop_336', 'kitchen cabinet_351', 'chair_445', 'chair_446', 'table_452', 'kitchen shelf_654']
 
 
 
         
         self.prev_objs_to_draw = objs_to_draw
-        
 
         for (sim_obj, str_id) in objs_to_draw:
 
@@ -1552,6 +1777,22 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             input_dir = Path(os.getcwd()) / "output"
             print("[MINNIE] Target name: ", target_name)
             print("[MINNIE] Room name: ", room_name)
+
+            # if input dir is empty, skip
+            if not any(input_dir.iterdir()):
+                # Check if a path to the room exists
+                goal_pos = viewer.get_object_position(object_name=None, room_name=room_name)
+                if goal_pos is None:
+                    print(f"Warning: Room '{room_name}' not found in the scene.")
+                    continue
+                if goal_pos.y < 2.0:
+                    goal_pos.y = 0.163378  # Adjust height
+                viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos, target_name), {}))
+                time.sleep(0.6)
+            if not any(input_dir.iterdir()):
+                print("No path found to generate instructions.")
+                output_q.put("No path found to generate istructions.")
+                continue
             instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
             viewer.action_queue.put((viewer.set_clusters_to_draw, (clusters_to_draw,), {}))
 

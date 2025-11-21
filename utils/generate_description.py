@@ -392,11 +392,15 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
     # dictionary room_name -> [cluster1, cluster2, ...]
 
     # objs_in_room: Dict[str, List] = {}
+    rooms_visited: List[str] = []
+    for i, frame in enumerate(frames):
 
-    for frame in frames:
         name = str(frame.get("image_index"))
         clusters = frame.get("objects", {})
         spatial_relations = frame.get("spatial_relations", [])
+
+        if i==0:
+            turn_direction = frame.get("turn_direction")
 
         phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name)
         
@@ -445,8 +449,14 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
                 relations=[],
             )
         )
+
+        current_room = frame.get("current_room", "unknown_room")
+        print("[PLUTO] Current room in frame", name, "is:", current_room)
+        if current_room not in rooms_visited and "unknown" not in current_room.lower():
+            rooms_visited.append(current_room)
+
     # print("All collected IDs:", raw_ids)
-    return summaries, clusters_to_draw
+    return summaries, clusters_to_draw, rooms_visited, turn_direction
 
 import re
 def clean_text_from_ids(text: str) -> str:
@@ -464,40 +474,144 @@ def clean_text_from_ids(text: str) -> str:
     return cleaned_text
 
 def build_prompt(
-    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, num_clusters_per_frame: int = 2, target: str = ""
+    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, rooms_visited, turn_direction, num_clusters_per_frame: int = 2, target: str = ""
 ) -> str:
-    intro_lines = [
-        "You are a navigation assistant helping me reach a target goal inside a building.",
-        "You will see a sequence of frames data with visible objects, including floor, relative position to the viewer, the distance to the viewer and the name of the room they belong to.",
-        "The frames are taken in chronological order along the path from the start to the target location.",
-        "Write a human-sounding description of the walk, fluent and easy to follow for a real person.",
-        "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
-        # "You must imagine to guide me from start to end of the path.",
-        "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation and movement in the building.",
-        "If the path goes through stairs, just mention 'go up / down to stairs to reach the $room_name' without mentioning objects in the stairs area.",
-        "If you see the target location or object, you have to directly mention it and stop referencing other objects.",
-        "Only reference objects that appear in the observations. Avoid embellishments or invented objects.",
-        "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
-        f"User question: {user_input}",
-        # f"Target: {target}\n"
-        "Here are the observations from the path:"
-    ]
+    
+    
 
-    header = "\n".join(intro_lines)
-    scene_line = (
-        f"Scene index: {scene_index}" if scene_index else "Scene index: unknown"
-    )
+    # intro_lines = [
+    #     "You are a navigation assistant helping me reach a target goal inside a building.",
+    #     "You will see a sequence of frames data with visible objects, including floor, relative position to the viewer, the distance to the viewer and the name of the room they belong to.",
+    #     "The frames are taken in chronological order along the path from the start to the target location.",
+    #     "Write a human-sounding description of the walk, fluent and easy to follow for a real person.",
+    #     "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
+    #     # "You must imagine to guide me from start to end of the path.",
+    #     "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation and movement in the building.",
+    #     "If the path goes through stairs, just mention 'go up / down to stairs to reach the $room_name' without mentioning objects in the stairs area.",
+    #     "If you see the target location or object, you have to directly mention it and stop referencing other objects.",
+    #     "Only reference objects that appear in the observations. Avoid embellishments or invented objects.",
+    #     "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
+    #     f"User question: {user_input}",
+    #     # f"Target: {target}\n"
+    #     "Here are the observations from the path:"
+    # ]
+
+    # header = "\n".join(intro_lines)
+    # scene_line = (
+    #     f"Scene index: {scene_index}" if scene_index else "Scene index: unknown"
+    # )
     observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
+    print("Visited rooms:", rooms_visited)
+
+    # Rooms visited in order: \n{', '.join(rooms_visited)}
+
+    turn_istruction = ""
+    if turn_direction != "forward":
+        turn_istruction = f" Initially, turn {turn_direction}."
 
     return textwrap.dedent(
         f"""
-        {header}
+        User question: {user_input}
 
         Observations:
+        {turn_istruction}
         {observation_lines}
+
+        Rooms visited in order: \n{', '.join(rooms_visited)}
+
         """
     ).strip()
 
+def few_shot_examples() -> str:
+    return textwrap.dedent(
+        """
+        ### Example 1
+        User question: Where is the wall clock in the kitchen?
+        Observations:
+        In frame-000000, you see door_0 [(relative position: lower-right), (distance: close), (room: upper bedroom), (floor: 1)], couch_102 [(relative position: lower-left), (distance: mid-distance), (room: office), (floor: 1)].
+        In frame-000001, you see door_0 [(relative position: center-right), (distance: close), (room: upper bedroom), (floor: 1)], stairs_142 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)].
+        In frame-000002, you see stairs_142 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)], door_2 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000003, you see door_2 [(relative position: center-left), (distance: close), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000004, you see armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
+        In frame-000005, you see wall clock_175 [(relative position: upper-left), (distance: slightly far), (room: kitchen), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
+        In frame-000006, you see wall clock_175 [(relative position: upper-left), (distance: slightly far), (room: kitchen), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
+        In frame-000007, you see wall clock_175 [(relative position: upper-center), (distance: mid-distance), (room: kitchen), (floor: 0)], chair_126 [(relative position: lower-right), (distance: mid-distance), (room: kitchen), (floor: 0)]. 
+        Rooms visited in order: upper bedroom, office, living room, kitchen
+        Response:
+        Go down the stairs_142 in front of you, and reach the living room. Here you'll find an armchair_59 to your left and a couch_103 on your right. Continue straight ahead into the kitchen where the wall clock_175 is visible on the upper-left wall.
+
+        ### Example 2
+        User question: How do I get to the fireplace?
+        Observations:
+        In frame-000000, you see door_7 [(relative position: lower-left), (distance: close), (room: entryway), (floor: 0)], picture_114 [(relative position: center-left), (distance: close), (room: entryway), (floor: 0)].
+        In frame-000001, you see picture_114 [(relative position: center-left), (distance: very close), (room: entryway), (floor: 0)], flag_176 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)].
+        In frame-000002, you see chair_126 [(relative position: lower-left), (distance: close), (room: kitchen), (floor: 0)], door_6 [(relative position: center-right), (distance: close), (room: kitchen), (floor: 0)].
+        In frame-000003, you see fireplace_153 [(relative position: lower-left), (distance: slightly far), (room: living room), (floor: 0)], armchair_60 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000004, you see fireplace_153 [(relative position: lower-center), (distance: slightly far), (room: living room), (floor: 0)], kitchen cabinet_178 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)].
+        In frame-000005, you see fireplace_153 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        Rooms visited in order: entryway, kitchen, living room
+        Response:
+        From the entryway, reach the corridor where you see a flag_176 to enter the kitchen. Continue straight ahead into the living room, where the fireplace_153 is located to the lower-left.
+
+        ### Example 3
+        User question: I want to go to the fireplace.
+        Observations:
+        Observations:
+        In frame-000000, you see fireplace_153 [(relative position: lower-left), (distance: slightly far), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000001, you see fireplace_153 [(relative position: lower-center), (distance: slightly far), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000002, you see fireplace_153 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)], led tv_151 [(relative position: center), (distance: close), (room: living room), (floor: 0)].
+        Rooms visited in order: living room
+        Response:
+        You can already see the fireplace_153, it's located right in front of you in the living room, just below the led tv_151.
+
+        ### Example 4
+        User question: I am hungry, can you guide me to the refrigerator?
+        Observations:
+        In frame-000000, you see refrigerator_177 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-right), (distance: close), (room: kitchen), (floor: 0)].
+        In frame-000001, you see refrigerator_177 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-right), (distance: very close), (room: kitchen), (floor: 0)].
+        Rooms visited in order: kitchen
+        Response:
+        The refrigerator_177 is located in front of you to your left.
+
+        ### Example 5
+        User question: I want to go to the kitchen sink.
+        Observations:
+        In frame-000000, you see sink_184 [(relative position: lower-right), (distance: far), (room: kitchen), (floor: 0)], fireplace_153 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000001, you see sink_184 [(relative position: lower-right), (distance: mid-distance), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-left), (distance: mid-distance), (room: kitchen), (floor: 0)].
+        Rooms visited in order: living room, kitchen
+        Response:
+        From the living room, head towards the kitchen, and you will find the sink_184 located to your lower-right.
+
+        ### Example 6
+        User question: How do I reach the tv in the upper bedroom?
+        Observations:
+        In frame-000000, you see door_16 [(relative position: lower-center), (distance: close), (room: lower bedroom), (floor: 0)], door_14 [(relative position: lower-center), (distance: mid-distance), (room: entryway), (floor: 0)].
+        In frame-000001, you see door_14 [(relative position: lower-right), (distance: close), (room: entryway), (floor: 0)], door_15 [(relative position: center-left), (distance: close), (room: dining room), (floor: 0)].
+        In frame-000002, you see chair_152 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)], door_12 [(relative position: center-right), (distance: close), (room: kitchen), (floor: 0)].
+        In frame-000003, you see armchair_74 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)], couch_126 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000004, you see armchair_73 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)], door_8 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000005, you see door_8 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)], stairs_170 [(relative position: lower-right), (distance: close), (room: living room), (floor: 0)].
+        In frame-000006, you see picture_136 [(relative position: upper-right), (distance: close), (room: living room), (floor: 0)], picture_137 [(relative position: center-left), (distance: close), (room: living room), (floor: 0)].
+        In frame-000007, you see stairs_170 [(relative position: lower-center), (distance: mid-distance), (room: living room), (floor: 0)], couch_126 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000008, you see stairs_170 [(relative position: center), (distance: very close), (room: living room), (floor: 0)], door_7 [(relative position: upper-left), (distance: slightly far), (room: office), (floor: 1)].
+        In frame-000009, you see door_3 [(relative position: upper-left), (distance: mid-distance), (room: upper bathroom), (floor: 1)], bicycle_119 [(relative position: center-right), (distance: close), (room: office), (floor: 1)].
+        In frame-000010, you see tv_30 [(relative position: lower-right), (distance: close), (room: upper bedroom), (floor: 1)], door_1 [(relative position: center-right), (distance: very close), (room: upper bedroom), (floor: 1)].
+        Rooms visited in order: lower bedroom, entryway, kitchen, living room, office, upper bedroom
+        Response:
+        Exit the lower bedroom through the door_16. Take the corridor on your right to the kitchen. Continue straight into the livingroom where you will find couch_126 on you right. From there, go up the stairs_170 to the first floor. Once upstairs, pass the bicycle and go through the door_1 to enter the upper bedroom, where the tv_30 is located to your lower-right.
+
+        ### Example 7
+        User question: where is the sink in the kitchen?
+        Observations:
+        In frame-000000, you see sink_218 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)], armchair_74 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
+        In frame-000001, you see sink_218 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)], kitchen cabinet_208 [(relative position: lower-left), (distance: close), (room: kitchen), (floor: 0)].
+        Rooms visited in order: kitchen
+        Response:
+        The sink_218 is at your lower-left in the kitchen, next to the kitchen cabinet_208.
+
+        ### End of examples.
+        """
+    ).strip()
 
 def generate_description(prompt: str, model = None, tokenizer = None) -> str:
     if model == None or tokenizer == None:
@@ -512,14 +626,40 @@ def generate_description(prompt: str, model = None, tokenizer = None) -> str:
             raise SystemExit(
                 "The openai package is required. Install it via 'pip install openai'."
             ) from exc
+        
+        system_prompt = """
+            You are a navigation assistant helping the user locate a target object inside a building.
+
+            You will receive a sequence of frames describing visible objects.  
+            Each object includes:  
+            - the floor,  
+            - the relative position to the viewer,  
+            - the distance from the viewer,  
+            - and the room it belongs to.
+
+            The frames appear in chronological order along the user's path from the starting point toward the target.
+
+            Before starting the walk description, consider an initial turn direction if provided.
+            Your task is to write a human-sounding description of the walk, fluent and easy to follow.  
+            Avoid technical language or numeric measurements. Use intuitive guidance and stay under 120 words (using fewer words when possible).
+
+            Mention at least one and at most two objects per room, choosing only the most informative for navigation.  
+            If the path includes stairs, simply write: “go up/down the stairs to reach the <room_name>”, without describing objects on the stairs.
+
+            If you see the target location or object, mention it immediately and stop referencing any further objects.
+
+            Only refer to objects that appear in the observations. Never invent or embellish details.  
+            When referencing an object, always include its ID (e.g., “chair_5”).
+
+            You will then receive a user question and the list of observations from the path, as well as the rooms visited in order. Imagine you are moving from the starting room to the target location, and provide clear path instructions.
+        """
+
+        system_prompt += few_shot_examples()
 
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a precise navigation assistant. Only reference landmarks that appear "
-                    "in the observations. Avoid embellishments or invented objects."
-                ),
+                "content": system_prompt,
             },
             {"role": "user", "content": prompt},
         ]
@@ -538,19 +678,66 @@ def generate_description(prompt: str, model = None, tokenizer = None) -> str:
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
     else:
+    #     messages = [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "Who are you?"},
+    #     ]
+        
+    # # --- Create inputs ---
+    # input_ids = tokenizer.apply_chat_template(
+    #     messages,
+    #     add_generation_prompt=True,
+    #     return_tensors="pt",
+    # ).to(model.device)
+
+    # attention_mask = torch.ones_like(input_ids)
+    # print("Pre generation")
+    # # --- Generate ---
+    # with torch.no_grad():
+    #     outputs = model.generate(
+    #         input_ids=input_ids,
+    #         attention_mask=attention_mask,
+    #         max_new_tokens=50
+    #     )
+    # print("Post generation")
+
+    # generated = outputs[0][input_ids.shape[-1]:]
+    # print(tokenizer.decode(generated, skip_special_tokens=True))
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+        import torch
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
+        model = AutoModelForCausalLM.from_pretrained(
+            "microsoft/Phi-3-mini-4k-instruct",
+            dtype=torch.float16,
+            device_map="auto"
+        )
+
         messages = [
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Who are you?"},
         ]
-        inputs = tokenizer.apply_chat_template(
+
+        # --- Create inputs ---
+        input_ids = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
             return_tensors="pt",
         ).to(model.device)
 
-        outputs = model.generate(**inputs, max_new_tokens=300)
-        print(f"[INFO]: {tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:])}")
+        attention_mask = torch.ones_like(input_ids)
+
+        # --- Generate ---
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=50
+            )
+
+        generated = outputs[0][input_ids.shape[-1]:]
+        print(tokenizer.decode(generated, skip_special_tokens=True))
+    return None
+
 
 
 def write_output(output_path: Path, description: str) -> None:
@@ -594,8 +781,11 @@ def generate_path_description(
     frames = load_frames(input_dir, max_frames)
     scene_index = frames[0].get("scene_index")
     num_clusters_per_frame = 2
-    summaries, clusters_to_draw = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
-    prompt = build_prompt(scene_index, summaries, user_input, num_clusters_per_frame=num_clusters_per_frame, target=target_name if target_name else room_name)
+    summaries, clusters_to_draw, rooms_visited, turn_direction = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
+    if room_name != "" and room_name not in rooms_visited:
+        rooms_visited.append(room_name)
+    print("[PLUTO] Rooms visited:", rooms_visited)
+    prompt = build_prompt(scene_index, summaries, user_input, rooms_visited, turn_direction, num_clusters_per_frame=num_clusters_per_frame, target=target_name if target_name else room_name)
 
     print(prompt)
     print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
@@ -609,10 +799,14 @@ def generate_path_description(
         print("[generate_path_description] - Using Local LLM backend for description generation.")
         description = generate_description(prompt, model, tokenizer)
 
-    clusters_to_draw_final = {}
-    for cluster_str_id in clusters_to_draw:
-        if cluster_str_id in description:
-            clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
+    draw_all_clusters = True #! TODO set false then
+    if draw_all_clusters:
+        clusters_to_draw_final = clusters_to_draw
+    else:
+        clusters_to_draw_final = {}
+        for cluster_str_id in clusters_to_draw:
+            if cluster_str_id in description:
+                clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
     print("\n Descrition before cleaning:", description)
     description = clean_text_from_ids(description)
 
