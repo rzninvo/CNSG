@@ -286,12 +286,17 @@ class NewViewer(BaseViewer):
         rooms = {}
         ignore_categories = ["ceiling", "floor", "wall", "handle", "window", "frame", "unknown", "stair"]
 
+        rooms_heights = []
         for region in self.scene.regions:
         
             region_id = region.id.strip("_").lower() if region and region.id else ""
             room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
             if "unknown" in room_name.lower():
                 continue 
+
+            room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
+            rooms_heights.append(room_height)
+      
 
             # build the bbox of the room from its objects
             for obj in region.objects:
@@ -335,6 +340,17 @@ class NewViewer(BaseViewer):
 
             rooms[region_id]["region_id"] = region_id
             rooms[region_id]["name"] = room_name
+
+        rooms_heights = list(set(rooms_heights))
+        # Sort heights ascending
+        rooms_heights.sort()
+
+        for region_id in rooms.keys():
+            room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
+            # Get the floor number based on the index of the room_height in the room_heights list
+            floor_number = rooms_heights.index(room_height)  # Floors start at 0
+            rooms[region_id]["floor_number"] = floor_number
+
         return rooms
     
     def cluster_objs(self, distance_thresh=1.0):
@@ -437,7 +453,45 @@ class NewViewer(BaseViewer):
 
     def set_clusters_to_draw(self, clusters_to_draw: List[str]):
         self.clusters_to_draw = clusters_to_draw
-        # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")    
+        # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")  
+
+
+    def start_navigation(self, sim, target_name: str, room_name: str = "", user_input=None, output_q=None):
+        goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
+        print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
+
+        if goal_pos is None:
+            print(f"Object '{target_name}' not found in the scene.")
+            return
+
+        if goal_pos.y < 2.0:
+            goal_pos.y = 0.163378  # Adjust height
+        frames = self.shortest_path(sim, goal_pos, target_name)
+
+        if len(frames) == 0:
+            goal_pos = viewer.get_object_position(object_name=None, room_name=room_name)
+            print(f"Retrying navigation to room center at position {goal_pos}")
+            if goal_pos is None:
+                print(f"Room '{room_name}' not found in the scene.")
+                return
+            if goal_pos.y < 2.0:
+                goal_pos.y = 0.163378  # Adjust height
+            frames = self.shortest_path(sim, goal_pos, target_name)
+
+        if len(frames) == 0:
+            print("No path frames generated, aborting navigation.")
+            return
+
+        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
+        self.set_clusters_to_draw(clusters_to_draw)
+
+        print("\n--- GENERATED DESCRIPTION ---\n")
+        print(instructions)
+        output_q.put(instructions)
+        
+
+
+
 
     def shortest_path(self, sim, goal: mn.Vector3, target_object: str = ""): 
         if not sim.pathfinder.is_loaded:
@@ -468,6 +522,8 @@ class NewViewer(BaseViewer):
             if os.path.exists(output_dir):
                 shutil.rmtree(output_dir)
             os.makedirs(output_dir, exist_ok=True)
+
+            frames = []
 
             if found_path:
                 path_points = self.densify_path(path_points, step_size=3.0)
@@ -574,11 +630,14 @@ class NewViewer(BaseViewer):
                                         "image_index": f"frame-{i:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
                                         "current_room": current_room,
-                                        "objects": processed_visible_clusters,  #! NOTE we use "objects" even if they are clusters
+                                        "objects": processed_visible_clusters,  # NOTE we use "objects" even if they are clusters
                                         "spatial_relations": self.compute_spatial_relations(processed_visible_clusters, sim.get_agent(self.agent_id).get_state()),
                                         "timestamp": datetime.datetime.now().isoformat(),
                                         "turn_direction": turn_direction if i == 0 else "none",
                                     }
+
+                                    # save frame data in a list of frames
+                                    frames.append(frame_data)
 
                                     with open(f"output/frame_{i:06d}.json", "w") as f:
                                         json.dump(frame_data, f, indent=2)
@@ -591,6 +650,8 @@ class NewViewer(BaseViewer):
             agent_state.rotation = initial_agent_state_rotation
             agent = sim.get_agent(self.agent_id)
             agent.set_state(agent_state)
+
+        return frames
 
     def get_room_from_position(self, position: mn.Vector3) -> str:
         """
@@ -613,11 +674,11 @@ class NewViewer(BaseViewer):
                 candidate_rooms.append(room)
         
         if not candidate_rooms:
-            return "unknown_room"
+            return None 
         
         # Se c'è solo una stanza candidata, ritornala direttamente
         if len(candidate_rooms) == 1:
-            return candidate_rooms[0].get("name", "unknown_room")
+            return candidate_rooms[0]
         
         # Se ci sono più stanze candidate, trova quella con l'oggetto più vicino
         min_distance = float('inf')
@@ -642,9 +703,9 @@ class NewViewer(BaseViewer):
                     # Aggiorna la stanza selezionata se questo oggetto è più vicino
                     if distance < min_distance:
                         min_distance = distance
-                        selected_room = room_name
+                        selected_room = room
         
-        return selected_room if selected_room else "unknown_room"
+        return selected_room
         
         
     def densify_path(self, path_points, step_size=1.0, min_step_size=0.7):
@@ -1258,8 +1319,6 @@ class NewViewer(BaseViewer):
         ]
         
         for idx, (region_id, room) in enumerate(self.rooms.items()):
-            if room.get("name") != "entryway": #! TODO check
-                continue
             bbox = room.get("bbox_world")
             if bbox is None or len(bbox) != 2:
                 continue
@@ -1716,8 +1775,12 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 except Exception as e:
                     print("Error parsing input without LLM. Please use 'object/room' format.")
                     continue
-            else:            
-                response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+            else: 
+                try:           
+                    response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+                except Exception as e:
+                    print("Error getting response from LLM:", e)
+                    continue
                 print("Response from ChatGPT: ", response)
                 goal_info = get_goal_from_response(
                     response
@@ -1758,50 +1821,13 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 print(f"Sanity check passed: '{target_name}' in '{room_name}'")
 
             # * Query scene (and retrieve a point in the 3D space)
-            goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
-            print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
 
-            if goal_pos is None:
-                print(f"Warning: '{room_name}/{target_name}' not found in the scene.")
-                continue
 
-            if goal_pos.y < 2.0:
-                goal_pos.y = 0.163378  # Adjust height
-
-            viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos, target_name), {}))
+            
+            viewer.action_queue.put((viewer.start_navigation, (viewer.sim, target_name, room_name, user_input, output_q), {}))
             # output_q.put(f"Generating navigation instructions...")
-            time.sleep(0.6)
 
-            ############ Generate Instruction ###############
-            # print("Current working dir:", os.getcwd())
-            input_dir = Path(os.getcwd()) / "output"
-            print("[MINNIE] Target name: ", target_name)
-            print("[MINNIE] Room name: ", room_name)
 
-            # if input dir is empty, skip
-            if not any(input_dir.iterdir()):
-                # Check if a path to the room exists
-                goal_pos = viewer.get_object_position(object_name=None, room_name=room_name)
-                if goal_pos is None:
-                    print(f"Warning: Room '{room_name}' not found in the scene.")
-                    continue
-                if goal_pos.y < 2.0:
-                    goal_pos.y = 0.163378  # Adjust height
-                viewer.action_queue.put((viewer.shortest_path, (viewer.sim, goal_pos, target_name), {}))
-                time.sleep(0.6)
-            if not any(input_dir.iterdir()):
-                print("No path found to generate instructions.")
-                output_q.put("No path found to generate istructions.")
-                continue
-            instructions, clusters_to_draw = generate_path_description(input_dir, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
-            viewer.action_queue.put((viewer.set_clusters_to_draw, (clusters_to_draw,), {}))
-
-            if instructions is None:
-                instructions = "Proceed to the " + room_name
-
-            print("\n--- GENERATED DESCRIPTION ---\n")
-            print(instructions)
-            output_q.put(instructions)
 
         except EOFError:
             break

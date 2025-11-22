@@ -203,23 +203,6 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-def load_frames(input_dir: Path, max_frames: int) -> List[Dict[str, Any]]:
-    if not input_dir.exists():
-        raise SystemExit(f"Input directory not found: {input_dir}")
-
-    json_paths = sorted(path for path in input_dir.glob("*.json") if path.is_file())
-    if not json_paths:
-        raise SystemExit(f"No JSON files found in: {input_dir}")
-
-    selected_paths = json_paths[:max_frames] if max_frames else json_paths
-
-    frames: List[Dict[str, Any]] = []
-    for path in selected_paths:
-        try:
-            frames.append(json.loads(path.read_text(encoding="utf-8")))
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"Could not parse JSON file {path}: {exc}") from exc
-    return frames
 
 
 def get_distance_score(distance: float, target_distance: float = 3.0) -> float:
@@ -393,67 +376,52 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
 
     # objs_in_room: Dict[str, List] = {}
     rooms_visited: List[str] = []
+    target_found = False
     for i, frame in enumerate(frames):
 
         name = str(frame.get("image_index"))
         clusters = frame.get("objects", {})
-        spatial_relations = frame.get("spatial_relations", [])
 
         if i==0:
             turn_direction = frame.get("turn_direction")
 
         phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name)
         
-        relations, clusters_in_relations = extract_relations(spatial_relations)
             
         # clusters_to_draw = {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...}
 
-        # print("Frame", name, "objects:", selected_objects)
+        if not target_found:
+            summaries.append(
+                FrameSummary(
+                    name=name,
+                    clusters=phrases,
+                    relations=[],
+                )
+            ) 
+
         for cluster in selected_clusters:
             cluster_str_id = cluster.get("cluster_str_id", "")
             obj_str_ids = cluster.get("obj_str_ids", [])
-
-            # # Get room name (where this cluster belongs) and update the objs_in_room dictionary
-            # room_name = cluster["room"].strip()
-            # if room_name not in objs_in_room:
-            #     objs_in_room[room_name] = []
-            # if cluster not in objs_in_room[room_name]:
-            #     objs_in_room[room_name].append(cluster)
-            # else:
-            #     # Need to update the existing cluster info
-            #     for idx, existing_cluster in enumerate(objs_in_room[room_name]):
-            #         if existing_cluster["cluster_str_id"] == cluster_str_id:
-            #             if cluster["pixel_count"] > existing_cluster["pixel_count"]:
-            #                 objs_in_room[room_name][idx] = cluster
-            #                 break
 
             # print("Selected Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
             if cluster_str_id in clusters_to_draw:
                 clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
             else:
                 clusters_to_draw[cluster_str_id] = obj_str_ids
+            
+            if target_name and target_name in cluster_str_id.lower():
+                target_found = True #! NOTE added, check if this works better than before
         
-        # for cluster_str_id, obj_str_ids in clusters_in_relations.items():
-        #     # print("Relation Cluster", cluster_str_id, "with obj IDs:", obj_str_ids)
-        #     if cluster_str_id in clusters_to_draw:
-        #         clusters_to_draw[cluster_str_id] = list(set(clusters_to_draw[cluster_str_id] + obj_str_ids))
-        #     else:
-        #         clusters_to_draw[cluster_str_id] = obj_str_ids
-
         print("IDs in frame", name, ":", clusters_to_draw)
 
-        summaries.append(
-            FrameSummary(
-                name=name,
-                clusters=phrases,
-                relations=[],
-            )
-        )
-
-        current_room = frame.get("current_room", "unknown_room")
-        print("[PLUTO] Current room in frame", name, "is:", current_room)
-        if current_room not in rooms_visited and "unknown" not in current_room.lower():
-            rooms_visited.append(current_room)
+        
+        current_room = frame.get("current_room", {})
+        if current_room is None:
+            continue
+        current_room_name = current_room.get("name", "unknown_room")
+        print("[PLUTO] Current room in frame", name, "is:", current_room_name)
+        if current_room_name not in rooms_visited and "unknown" not in current_room_name.lower():
+            rooms_visited.append(current_room_name)
 
     # print("All collected IDs:", raw_ids)
     return summaries, clusters_to_draw, rooms_visited, turn_direction
@@ -477,29 +445,6 @@ def build_prompt(
     scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, rooms_visited, turn_direction, num_clusters_per_frame: int = 2, target: str = ""
 ) -> str:
     
-    
-
-    # intro_lines = [
-    #     "You are a navigation assistant helping me reach a target goal inside a building.",
-    #     "You will see a sequence of frames data with visible objects, including floor, relative position to the viewer, the distance to the viewer and the name of the room they belong to.",
-    #     "The frames are taken in chronological order along the path from the start to the target location.",
-    #     "Write a human-sounding description of the walk, fluent and easy to follow for a real person.",
-    #     "Avoid numeric measurements or technical descriptions. Focus on intuitive guidance under 120 words. You can use less than 120 if appropriate.",
-    #     # "You must imagine to guide me from start to end of the path.",
-    #     "You must mention at most two objects per room, by picking the most informative and useful ones for the scope of navigation and movement in the building.",
-    #     "If the path goes through stairs, just mention 'go up / down to stairs to reach the $room_name' without mentioning objects in the stairs area.",
-    #     "If you see the target location or object, you have to directly mention it and stop referencing other objects.",
-    #     "Only reference objects that appear in the observations. Avoid embellishments or invented objects.",
-    #     "When you mention an object, always its ID (e.g., 'chair_5') to uniquely identify it.",
-    #     f"User question: {user_input}",
-    #     # f"Target: {target}\n"
-    #     "Here are the observations from the path:"
-    # ]
-
-    # header = "\n".join(intro_lines)
-    # scene_line = (
-    #     f"Scene index: {scene_index}" if scene_index else "Scene index: unknown"
-    # )
     observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
     print("Visited rooms:", rooms_visited)
 
@@ -765,7 +710,7 @@ def main() -> None:
 
 # * Used as API
 def generate_path_description(
-    input_dir: Path,
+    frames: List[Dict[str, Any]],
     user_input: str,
     model,
     tokenizer,
@@ -778,7 +723,7 @@ def generate_path_description(
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
     Does NOT write anything to disk.
     """
-    frames = load_frames(input_dir, max_frames)
+    frames = frames[:max_frames] if max_frames else frames
     scene_index = frames[0].get("scene_index")
     num_clusters_per_frame = 2
     summaries, clusters_to_draw, rooms_visited, turn_direction = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
@@ -799,7 +744,7 @@ def generate_path_description(
         print("[generate_path_description] - Using Local LLM backend for description generation.")
         description = generate_description(prompt, model, tokenizer)
 
-    draw_all_clusters = True #! TODO set false then
+    draw_all_clusters = True #! TODO set to false to visualize only clusters mentioned by the LLM
     if draw_all_clusters:
         clusters_to_draw_final = clusters_to_draw
     else:
