@@ -149,6 +149,7 @@ class FrameSummary:
     name: str
     clusters: Sequence[str]
     relations: Sequence[str]
+    turn_direction: str | None = None
 
     def to_prompt_line(self, num_clusters_per_frame = 2) -> str:
         if not self.clusters:
@@ -156,14 +157,28 @@ class FrameSummary:
 
 
         object_part = ", ".join(self.clusters[:num_clusters_per_frame])
-        rel_part = "; ".join(self.relations[:num_clusters_per_frame]) if self.relations else ""
 
-        description = f"In {self.name}, you see {object_part}"
-        if rel_part:
-            description += f". You also notice that {rel_part}"
-        description += "."
+        direction_part = ""
+        frame_number = int(self.name.split("-")[-1])
+        if frame_number == 0:
+            connector = "Initially"
+        else:
+            connector = "From previous frame"
 
+        if self.turn_direction == "forward":
+            direction_part = f"{connector}, continue forward.\n"
+        elif self.turn_direction == "left" or self.turn_direction == "right":
+            direction_part = f"{connector}, turn {self.turn_direction}.\n"
+        elif self.turn_direction == "behind" and frame_number == 0:
+            direction_part = f"{connector}, turn around.\n"
+
+
+        description = f"{direction_part} In {self.name}, you see {object_part}."
+    
         return description
+    
+    def get_turn_direction(self) -> str:
+        return self.turn_direction if self.turn_direction else "forward"
 
 
 def parse_args() -> argparse.Namespace:
@@ -261,13 +276,15 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
         else:
             direction = f"{vert}-{horiz}"
         
-        position = f"(relative position: {direction}), (distance: {distance_bucket(cluster.get('distance_from_camera'))})"
+        # position = f"(relative position: {direction}), (distance: {distance_bucket(cluster.get('distance_from_camera'))})"
+        position = f"(relative position: {direction})" #! TODO removed distance 
 
         # Add information about the room name and the floor number
         room = cluster.get("room", "").strip()
         floor_number = cluster.get("floor_number")
         if room and floor_number is not None:
-            position += f", (room: {room}), (floor: {floor_number})"
+            # position += f", (room: {room}), (floor: {floor_number})"
+            position += f", (room: {room})" #! NOTE removed floor
 
         return f"{cluster_str_id} [{position}]"
 
@@ -295,16 +312,12 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
 
 def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: str = "") -> List[str]:
     candidates: List[Dict[str, Any]] = []
-    print(f"[PIPPO] Selecting top {limit} clusters. Target object: '{target_object}'")
     for cluster in clusters.values():
         label = str(cluster.get("label", "")).lower()
         cluster_str_id = str(cluster['cluster_str_id']).lower()
-        # print("Evaluating cluster:", cluster_str_id, "label:", label, "target_object:", target_object)
         cluster["priority_score"] = object_priority(cluster)[0]
-        print("Cluster:", cluster_str_id, "Label:", label, "Priority Score:", cluster["priority_score"])
         
         if target_object and label.lower().strip() == target_object.lower().strip() and target_object != "":
-            print(f"[PLUTO] Found target object '{target_object}' in cluster '{cluster_str_id}'. Setting highest priority.")
             cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
         if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
@@ -382,8 +395,7 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
         name = str(frame.get("image_index"))
         clusters = frame.get("objects", {})
 
-        if i==0:
-            turn_direction = frame.get("turn_direction")
+        turn_direction = frame.get("turn_direction")
 
         phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name)
         
@@ -395,6 +407,7 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
                 FrameSummary(
                     name=name,
                     clusters=phrases,
+                    turn_direction=turn_direction,
                     relations=[],
                 )
             ) 
@@ -412,19 +425,18 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
             if target_name and target_name in cluster_str_id.lower():
                 target_found = True #! NOTE added, check if this works better than before
         
-        print("IDs in frame", name, ":", clusters_to_draw)
 
         
         current_room = frame.get("current_room", {})
         if current_room is None:
             continue
         current_room_name = current_room.get("name", "unknown_room")
-        print("[PLUTO] Current room in frame", name, "is:", current_room_name)
-        if current_room_name not in rooms_visited and "unknown" not in current_room_name.lower():
-            rooms_visited.append(current_room_name)
+        rooms_visited_names = [room.get("name") for room in rooms_visited if isinstance(room, dict)]
+        if current_room_name not in rooms_visited_names and "unknown" not in current_room_name.lower():
+            rooms_visited.append(current_room)
 
     # print("All collected IDs:", raw_ids)
-    return summaries, clusters_to_draw, rooms_visited, turn_direction
+    return summaries, clusters_to_draw, rooms_visited
 
 import re
 def clean_text_from_ids(text: str) -> str:
@@ -441,29 +453,28 @@ def clean_text_from_ids(text: str) -> str:
     
     return cleaned_text
 
-def build_prompt(
-    scene_index: str | None, summaries: Sequence[FrameSummary], user_input: str, rooms_visited, turn_direction, num_clusters_per_frame: int = 2, target: str = ""
-) -> str:
+def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visited, num_clusters_per_frame: int = 2) -> str:
     
     observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
-    print("Visited rooms:", rooms_visited)
 
     # Rooms visited in order: \n{', '.join(rooms_visited)}
 
-    turn_istruction = ""
-    if turn_direction != "forward":
-        turn_istruction = f" Initially, turn {turn_direction}."
 
+    visited_room_strings = []
+    for room in rooms_visited:
+        if not isinstance(room, dict):
+            continue
+        visited_room_strings.append(f"{room.get('name')} (floor: {room.get('floor_number')})")
+    
     return textwrap.dedent(
         f"""
         User question: {user_input}
 
         Observations:
-        {turn_istruction}
         {observation_lines}
 
-        Rooms visited in order: \n{', '.join(rooms_visited)}
-
+        Rooms visited in order: \n{', '.join(visited_room_strings)}
+        The user is in {rooms_visited[0].get("name")} (floor: {rooms_visited[0].get("floor_number")}) and the target is in {rooms_visited[-1].get("name")} (floor: {rooms_visited[-1].get("floor_number")}).
         """
     ).strip()
 
@@ -479,8 +490,6 @@ def few_shot_examples() -> str:
         In frame-000003, you see door_2 [(relative position: center-left), (distance: close), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
         In frame-000004, you see armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
         In frame-000005, you see wall clock_175 [(relative position: upper-left), (distance: slightly far), (room: kitchen), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
-        In frame-000006, you see wall clock_175 [(relative position: upper-left), (distance: slightly far), (room: kitchen), (floor: 0)], couch_103 [(relative position: lower-left), (distance: close), (room: living room), (floor: 0)].
-        In frame-000007, you see wall clock_175 [(relative position: upper-center), (distance: mid-distance), (room: kitchen), (floor: 0)], chair_126 [(relative position: lower-right), (distance: mid-distance), (room: kitchen), (floor: 0)]. 
         Rooms visited in order: upper bedroom, office, living room, kitchen
         Response:
         Go down the stairs_142 in front of you, and reach the living room. Here you'll find an armchair_59 to your left and a couch_103 on your right. Continue straight ahead into the kitchen where the wall clock_175 is visible on the upper-left wall.
@@ -492,8 +501,6 @@ def few_shot_examples() -> str:
         In frame-000001, you see picture_114 [(relative position: center-left), (distance: very close), (room: entryway), (floor: 0)], flag_176 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)].
         In frame-000002, you see chair_126 [(relative position: lower-left), (distance: close), (room: kitchen), (floor: 0)], door_6 [(relative position: center-right), (distance: close), (room: kitchen), (floor: 0)].
         In frame-000003, you see fireplace_153 [(relative position: lower-left), (distance: slightly far), (room: living room), (floor: 0)], armchair_60 [(relative position: lower-left), (distance: mid-distance), (room: living room), (floor: 0)].
-        In frame-000004, you see fireplace_153 [(relative position: lower-center), (distance: slightly far), (room: living room), (floor: 0)], kitchen cabinet_178 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)].
-        In frame-000005, you see fireplace_153 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
         Rooms visited in order: entryway, kitchen, living room
         Response:
         From the entryway, reach the corridor where you see a flag_176 to enter the kitchen. Continue straight ahead into the living room, where the fireplace_153 is located to the lower-left.
@@ -503,8 +510,6 @@ def few_shot_examples() -> str:
         Observations:
         Observations:
         In frame-000000, you see fireplace_153 [(relative position: lower-left), (distance: slightly far), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
-        In frame-000001, you see fireplace_153 [(relative position: lower-center), (distance: slightly far), (room: living room), (floor: 0)], armchair_59 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
-        In frame-000002, you see fireplace_153 [(relative position: lower-center), (distance: close), (room: living room), (floor: 0)], led tv_151 [(relative position: center), (distance: close), (room: living room), (floor: 0)].
         Rooms visited in order: living room
         Response:
         You can already see the fireplace_153, it's located right in front of you in the living room, just below the led tv_151.
@@ -513,7 +518,6 @@ def few_shot_examples() -> str:
         User question: I am hungry, can you guide me to the refrigerator?
         Observations:
         In frame-000000, you see refrigerator_177 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-right), (distance: close), (room: kitchen), (floor: 0)].
-        In frame-000001, you see refrigerator_177 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-right), (distance: very close), (room: kitchen), (floor: 0)].
         Rooms visited in order: kitchen
         Response:
         The refrigerator_177 is located in front of you to your left.
@@ -522,7 +526,6 @@ def few_shot_examples() -> str:
         User question: I want to go to the kitchen sink.
         Observations:
         In frame-000000, you see sink_184 [(relative position: lower-right), (distance: far), (room: kitchen), (floor: 0)], fireplace_153 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
-        In frame-000001, you see sink_184 [(relative position: lower-right), (distance: mid-distance), (room: kitchen), (floor: 0)], kitchen cabinet_178 [(relative position: center-left), (distance: mid-distance), (room: kitchen), (floor: 0)].
         Rooms visited in order: living room, kitchen
         Response:
         From the living room, head towards the kitchen, and you will find the sink_184 located to your lower-right.
@@ -549,7 +552,6 @@ def few_shot_examples() -> str:
         User question: where is the sink in the kitchen?
         Observations:
         In frame-000000, you see sink_218 [(relative position: lower-left), (distance: mid-distance), (room: kitchen), (floor: 0)], armchair_74 [(relative position: lower-right), (distance: mid-distance), (room: living room), (floor: 0)].
-        In frame-000001, you see sink_218 [(relative position: lower-right), (distance: close), (room: kitchen), (floor: 0)], kitchen cabinet_208 [(relative position: lower-left), (distance: close), (room: kitchen), (floor: 0)].
         Rooms visited in order: kitchen
         Response:
         The sink_218 is at your lower-left in the kitchen, next to the kitchen cabinet_208.
@@ -558,20 +560,11 @@ def few_shot_examples() -> str:
         """
     ).strip()
 
-def generate_description(prompt: str, model = None, tokenizer = None) -> str:
-    if model == None or tokenizer == None:
-        print("[INFO] Generating description using OpenAI ChatGPT API...")
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise SystemExit("OPENAI_API_KEY environment variable is not set.")
+def generate_description(user_prompt: str, model = None, tokenizer = None) -> str:
 
-        try:
-            import openai  # type: ignore
-        except ImportError as exc:
-            raise SystemExit(
-                "The openai package is required. Install it via 'pip install openai'."
-            ) from exc
-        
+    
+    
+    if model is None and tokenizer is None:
         system_prompt = """
             You are a navigation assistant helping the user locate a target object inside a building.
 
@@ -598,17 +591,65 @@ def generate_description(prompt: str, model = None, tokenizer = None) -> str:
 
             You will then receive a user question and the list of observations from the path, as well as the rooms visited in order. Imagine you are moving from the starting room to the target location, and provide clear path instructions.
         """
+        system_prompt += few_shot_examples() #! NOTE added few shot examples only for OpenAI API (out of memory issues with local model)
+    
+    else:
+        system_prompt = """
+            You are a navigation assistant helping the user locate a target object inside a building.
 
-        system_prompt += few_shot_examples()
+            You will receive a sequence of frames describing visible objects.  
+            Each object includes:  
+            - the floor,  
+            - the relative position to the viewer,  
+            - the distance from the viewer,  
+            - and the room it belongs to.
 
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {"role": "user", "content": prompt},
-        ]
+            The frames appear in chronological order along the user's path from the starting point toward the target.
 
+            Before starting the walk description, consider an initial turn direction if provided.
+            Your task is to write a human-sounding description of the path.  
+            Avoid technical language or numeric measurements. Use intuitive guidance and stay under 120 words (using fewer words when possible).
+
+            Mention at least one and at most two objects per room, choosing only the most informative for navigation.  
+            If the path includes stairs, simply write: “go up/down the stairs to reach the <room_name>”, without describing objects on the stairs.
+
+            If you see the target location or object, mention it immediately and stop referencing any further objects.
+
+            Only refer to objects that appear in the observations. Never invent or embellish details.  
+            Use the object IDs when referencing them (e.g., “chair_5”).
+
+            You will then receive a user question and the list of observations from the path, as well as the rooms visited in order. 
+            Imagine you are moving from the starting room to the target location, and provide clear path instructions.
+        """
+
+    # print("System prompt:\n", system_prompt)
+    print("User prompt:\n", user_prompt)
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user", 
+            "content": user_prompt
+        },
+    ]
+    
+    if model == None or tokenizer == None:
+
+        print("[INFO] Generating description using OpenAI ChatGPT API...")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise SystemExit("OPENAI_API_KEY environment variable is not set.")
+
+        try:
+            import openai  # type: ignore
+        except ImportError as exc:
+            raise SystemExit(
+                "The openai package is required. Install it via 'pip install openai'."
+            ) from exc
+        
         kwargs = {"model": "gpt-4o", "temperature": 0.6}
 
         try:
@@ -623,45 +664,7 @@ def generate_description(prompt: str, model = None, tokenizer = None) -> str:
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
     else:
-    #     messages = [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "Who are you?"},
-    #     ]
-        
-    # # --- Create inputs ---
-    # input_ids = tokenizer.apply_chat_template(
-    #     messages,
-    #     add_generation_prompt=True,
-    #     return_tensors="pt",
-    # ).to(model.device)
-
-    # attention_mask = torch.ones_like(input_ids)
-    # print("Pre generation")
-    # # --- Generate ---
-    # with torch.no_grad():
-    #     outputs = model.generate(
-    #         input_ids=input_ids,
-    #         attention_mask=attention_mask,
-    #         max_new_tokens=50
-    #     )
-    # print("Post generation")
-
-    # generated = outputs[0][input_ids.shape[-1]:]
-    # print(tokenizer.decode(generated, skip_special_tokens=True))
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        import torch
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
-        model = AutoModelForCausalLM.from_pretrained(
-            "microsoft/Phi-3-mini-4k-instruct",
-            dtype=torch.float16,
-            device_map="auto"
-        )
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Who are you?"},
-        ]
-
+    
         # --- Create inputs ---
         input_ids = tokenizer.apply_chat_template(
             messages,
@@ -670,42 +673,19 @@ def generate_description(prompt: str, model = None, tokenizer = None) -> str:
         ).to(model.device)
 
         attention_mask = torch.ones_like(input_ids)
-
         # --- Generate ---
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=50
+                max_new_tokens=500
             )
 
         generated = outputs[0][input_ids.shape[-1]:]
-        print(tokenizer.decode(generated, skip_special_tokens=True))
-    return None
-
-
-
-def write_output(output_path: Path, description: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(description + "\n", encoding="utf-8")
-
-
-def main() -> None:
-    args = parse_args()
-
-    frames = load_frames(args.input_dir, args.max_frames)
-    scene_index = frames[0].get("scene_index")
-    summaries = summarise_frames(frames)
-    prompt = build_prompt(scene_index, summaries, user_input="Where is the kitchen?")
-
-    if args.dry_run:
-        print(prompt)
-        return
-
-    description = generate_description(prompt, args.model)
-    output_path = args.output_path or (args.input_dir / "path_description.txt")
-    write_output(output_path, description)
-    print(f"Wrote path description to {output_path}")
+        response = tokenizer.decode(generated, skip_special_tokens=True).strip()
+        print("[LOCAL MODEL] Generated response:", response)
+        return response
+    
 
 
 # * Used as API
@@ -724,15 +704,13 @@ def generate_path_description(
     Does NOT write anything to disk.
     """
     frames = frames[:max_frames] if max_frames else frames
-    scene_index = frames[0].get("scene_index")
     num_clusters_per_frame = 2
-    summaries, clusters_to_draw, rooms_visited, turn_direction = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
-    if room_name != "" and room_name not in rooms_visited:
-        rooms_visited.append(room_name)
-    print("[PLUTO] Rooms visited:", rooms_visited)
-    prompt = build_prompt(scene_index, summaries, user_input, rooms_visited, turn_direction, num_clusters_per_frame=num_clusters_per_frame, target=target_name if target_name else room_name)
+    summaries, clusters_to_draw, rooms_visited = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
+    # current_room_names = [room.get("name") for room in rooms_visited if isinstance(room, dict)]
+    # if room_name != "" and room_name not in current_room_names:
+    #     rooms_visited.append(room_name)
+    prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame)
 
-    print(prompt)
     print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
     if dry_run: 
         return None, clusters_to_draw
@@ -752,21 +730,8 @@ def generate_path_description(
         for cluster_str_id in clusters_to_draw:
             if cluster_str_id in description:
                 clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
-    print("\n Descrition before cleaning:", description)
+    print("\nDescription before cleaning:", description)
     description = clean_text_from_ids(description)
 
     return description, clusters_to_draw_final
 
-def generate_relevance_scores(clusters) -> List[tuple[str, float]]:
-    """
-    Generate a score for each of the clusters (clusters use the format inside the frames JSON). They are a dictionary of cluster_str_id -> cluster info.
-    """
-    pass
-
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit("\nInterrupted by user.")

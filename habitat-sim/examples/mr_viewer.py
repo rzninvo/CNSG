@@ -557,36 +557,37 @@ class NewViewer(BaseViewer):
                             tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
                             agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
 
-                            if i == 0:
-                                # Compute initial angle for eventual "Turn to your right / left" instructions
-                                # Need to get the angle between the initial_rotation and agent_state.rotation around Y axis
-                                initial_rot_matrix = utils.quat_to_magnum(initial_agent_state_rotation).to_matrix()
-                                tangent_rot_matrix = utils.quat_to_magnum(agent_state.rotation).to_matrix()
-                                # Get forward vectors (row 2 is the forward direction in Magnum's convention)
-                                initial_forward = mn.Vector3(initial_rot_matrix[2][0], initial_rot_matrix[2][1], initial_rot_matrix[2][2])
-                                tangent_forward = mn.Vector3(tangent_rot_matrix[2][0], tangent_rot_matrix[2][1], tangent_rot_matrix[2][2])
-                                # Project on XZ plane (ignore Y component)
-                                initial_forward_proj = mn.Vector3(initial_forward[0], 0.0, initial_forward[2]).normalized()
-                                tangent_forward_proj = mn.Vector3(tangent_forward[0], 0.0, tangent_forward[2]).normalized()
-                                
-                                # Calculate angle using dot product
-                                dot_product = mn.math.dot(initial_forward_proj, tangent_forward_proj)
-                                angle = math.acos(np.clip(dot_product, -1.0, 1.0))
-                                
-                                # Calculate cross product to determine turn direction (left or right)
-                                cross_product = mn.math.cross(initial_forward_proj, tangent_forward_proj)
-                                # If Y component of cross product is positive, turn is to the left; if negative, to the right
-                                if 45.0 < math.degrees(angle) < 135.0:
-                                    if cross_product[1] > 0:
-                                        turn_direction = "left"
-                                    else:
-                                        turn_direction = "right"
-                                elif math.degrees(angle) <= 45.0:
-                                    turn_direction = "forward"
+                            
+                            # Compute initial angle for eventual "Turn to your right / left" instructions
+                            # Need to get the angle between the initial_rotation and agent_state.rotation around Y axis
+                            initial_rot_matrix = utils.quat_to_magnum(initial_agent_state_rotation).to_matrix()
+                            tangent_rot_matrix = utils.quat_to_magnum(agent_state.rotation).to_matrix()
+                            # Get forward vectors (row 2 is the forward direction in Magnum's convention)
+                            initial_forward = mn.Vector3(initial_rot_matrix[2][0], initial_rot_matrix[2][1], initial_rot_matrix[2][2])
+                            tangent_forward = mn.Vector3(tangent_rot_matrix[2][0], tangent_rot_matrix[2][1], tangent_rot_matrix[2][2])
+                            # Project on XZ plane (ignore Y component)
+                            initial_forward_proj = mn.Vector3(initial_forward[0], 0.0, initial_forward[2]).normalized()
+                            tangent_forward_proj = mn.Vector3(tangent_forward[0], 0.0, tangent_forward[2]).normalized()
+                            
+                            # Calculate angle using dot product
+                            dot_product = mn.math.dot(initial_forward_proj, tangent_forward_proj)
+                            angle = math.acos(np.clip(dot_product, -1.0, 1.0))
+                            
+                            # Calculate cross product to determine turn direction (left or right)
+                            cross_product = mn.math.cross(initial_forward_proj, tangent_forward_proj)
+                            # If Y component of cross product is positive, turn is to the left; if negative, to the right
+                            angle_deg = math.degrees(angle)
+                            if 45.0 < angle_deg < 110.0:
+                                if cross_product[1] > 0:
+                                    turn_direction = "left"
                                 else:
-                                    turn_direction = "behind"
-                                
-                                # print(f"\n\n[PAPERINO] Initial angle to first path segment: {math.degrees(angle):.2f} degrees ({turn_direction})\n\n")
+                                    turn_direction = "right"
+                            elif angle_deg <= 45.0:
+                                turn_direction = "forward"
+                            else:
+                                turn_direction = "behind"
+                            
+                            # print(f"\n\n[PAPERINO] Initial angle to first path segment: {math.degrees(angle):.2f} degrees ({turn_direction})\n\n")
 
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
@@ -633,7 +634,7 @@ class NewViewer(BaseViewer):
                                         "objects": processed_visible_clusters,  # NOTE we use "objects" even if they are clusters
                                         "spatial_relations": self.compute_spatial_relations(processed_visible_clusters, sim.get_agent(self.agent_id).get_state()),
                                         "timestamp": datetime.datetime.now().isoformat(),
-                                        "turn_direction": turn_direction if i == 0 else "none",
+                                        "turn_direction": turn_direction,
                                     }
 
                                     # save frame data in a list of frames
