@@ -640,9 +640,9 @@ class NewViewer(BaseViewer):
                                     # save frame data in a list of frames
                                     frames.append(frame_data)
 
-                                    with open(f"output/frame_{i:06d}.json", "w") as f:
-                                        json.dump(frame_data, f, indent=2)
-                                        print(f"✅ Saved metadata: output/frame_{i:06d}.json")
+                                    # with open(f"output/frame_{i:06d}.json", "w") as f:
+                                    #     json.dump(frame_data, f, indent=2)
+                                    #     print(f"✅ Saved metadata: output/frame_{i:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
             else: 
@@ -833,6 +833,25 @@ class NewViewer(BaseViewer):
             centroid_cam = np.array([centroid_cam.x, centroid_cam.y, centroid_cam.z])
             dist = float(np.linalg.norm(centroid_cam))
 
+            # Project to NDC (Normalized Device Coordinates) for accurate screen position
+            # Get camera sensor to access projection matrix
+            cam_sensor = sim.get_agent(self.agent_id).scene_node.node_sensor_suite.get("color_sensor")
+            if cam_sensor is not None:
+                # Get projection matrix (FOV-based perspective projection)
+                proj_mat = cam_sensor.render_camera.projection_matrix
+                
+                # Transform from camera space to clip space (homogeneous coords)
+                centroid_cam_vec = mn.Vector3(centroid_cam[0], centroid_cam[1], centroid_cam[2])
+                clip_pos = proj_mat.transform_point(centroid_cam_vec)
+                
+                # NDC coordinates are already normalized (-1 to +1 range)
+                # x: -1 (left) to +1 (right)
+                # y: -1 (bottom) to +1 (top)
+                ndc_x, ndc_y = float(clip_pos.x), float(clip_pos.y)
+            else:
+                # Fallback if projection matrix not available
+                ndc_x, ndc_y = None, None
+
             obj_str_id = str(sim_obj.id)  # -> Eg. 'wall_clock_231'
             # print(f"[MINNIE] Visible obj: id={obj_str_id}, label={label}, pixels={pixel_count}, centroid_world={centroid_world}, dist={dist:.2f}m")
             visible_objects[obj_str_id] = {
@@ -841,6 +860,8 @@ class NewViewer(BaseViewer):
                 "pixel_percent": float(100 * pixel_count / total_pixels),
                 "centroid_cam": centroid_cam.tolist(),
                 "distance_from_camera": dist,
+                "ndc_x": ndc_x,  # Screen position: -1 (left) to +1 (right)
+                "ndc_y": ndc_y,  # Screen position: -1 (bottom) to +1 (top)
             }
 
         return dict(sorted(visible_objects.items(), key=lambda item: (item[1].get("pixel_count", 0.0),),reverse=True,))
@@ -985,6 +1006,9 @@ class NewViewer(BaseViewer):
                     "centroid_world_sum": np.zeros(3),
                     "centroid_cam_sum": np.zeros(3),
                     "distance_from_camera_sum": 0.0,
+                    "ndc_x_sum": 0.0,
+                    "ndc_y_sum": 0.0,
+                    "ndc_count": 0,  # Track how many objects have valid NDC
                     "obj_count": 0,
                     "bbox_worlds": [],
                     "linear_size": 0.0,  # Sum of linear_size of visible objects
@@ -1004,6 +1028,14 @@ class NewViewer(BaseViewer):
             # Sum vector/list values
             visible_cluster["centroid_world_sum"] += np.array(visible_obj["centroid_world"])
             visible_cluster["centroid_cam_sum"] += np.array(visible_obj["centroid_cam"])
+            
+            # Accumulate NDC coordinates (if available)
+            ndc_x = visible_obj["ndc_x"]
+            ndc_y = visible_obj["ndc_y"]
+            if ndc_x is not None and ndc_y is not None:
+                visible_cluster["ndc_x_sum"] += ndc_x
+                visible_cluster["ndc_y_sum"] += ndc_y
+                visible_cluster["ndc_count"] += 1
             
             # Collect for merging
             visible_cluster["bbox_worlds"].append(visible_obj["bbox_world"])
@@ -1045,6 +1077,14 @@ class NewViewer(BaseViewer):
             avg_centroid_cam = (visible_cluster["centroid_cam_sum"] / visible_cluster["obj_count"]).tolist()
             avg_distance_from_camera = visible_cluster["distance_from_camera_sum"] / visible_cluster["obj_count"]
             
+            # Calculate average NDC coordinates (if available)
+            if visible_cluster["ndc_count"] > 0:
+                avg_ndc_x = visible_cluster["ndc_x_sum"] / visible_cluster["ndc_count"]
+                avg_ndc_y = visible_cluster["ndc_y_sum"] / visible_cluster["ndc_count"]
+            else:
+                avg_ndc_x = None
+                avg_ndc_y = None
+            
             # Merge bounding boxes
               
             def _merge_bboxes(bboxes):
@@ -1076,6 +1116,8 @@ class NewViewer(BaseViewer):
                 "bbox_world": merged_bbox,
                 "centroid_cam": [float(v) for v in avg_centroid_cam],
                 "distance_from_camera": float(avg_distance_from_camera),
+                "ndc_x": float(avg_ndc_x) if avg_ndc_x is not None else None,
+                "ndc_y": float(avg_ndc_y) if avg_ndc_y is not None else None,
                 # Sum of linear_size of visible objects
                 "linear_size": visible_cluster["linear_size"], 
                 # List of obj_str_ids that are currently visible
@@ -1108,7 +1150,6 @@ class NewViewer(BaseViewer):
                 
         visible_clusters = {key: value for key, value in visible_clusters_list}
 
-        print(f"[PLUTO] Processed visible clusters: {[v['label'] for v in visible_clusters.values()]}")
             
         # * 2. Further processing can be done here if needed
         return visible_clusters

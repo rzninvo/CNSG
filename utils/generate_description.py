@@ -253,20 +253,26 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
 
     # View-based positioning
     direction = None
-    # View-based positioning from centroid_cam (x, y)
-    centroid_cam = cluster.get("centroid_cam") # Position of the object in the camera pose
-    if isinstance(centroid_cam, list) and len(centroid_cam) >= 2:
-        x, y = centroid_cam[0], centroid_cam[1]
-        if y > 0.3:
+    # View-based positioning using NDC (Normalized Device Coordinates)
+    # NDC coordinates: x in [-1, 1] (left to right), y in [-1, 1] (bottom to top)
+    ndc_x = cluster.get("ndc_x")
+    ndc_y = cluster.get("ndc_y")
+    print("NDC coordinates for", cluster_str_id, ":", ndc_x, ndc_y)
+    
+    if ndc_x is not None and ndc_y is not None:
+        # Position detection with NDC coordinates (screen space)
+        # Vertical axis: ndc_y (-1 bottom to +1 top)
+        if ndc_y > 0.3:
             vert = "upper"
-        elif y < -0.3:
+        elif ndc_y < -0.3:
             vert = "lower"
         else:
             vert = "center"
 
-        if x < -0.3:
+        # Horizontal axis: ndc_x (-1 left to +1 right)
+        if ndc_x < -0.2:
             horiz = "left"
-        elif x > 0.3:
+        elif ndc_x > 0.2:
             horiz = "right"
         else:
             horiz = "center"
@@ -277,16 +283,20 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
             direction = f"{vert}-{horiz}"
         
         # position = f"(relative position: {direction}), (distance: {distance_bucket(cluster.get('distance_from_camera'))})"
-        position = f"(relative position: {direction})" #! TODO removed distance 
+        position = f"(relative position: {direction})" #! TODO removed distance
+    else:
+        # Fallback if NDC not available
+        direction = "unknown"
+        position = "(relative position: unknown)"
+    
+    # Add information about the room name and the floor number (always, regardless of NDC availability)
+    room = cluster.get("room", "").strip()
+    floor_number = cluster.get("floor_number")
+    if room and floor_number is not None:
+        # position += f", (room: {room}), (floor: {floor_number})"
+        position += f", (room: {room})" #! NOTE removed floor
 
-        # Add information about the room name and the floor number
-        room = cluster.get("room", "").strip()
-        floor_number = cluster.get("floor_number")
-        if room and floor_number is not None:
-            # position += f", (room: {room}), (floor: {floor_number})"
-            position += f", (room: {room})" #! NOTE removed floor
-
-        return f"{cluster_str_id} [{position}]"
+    return f"{cluster_str_id} [{position}]"
 
 
 def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
@@ -734,4 +744,6 @@ def generate_path_description(
     description = clean_text_from_ids(description)
 
     return description, clusters_to_draw_final
+
+
 
