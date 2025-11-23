@@ -481,8 +481,8 @@ class NewViewer(BaseViewer):
         if len(frames) == 0:
             print("No path frames generated, aborting navigation.")
             return
-
-        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name) # dry run = not llm_enabled # to allow instructions but not user input menagement
+        floor_number = viewer.get_floor_from_room(room_name=room_name)
+        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=_LOCAL_MODEL, tokenizer=_LOCAL_TOKENIZER, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number) # dry run = not llm_enabled # to allow instructions but not user input menagement
         self.set_clusters_to_draw(clusters_to_draw)
 
         print("\n--- GENERATED DESCRIPTION ---\n")
@@ -490,7 +490,11 @@ class NewViewer(BaseViewer):
         output_q.put(instructions)
         
 
-
+    def get_floor_from_room(self, room_name: str) -> int:
+        for room in self.rooms.values():
+            if room.get("name") == room_name:
+                return room.get("floor_number", -1)
+        return -1
 
 
     def shortest_path(self, sim, goal: mn.Vector3, target_object: str = ""): 

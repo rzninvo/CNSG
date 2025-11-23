@@ -708,6 +708,7 @@ def generate_path_description(
     dry_run: bool = False,
     target_name: str = "",
     room_name: str = "",
+    floor_number: int | None = None,
 ) -> str:
     """
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
@@ -716,9 +717,9 @@ def generate_path_description(
     frames = frames[:max_frames] if max_frames else frames
     num_clusters_per_frame = 2
     summaries, clusters_to_draw, rooms_visited = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name)
-    # current_room_names = [room.get("name") for room in rooms_visited if isinstance(room, dict)]
-    # if room_name != "" and room_name not in current_room_names:
-    #     rooms_visited.append(room_name)
+    current_room_names = [room.get("name") for room in rooms_visited if isinstance(room, dict)]
+    if room_name != "" and room_name not in current_room_names:
+        rooms_visited.append({"name": room_name, "floor_number": floor_number})
     prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame)
 
     print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
