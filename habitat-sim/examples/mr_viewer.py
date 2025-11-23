@@ -560,9 +560,12 @@ class NewViewer(BaseViewer):
                             
                             # Compute initial angle for eventual "Turn to your right / left" instructions
                             # Need to get the angle between the initial_rotation and agent_state.rotation around Y axis
-                            initial_rot_matrix = utils.quat_to_magnum(initial_agent_state_rotation).to_matrix()
+                            if i == 0:
+                                initial_rot_matrix = utils.quat_to_magnum(initial_agent_state_rotation).to_matrix()
+                            else:
+                                initial_rot_matrix = tangent_rot_matrix
                             tangent_rot_matrix = utils.quat_to_magnum(agent_state.rotation).to_matrix()
-                            # Get forward vectors (row 2 is the forward direction in Magnum's convention)
+                            # Get forward vectors (row 2 is the forward direction in Magnum's)
                             initial_forward = mn.Vector3(initial_rot_matrix[2][0], initial_rot_matrix[2][1], initial_rot_matrix[2][2])
                             tangent_forward = mn.Vector3(tangent_rot_matrix[2][0], tangent_rot_matrix[2][1], tangent_rot_matrix[2][2])
                             # Project on XZ plane (ignore Y component)
@@ -577,6 +580,7 @@ class NewViewer(BaseViewer):
                             cross_product = mn.math.cross(initial_forward_proj, tangent_forward_proj)
                             # If Y component of cross product is positive, turn is to the left; if negative, to the right
                             angle_deg = math.degrees(angle)
+                            print(f"[PAPERINO] Angle to first path segment: {angle_deg:.2f} degrees")
                             if 45.0 < angle_deg < 110.0:
                                 if cross_product[1] > 0:
                                     turn_direction = "left"

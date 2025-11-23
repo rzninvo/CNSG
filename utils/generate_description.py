@@ -257,7 +257,7 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     # NDC coordinates: x in [-1, 1] (left to right), y in [-1, 1] (bottom to top)
     ndc_x = cluster.get("ndc_x")
     ndc_y = cluster.get("ndc_y")
-    print("NDC coordinates for", cluster_str_id, ":", ndc_x, ndc_y)
+    # print("NDC coordinates for", cluster_str_id, ":", ndc_x, ndc_y)
     
     if ndc_x is not None and ndc_y is not None:
         # Position detection with NDC coordinates (screen space)
