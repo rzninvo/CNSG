@@ -9,177 +9,153 @@ import logging
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import threading
-import time
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 ########################################
 #              CONFIG                  #
 ########################################
 
-BASE_MODEL = "microsoft/Phi-3-mini-4k-instruct"
-LORA_ADAPTER = "phi3-mr-lora-fixed-v3"
-HOST = "127.0.0.1"  # localhost
-PORT = 5000
+@dataclass
+class ServerConfig:
+    """Server configuration"""
+    base_model: str = "microsoft/Phi-3-mini-4k-instruct"
+    lora_adapter: str = "phi3-mr-lora-fixed-v3"
+    host: str = "127.0.0.1"
+    port: int = 5000
+    log_level: str = "INFO"
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 ########################################
-#          LOAD MODEL                  #
+#          MODEL HANDLER               #
 ########################################
 
-app = Flask(__name__)
+class ModelHandler:
+    """Handles model loading and inference"""
+    
+    def __init__(self, config: ServerConfig):
+        self.config = config
+        self.model: Optional[torch.nn.Module] = None
+        self.tokenizer: Optional[AutoTokenizer] = None
+        self.lock = threading.Lock()
+        self.logger = self._setup_logger()
+    
+    def _setup_logger(self) -> logging.Logger:
+        """Setup logger for this handler"""
+        logger = logging.getLogger(self.__class__.__name__)
+        logger.setLevel(self.config.log_level)
+        
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            ))
+            logger.addHandler(handler)
+        
+        return logger
+    
+    def load(self) -> None:
+        """Load the finetuned model and tokenizer"""
+        self.logger.info("=" * 80)
+        self.logger.info("Loading model and tokenizer...")
+        self.logger.info("=" * 80)
+        
+        self.logger.info(f"Step 1/3: Loading tokenizer from {self.config.base_model}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.padding_side = 'left'
+        
+        self.logger.info(f"Step 2/3: Loading base model from {self.config.base_model}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            self.config.base_model,
+            # torch_dtype=torch.bfloat16,
+            load_in_4bit=True,
+            device_map="auto",
+            trust_remote_code=True,
+            # attn_implementation="eager",
+        )
 
-# Global variables for model and tokenizer
-_model = None
-_tokenizer = None
-_model_lock = threading.Lock()
+        self.logger.info(f"Base model loaded on device: {next(base_model.parameters()).device}")
+        
+        self.logger.info(f"Step 3/3: Loading LoRA adapter from {self.config.lora_adapter}")
+        self.model = PeftModel.from_pretrained(
+            base_model,
+            self.config.lora_adapter,
+            # torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
 
-def load_model():
-    """Load the finetuned model and tokenizer"""
-    global _model, _tokenizer
+        if torch.cuda.is_available():
+            target_device = base_model.device if base_model.device.type == 'cuda' else 'cuda:0'
+            self.logger.info(f"Moving finetuned model to {target_device}...")
+            self.model = self.model.to(target_device)
+            
+        self.logger.info(f"Finetuned model loaded on device: {next(self.model.parameters()).device}")
+        self.model.eval()
+        
+        # Verify device
+        device = next(self.model.parameters()).device
+        self.logger.info(f"✅ Model loaded successfully on device: {device}")
+        self.logger.info("=" * 80)
     
-    logger.info("=" * 80)
-    logger.info("Loading model and tokenizer...")
-    logger.info("=" * 80)
+    def is_ready(self) -> bool:
+        """Check if model is loaded and ready"""
+        return self.model is not None and self.tokenizer is not None
     
-    logger.info(f"Step 1/3: Loading tokenizer from {BASE_MODEL}")
-    _tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-    _tokenizer.pad_token = _tokenizer.eos_token
-    _tokenizer.pad_token_id = _tokenizer.eos_token_id
-    _tokenizer.padding_side = 'left'
-    
-    logger.info(f"Step 2/3: Loading base model from {BASE_MODEL}")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-        attn_implementation="eager",
-    )
-    
-    logger.info(f"Step 3/3: Loading LoRA adapter from {LORA_ADAPTER}")
-    _model = PeftModel.from_pretrained(
-        base_model,
-        LORA_ADAPTER,
-        torch_dtype=torch.bfloat16,
-    )
-    _model.eval()
-    
-    # Verify device
-    device = next(_model.parameters()).device
-    logger.info(f"✅ Model loaded successfully on device: {device}")
-    logger.info("=" * 80)
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        max_new_tokens: int = 120,
+        temperature: float = 0.3,
+        do_sample: bool = True
+    ) -> str:
+        """Generate response from the model"""
+        if not self.is_ready():
+            raise RuntimeError("Model not loaded")
+        
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048,
+        ).to(self.model.device)
+        
+        input_len = inputs['input_ids'].shape[1]
+        
+        with self.lock:
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    use_cache=False,
+                )
+        
+        response = self.tokenizer.decode(
+            outputs[0][input_len:],
+            skip_special_tokens=True
+        )
+        return response.strip()
+
 
 ########################################
-#          API ENDPOINTS               #
+#          API SERVER                  #
 ########################################
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    if _model is None or _tokenizer is None:
-        return jsonify({
-            'status': 'error',
-            'message': 'Model not loaded'
-        }), 503
+class ModelServer:
+    """Flask API server for the model"""
     
-    return jsonify({
-        'status': 'ready',
-        'model': BASE_MODEL,
-        'adapter': LORA_ADAPTER
-    }), 200
-
-@app.route('/generate', methods=['POST'])
-def generate():
-    """
-    Generate text from the model
-    
-    Expected JSON body:
-    {
-        "messages": [
-            {"role": "system", "content": "..."},
-            {"role": "user", "content": "..."}
-        ],
-        "max_new_tokens": 120,  // optional
-        "temperature": 0.3,     // optional
-        "do_sample": true       // optional
-    }
-    """
-    if _model is None or _tokenizer is None:
-        return jsonify({
-            'error': 'Model not loaded'
-        }), 503
-    
-    try:
-        data = request.get_json()
-        
-        if 'messages' not in data:
-            return jsonify({
-                'error': 'Missing "messages" field in request body'
-            }), 400
-        
-        messages = data['messages']
-        max_new_tokens = data.get('max_new_tokens', 120)
-        temperature = data.get('temperature', 0.3)
-        do_sample = data.get('do_sample', True)
-        
-        logger.info(f"Received generation request: {len(messages)} messages, "
-                   f"max_tokens={max_new_tokens}, temp={temperature}")
-        
-        # Generate response
-        with _model_lock:
-            response = generate_response(
-                _model,
-                messages,
-                _tokenizer,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=do_sample
-            )
-        
-        return jsonify({
-            'response': response,
-            'num_tokens': len(_tokenizer.encode(response))
-        }), 200
-    
-    except Exception as e:
-        logger.error(f"Generation error: {e}", exc_info=True)
-        return jsonify({
-            'error': str(e)
-        }), 500
-
-@app.route('/classify_intent', methods=['POST'])
-def classify_intent():
-    """
-    Classify user intent for navigation
-    
-    Expected JSON body:
-    {
-        "user_input": "where is the kitchen?"
-    }
-    
-    Returns "start" if navigation query, otherwise friendly response
-    """
-    if _model is None or _tokenizer is None:
-        return jsonify({
-            'error': 'Model not loaded'
-        }), 503
-    
-    try:
-        data = request.get_json()
-        
-        if 'user_input' not in data:
-            return jsonify({
-                'error': 'Missing "user_input" field in request body'
-            }), 400
-        
-        user_input = data['user_input']
-        
-        system_prompt = """
+    INTENT_SYSTEM_PROMPT = """
 You are an assistant for a home navigation system.
 Your task is to interpret natural language queries from the user who might:
 - ask to go to a room, or
@@ -188,90 +164,188 @@ Your task is to interpret natural language queries from the user who might:
 If the user is asking for a room or an object, respond with "start".
 If the user is not asking for navigation, respond in a friendly manner.
 """
+    
+    def __init__(self, model_handler: ModelHandler, config: ServerConfig):
+        self.model_handler = model_handler
+        self.config = config
+        self.app = Flask(__name__)
+        self.logger = self._setup_logger()
+        self._setup_routes()
+    
+    def _setup_logger(self) -> logging.Logger:
+        """Setup logger for the server"""
+        logger = logging.getLogger(self.__class__.__name__)
+        logger.setLevel(self.config.log_level)
         
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input},
-        ]
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            ))
+            logger.addHandler(handler)
         
-        logger.info(f"Classifying intent for: '{user_input[:50]}...'")
+        return logger
+    
+    def _setup_routes(self) -> None:
+        """Setup Flask routes"""
+        self.app.add_url_rule('/health', 'health', self._health_check, methods=['GET'])
+        self.app.add_url_rule('/generate', 'generate', self._generate, methods=['POST'])
+        self.app.add_url_rule('/classify_intent', 'classify_intent', 
+                             self._classify_intent, methods=['POST'])
+    
+    def _health_check(self):
+        """Health check endpoint"""
+        if not self.model_handler.is_ready():
+            return jsonify({
+                'status': 'error',
+                'message': 'Model not loaded'
+            }), 503
         
-        with _model_lock:
-            response = generate_response(
-                _model,
-                messages,
-                _tokenizer,
+        return jsonify({
+            'status': 'ready',
+            'model': self.config.base_model,
+            'adapter': self.config.lora_adapter
+        }), 200
+    
+    def _generate(self):
+        """
+        Generate text from the model
+        
+        Expected JSON body:
+        {
+            "messages": [
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "..."}
+            ],
+            "max_new_tokens": 120,  // optional
+            "temperature": 0.3,     // optional
+            "do_sample": true       // optional
+        }
+        """
+        if not self.model_handler.is_ready():
+            return jsonify({'error': 'Model not loaded'}), 503
+        
+        try:
+            data = request.get_json()
+            
+            if 'messages' not in data:
+                return jsonify({
+                    'error': 'Missing "messages" field in request body'
+                }), 400
+            
+            messages = data['messages']
+            max_new_tokens = data.get('max_new_tokens', 120)
+            temperature = data.get('temperature', 0.3)
+            do_sample = data.get('do_sample', True)
+            
+            self.logger.info(
+                f"Generation request: {len(messages)} messages, "
+                f"max_tokens={max_new_tokens}, temp={temperature}"
+            )
+            
+            response = self.model_handler.generate(
+                messages=messages,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample
+            )
+            
+            return jsonify({
+                'response': response,
+                'num_tokens': len(self.model_handler.tokenizer.encode(response))
+            }), 200
+        
+        except Exception as e:
+            self.logger.error(f"Generation error: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    def _classify_intent(self):
+        """
+        Classify user intent for navigation
+        
+        Expected JSON body:
+        {
+            "user_input": "where is the kitchen?"
+        }
+        """
+        if not self.model_handler.is_ready():
+            return jsonify({'error': 'Model not loaded'}), 503
+        
+        try:
+            data = request.get_json()
+            
+            if 'user_input' not in data:
+                return jsonify({
+                    'error': 'Missing "user_input" field in request body'
+                }), 400
+            
+            user_input = data['user_input']
+            
+            messages = [
+                {"role": "system", "content": self.INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_input},
+            ]
+            
+            self.logger.info(f"Classifying intent: '{user_input[:50]}...'")
+            
+            response = self.model_handler.generate(
+                messages=messages,
                 max_new_tokens=60,
                 temperature=0.3,
                 do_sample=True
             )
+            
+            is_navigation = "start" in response.lower()
+            
+            return jsonify({
+                'user_input': user_input,
+                'response': response,
+                'is_navigation': is_navigation
+            }), 200
         
-        is_navigation = "start" in response.lower()
+        except Exception as e:
+            self.logger.error(f"Classification error: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    def run(self) -> None:
+        """Start the Flask server"""
+        self.logger.info(f"Starting Flask server on {self.config.host}:{self.config.port}")
+        self.logger.info("Available endpoints:")
+        self.logger.info(f"  - GET  http://{self.config.host}:{self.config.port}/health")
+        self.logger.info(f"  - POST http://{self.config.host}:{self.config.port}/generate")
+        self.logger.info(f"  - POST http://{self.config.host}:{self.config.port}/classify_intent")
+        self.logger.info("=" * 80)
         
-        return jsonify({
-            'user_input': user_input,
-            'response': response,
-            'is_navigation': is_navigation
-        }), 200
-    
-    except Exception as e:
-        logger.error(f"Classification error: {e}", exc_info=True)
-        return jsonify({
-            'error': str(e)
-        }), 500
-
-########################################
-#       INFERENCE FUNCTION             #
-########################################
-
-def generate_response(model, messages, tokenizer, max_new_tokens=120, 
-                     temperature=0.3, do_sample=True):
-    """Generate response from the model"""
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-    ).to(model.device)
-    
-    input_len = inputs['input_ids'].shape[1]
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=do_sample,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            use_cache=False,
+        self.app.run(
+            host=self.config.host,
+            port=self.config.port,
+            debug=False,
         )
-    
-    response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
-    return response.strip()
+
 
 ########################################
 #          MAIN                        #
 ########################################
 
+def main():
+    """Main entry point"""
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Create configuration
+    config = ServerConfig()
+    
+    # Initialize model handler
+    model_handler = ModelHandler(config)
+    model_handler.load()
+    
+    # Create and run server
+    server = ModelServer(model_handler, config)
+    server.run()
+
+
 if __name__ == '__main__':
-    logger.info("Starting model server...")
-    
-    # Load model before starting server
-    load_model()
-    
-    logger.info(f"Starting Flask server on {HOST}:{PORT}")
-    logger.info("Available endpoints:")
-    logger.info(f"  - GET  http://{HOST}:{PORT}/health")
-    logger.info(f"  - POST http://{HOST}:{PORT}/generate")
-    logger.info(f"  - POST http://{HOST}:{PORT}/classify_intent")
-    logger.info("=" * 80)
-    
-    # Run Flask server
-    app.run(host=HOST, port=PORT, debug=False, threadsafe=True)
+    main()

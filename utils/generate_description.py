@@ -644,11 +644,8 @@ def few_shot_examples() -> str:
     return few_shots
 
 
-def generate_description(user_prompt: str, model = None, tokenizer = None) -> str:
-
-    
-    
-    if model is None and tokenizer is None:
+def generate_description(user_prompt: str, backend: str = "local") -> str:
+    if backend == "openai":
         system_prompt = """
             You are a navigation assistant helping the user locate a target object inside a building.
 
@@ -730,8 +727,7 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
             f.write(json.dumps({"role": "user", "content": user_prompt}) + ", ")
             
     
-    if model == None or tokenizer == None:
-
+    if backend == "openai":
         print("[INFO] Generating description using OpenAI ChatGPT API...")
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -788,13 +784,12 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
 def generate_path_description(
     frames: List[Dict[str, Any]],
     user_input: str,
-    model,
-    tokenizer,
     max_frames: int = 40,
     dry_run: bool = False,
     target_name: str = "",
     room_name: str = "",
     floor_number: int | None = None,
+    backend: str = "local", # or "openai"
 ) -> str:
     """
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
@@ -812,12 +807,12 @@ def generate_path_description(
     if dry_run: 
         return None, clusters_to_draw
 
-    if model == None or tokenizer == None:
+    if backend == "openai":
         print("[generate_path_description] - Using OpenAI backend for description generation.")
-        description = generate_description(prompt)
-    else:
+        description = generate_description(prompt, backend)
+    elif backend == "local":
         print("[generate_path_description] - Using Local LLM backend for description generation.")
-        description = generate_description(prompt, model, tokenizer)
+        description = generate_description(prompt, backend)
 
     draw_all_clusters = True #! TODO set to false to visualize only clusters mentioned by the LLM
     if draw_all_clusters:

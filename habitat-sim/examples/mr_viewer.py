@@ -458,9 +458,9 @@ class NewViewer(BaseViewer):
         self.clusters_to_draw = clusters_to_draw
         # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")  
 
-    def start_local_llm_navigation(self, user_input, model, tokenizer, output_q):
+    def start_local_llm_navigation(self, user_input, output_q, backend="local"):
         try:
-            response = classify_user_intent_local(user_input, model, tokenizer)
+            response = classify_user_intent_local(user_input)
             print("Response from Local LLM: ", response)
             if "start" not in response.lower():
                 # remove everything within < >
@@ -487,9 +487,9 @@ class NewViewer(BaseViewer):
             output_q.put("Could not find the specified object or room. Please provide more details.")
             return
         
-        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q)
+        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q, backend=backend)
 
-    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None):
+    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, backend="openai"):
         if len(candidate_goals) == 0:
             return
         if len(candidate_goals) == 1:
@@ -557,9 +557,8 @@ class NewViewer(BaseViewer):
             print("No path frames generated, aborting navigation.")
             return
         floor_number = viewer.get_floor_from_room(room_name=room_name)
-        model = _LOCAL_MODEL #! TODO set this in the generate_path_description call
-        tokenizer = _LOCAL_TOKENIZER #! TODO set this in the generate_path_description call
-        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=None, tokenizer=None, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number) # dry run = not llm_enabled # to allow instructions but not user input menagement
+      
+        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number, backend=backend) # dry run = not llm_enabled # to allow instructions but not user input menagement
         self.set_clusters_to_draw(clusters_to_draw)
 
         print("\n--- GENERATED DESCRIPTION ---\n")
@@ -1820,7 +1819,7 @@ class NewViewer(BaseViewer):
 
         super().key_press_event(event)
 
-    def get_response_LLM(self, user_input):
+    def get_response_GPT(self, user_input):
         # This function calls an LLM to retrieve the landmark / room information from the Human Request
         if client is None:
             print("OpenAI client not initialized. Cannot get landmark room.")
@@ -2008,7 +2007,7 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
-def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
+def classify_user_intent_local(user_input: str) -> str:
     """
     Uses a local LLM to classify if the user input is a navigation query or conversational.
     Returns "navigation" if it's a navigation request, otherwise returns a friendly response.
@@ -2041,7 +2040,7 @@ def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
         return f"Error: {str(e)}"
 
 
-def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue, model=None, tokenizer=None):
+def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue, backend: str):
     while True:
         try:
             user_input = input_q.get()
@@ -2049,13 +2048,12 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             if not user_input:
                 continue
 
-            local_llm_input = model is not None and tokenizer is not None  
+            if backend == "local":
             # output_q.put("Processing your request...")
-            if local_llm_input:
                 print("Using Local LLM for intent classification.")
                 # use the local model to parse the user input 
                 # if the user input is a navigation query, the output of the llm should be "navigation", otherwise the llm should return a friendly response
-                viewer.action_queue.put((viewer.start_local_llm_navigation, (user_input, model, tokenizer, output_q), {}))
+                viewer.action_queue.put((viewer.start_local_llm_navigation, (user_input, output_q, backend), {}))
                 
 
 
@@ -2067,7 +2065,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 #     continue
             else: 
                 try:           
-                    response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+                    response = viewer.get_response_GPT(user_input)  # * API Call to ChatGPT
                 except Exception as e:
                     print("Error getting response from LLM:", e)
                     continue
@@ -2114,7 +2112,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
 
                 candidate_goals = [(room_name, target_name)]
-                viewer.action_queue.put((viewer.start_navigation, (viewer.sim, candidate_goals, user_input, output_q), {}))
+                viewer.action_queue.put((viewer.start_navigation, (viewer.sim, candidate_goals, user_input, output_q, backend), {}))
                 # output_q.put(f"Generating navigation instructions...")
 
 
@@ -2122,29 +2120,7 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
         except EOFError:
             break
 
-_LOCAL_MODEL = None
-_LOCAL_TOKENIZER = None
 
-def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct"):
-    global _LOCAL_MODEL, _LOCAL_TOKENIZER
-    if _LOCAL_MODEL is not None:
-        print("[LOCAL-LLM] Model already loaded, reusing the cached instance.")
-        return _LOCAL_MODEL, _LOCAL_TOKENIZER
-
-    print("[INFO] Loading HF model (cached if present)...")
-    print(f"[LOCAL-LLM] Loading model from HuggingFace repo: {repo_id}")
-    print("[LOCAL-LLM] Step 1/3: Loading tokenizer...")
-    _LOCAL_TOKENIZER = AutoTokenizer.from_pretrained(repo_id)
-
-    print("[LOCAL-LLM] Step 2/3: Loading model weights (this may take a while)...")
-    _LOCAL_MODEL = AutoModelForCausalLM.from_pretrained(
-        repo_id,
-        dtype=torch.float16,
-        device_map="auto",
-    )
-    print(f"[LOCAL-LLM] Step 3/3: Model loaded successfully on device: {_LOCAL_MODEL.device}")
-    print("[LOCAL-LLM] Ready for inference.")
-    return _LOCAL_MODEL, _LOCAL_TOKENIZER
 
 if __name__ == "__main__":
     import argparse
@@ -2259,20 +2235,14 @@ if __name__ == "__main__":
 
     viewer = NewViewer(sim_settings, q_app=q_app)
 
-
-    # * Depending on the backend flag, load the local model
-    if args.backend.lower() == "local":
-        try:
-            model, tokenizer = load_local_model()
-            print("[mr_viewer.py main] Local model loaded and ready.")
-        except Exception as e:
-            print(f"[mr_viewer.py main] Error loading local model: {e}")
-            sys.exit(1)
-
+    if args.backend == "local":
+        print("[INFO] Using local LLM backend.")
+        # !TODO run script to start local server
+        pass
 
     logic_thread = threading.Thread(
         target=user_input_logic_loop,
-        args=(viewer, input_from_gui_q, output_to_gui_q, model, tokenizer),
+        args=(viewer, input_from_gui_q, output_to_gui_q, args.backend),
         daemon=True,
     )
     logic_thread.start()
