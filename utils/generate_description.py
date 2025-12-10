@@ -15,6 +15,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 from dotenv import load_dotenv
 import torch
 
+import requests
+SERVER_URL = "http://127.0.0.1:5000"
+
 load_dotenv()
 
 COLLECT_DATA = False
@@ -755,29 +758,31 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"ChatGPT generation failed: {exc}") from exc
     else:
-    
-        # --- Create inputs ---
-        input_ids = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        ).to(model.device)
-
-        attention_mask = torch.ones_like(input_ids)
-        # --- Generate ---
-        with torch.no_grad():
-            outputs = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=500
+        # Use local model server
+        print("[INFO] Generating description using local model server...")
+        
+        try:
+            response = requests.post(
+                f"{SERVER_URL}/generate",
+                json={
+                    "messages": messages,
+                    "max_new_tokens": 500,
+                    "temperature": 0.6,
+                    "do_sample": True
+                },
+                timeout=60
             )
-
-        generated = outputs[0][input_ids.shape[-1]:]
-        response = tokenizer.decode(generated, skip_special_tokens=True).strip()
-        print("[LOCAL MODEL] Generated response:", response)
-        return response
-    
-
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result['response']
+            else:
+                print(f"[ERROR] Server error: {response.text}")
+                raise Exception(f"Server returned {response.status_code}")
+        
+        except Exception as e:
+            print(f"[ERROR] Failed to generate with local server: {e}")
+            raise
 
 # * Used as API
 def generate_path_description(

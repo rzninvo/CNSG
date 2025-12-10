@@ -60,6 +60,9 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
+import requests
+SERVER_URL = "http://127.0.0.1:5000"
+
 
 # Initialize OpenAI client
 try:
@@ -2010,40 +2013,32 @@ def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
     Uses a local LLM to classify if the user input is a navigation query or conversational.
     Returns "navigation" if it's a navigation request, otherwise returns a friendly response.
     """
-    system_prompt = """
-    You are an assistant for a home navigation system.
-    Your task is to interpret natural language queries from the user who might:
-    - ask to go to a room, or
-    - ask where to find an object.
-    - engage in friendly conversation.
-    If the user is asking for a room or an object, respond with "start".
-    If the user is not asking for navigation, respond in a friendly manner.
-    """
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_input},
-    ]
 
-    # --- Create inputs ---
-    input_ids = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to(model.device)
-
-    attention_mask = torch.ones_like(input_ids)
+    print("[LOCAL-LLM] Classifying user intent with local model server...")
     
-    # --- Generate ---
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=60
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/classify_intent",
+            json={"user_input": user_input},
+            timeout=30  # 30 second timeout
         )
-
-    generated = outputs[0][input_ids.shape[-1]:]
-    response = tokenizer.decode(generated, skip_special_tokens=True).strip()
-    return response
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['response']
+        else:
+            print(f"[ERROR] Server returned status {response.status_code}: {response.text}")
+            return "Error: Could not classify intent"
+    
+    except requests.exceptions.ConnectionError:
+        print("[ERROR] Could not connect to model server. Is it running?")
+        return "Error: Model server not available"
+    except requests.exceptions.Timeout:
+        print("[ERROR] Request to model server timed out")
+        return "Error: Request timeout"
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        return f"Error: {str(e)}"
 
 
 def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue, model=None, tokenizer=None):
