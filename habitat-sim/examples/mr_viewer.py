@@ -498,7 +498,7 @@ class NewViewer(BaseViewer):
             print("Error classifying user intent with local LLM:", e)
             return
         
-        for room in scene_config:
+        for room in scene_config: 
             room_name = room.get("name", "").strip().lower()
             room_description = room.get("description", "")
             room_position = room.get("position", [0,0,0])
