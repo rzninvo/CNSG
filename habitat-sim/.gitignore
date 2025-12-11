@@ -11,6 +11,9 @@ output/
 *.o
 *.obj
 
+semantic_captures/
+client_images/
+
 # Precompiled Headers
 *.gch
 *.pch
