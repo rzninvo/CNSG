@@ -483,6 +483,50 @@ class NewViewer(BaseViewer):
         self.clusters_to_draw = clusters_to_draw
         # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")  
 
+    def hge_pipeline(self, sim, scene_config, user_input, output_q, user_pose=None, model_intent=None, tokenizer=None, model=None):
+
+        try:
+            response = classify_user_intent_local(user_input, model_intent, tokenizer)
+            print("Response from Local LLM: ", response)
+            if "start" not in response.lower():
+                # remove everything within < >
+                response = re.sub(r'<.*?>', '', response)
+                # friendly response
+                output_q.put(response)
+                return
+        except Exception as e:
+            print("Error classifying user intent with local LLM:", e)
+            return
+        
+        for room in scene_config:
+            room_name = room.get("name", "").strip().lower()
+            room_description = room.get("description", "")
+            room_position = room.get("position", [0,0,0])
+            if room_name in user_input.lower():
+                print(f"Navigating to room: {room_name} at position {room_position}")
+                
+                model = _LOCAL_MODEL 
+                tokenizer = _LOCAL_TOKENIZER 
+                istruction = room_description
+
+                print("\n--- ROOM DESCRIPTION ---\n")
+                print(istruction)
+
+                nav_instruction = generate_hge_description(instruction=istruction, model=model, tokenizer=tokenizer) #! NOTE maybe model not finetuned
+                
+                print("\n--- GENERATED DESCRIPTION ---\n")
+                print(nav_instruction)
+
+                break
+            else:
+                nav_instruction = "Could not find the specified room. Please provide more details."
+        
+        time.sleep(1)  # To way llm response to be ready 
+
+        output_q.put(nav_instruction)
+
+        
+
     def start_local_llm_navigation(self, user_input, tokenizer, model_intent, output_q, user_pose=None):
         try:
             response = classify_user_intent_local(user_input, model_intent, tokenizer)
@@ -1763,7 +1807,7 @@ class NewViewer(BaseViewer):
         if self.cnt % 200 == 0:
             # self.save_semantic_image()
             # print agent position every 200 frames
-            # self.print_agent_state()
+            self.print_agent_state()
             pass
         self.cnt += 1
 
@@ -2057,6 +2101,40 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
+def generate_hge_description(instruction: str, model, tokenizer) -> str:
+    """
+    Uses a local LLM to generate a detailed home navigation description based on the instruction.
+    """
+    system_prompt = """
+    You are an assistant for a home navigation system.
+    Your task is to rephrase a nagivation instruction.
+    When you reply, only provide the rephrased navigation description without any additional commentary. 
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": instruction},
+    ]
+
+    # --- Create inputs ---
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to(model.device)
+
+    attention_mask = torch.ones_like(input_ids)
+    
+    # --- Generate ---
+    with torch.no_grad():
+        outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=200
+        )
+
+    generated = outputs[0][input_ids.shape[-1]:]
+    response = tokenizer.decode(generated, skip_special_tokens=True).strip()
+    return response
 
 def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
     """
@@ -2109,6 +2187,9 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
             local_llm_input = model is not None and tokenizer is not None and model_intent is not None
             # output_q.put("Processing your request...")
+
+        
+
             if local_llm_input:
                 print("Using Local LLM for intent classification.")
                 # use the local model to parse the user input 
@@ -2233,8 +2314,7 @@ def localization(image: Image.Image):
     based on the input image.
     """
     def get_position_from_image(img: Image.Image):
-        # Implement your localization algorithm here
-        return {"position": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0, 1.0]}  # Dummy position
+        return {"position": [-10.161808   -1.3306618 -41.154533 ], "rotation": [0.241921469569206, 0, 0.97029584646225, 0]}  
 
     print("[LOCALIZATION] Running localization algorithm...")
     dummy_position = get_position_from_image(image)
@@ -2264,15 +2344,15 @@ class NavigationServer:
         """
         Gestisce le richieste POST con immagine e testo.
         Formato atteso:
-        - FormData con 'image' (file) e 'instruction' (text)
+        - FormData con 'image' (file) e 'user_input' (text)
         OPPURE
-        - JSON con 'image' (base64) e 'instruction' (text)
+        - JSON con 'image' (base64) e 'user_input' (text)
         """
         try:
             # Caso 1: FormData (come da webapp)
             if 'image' in request.files:
                 image_file = request.files['image']
-                instruction = request.form.get('instruction', '')
+                user_input = request.form.get('user_input', '')
                 
                 # Leggi l'immagine
                 image_bytes = image_file.read()
@@ -2282,7 +2362,7 @@ class NavigationServer:
             elif request.is_json:
                 data = request.get_json()
                 image_b64 = data.get('image', '')
-                instruction = data.get('instruction', '')
+                user_input = data.get('user_input', '')
                 
                 # Decodifica base64
                 if image_b64.startswith('data:image'):
@@ -2292,10 +2372,10 @@ class NavigationServer:
             else:
                 return jsonify({"error": "Invalid request format"}), 400
             
-            if not instruction:
-                return jsonify({"error": "No instruction provided"}), 400
+            if not user_input:
+                return jsonify({"error": "No user_input provided"}), 400
             
-            print(f"[SERVER] Received request: '{instruction}'")
+            print(f"[SERVER] Received request: '{user_input}'")
             print(f"[SERVER] Image size: {image.size}")
             
             # Salva l'immagine (opzionale, per debug)
@@ -2304,7 +2384,7 @@ class NavigationServer:
                 os.makedirs("client_images")
             image.save(f"client_images/received_{timestamp}.jpg")
             print(f"[SERVER] Saved received image as 'client_images/received_{timestamp}.jpg'")
-            print(f"[SERVER] Instruction: {instruction}")
+            print(f"[SERVER] Instruction: {user_input}")
 
             # ! #####################
             # ! NEED TO CALL LOCALIZATION SCRIPT (@SHAURYA)
@@ -2318,13 +2398,86 @@ class NavigationServer:
             # Esegui la pipeline di navigazione
             print("[SERVER] Starting navigation process...")
             result_queue = queue.Queue()
+
+            if _HGE_SCENE_:
+                json_path = "./data/scene_datasets/HGE/scene_config.json"
+                with open(json_path, 'r') as f:
+                    scene_config = json.load(f)
+                
+                self.viewer.action_queue.put((
+                    self.viewer.hge_pipeline, 
+                    (self.viewer.sim, scene_config, user_input, result_queue, user_pose, self.model_intent, self.tokenizer, self.model), 
+                    {}
+                ))
             
             # Metti l'azione nella coda del viewer #! NOTE this works only for local llm -> fix to make it work for both local and openai
-            self.viewer.action_queue.put((
-                self.viewer.start_local_llm_navigation,
-                (instruction, self.tokenizer, self.model_intent, result_queue, user_pose),
-                {}
-            ))
+            elif self.model_intent is not None:
+                self.viewer.action_queue.put((
+                    self.viewer.start_local_llm_navigation,
+                    (user_input, self.tokenizer, self.model_intent, result_queue, user_pose),
+                    {}
+                ))
+            else: 
+                try:           
+                    response = self.viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
+                except Exception as e:
+                    print("Error getting response from LLM:", e)
+                    return jsonify({"error": "LLM response error"}), 500
+                    
+                print("Response from ChatGPT: ", response)
+                goal_info = get_goal_from_response(
+                    response
+                )  # * Handle response and distinguish cases
+                print("Handled Response: ", goal_info)
+                response = response.split(".", 1)[
+                    1
+                ].strip()  # Remove numbering from response for user display
+                res_type = goal_info["type"]
+
+                if res_type == "object_in_room":
+                    target_name = goal_info["object"]
+                    room_name = goal_info["room"]
+                elif (
+                    res_type == "room_only"
+                    or res_type == "object_in_single_room"
+                    or res_type == "object_repeated_in_room"
+                ):
+                    target_name = None
+                    room_name = goal_info["room"]
+                elif (
+                    res_type == "ambiguous_room"
+                    or res_type == "ambiguous_object_rooms"
+                    or res_type == "not_found"
+                    or res_type == "friendly_conversation"
+                ):
+                    print(goal_info["message"])
+                    # return the message to the client
+                    return jsonify({
+                    "status": "success",
+                    "result": goal_info["message"],
+                    "user_input": user_input    
+                    })
+                else:
+                    print(f"Unhandled goal type: {res_type}")
+
+                # * === SANITY CHECK ===
+                if not self.viewer.check_object_in_room(target_name, room_name):
+                    print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
+                    return jsonify({"error": "Object or Room not found in the map"}), 400
+                else:
+                    print(f"Sanity check passed: '{target_name}' in '{room_name}'")
+
+                # * Query scene (and retrieve a point in the 3D space)
+
+
+                candidate_goals = [(room_name, target_name)]
+                self.viewer.action_queue.put((
+                    self.viewer.start_navigation, 
+                    (self.viewer.sim, candidate_goals, user_input, result_queue, user_pose), 
+                    {}
+                    
+                ))
+
             
             # Attendi il risultato (con timeout)
             try:
@@ -2334,7 +2487,7 @@ class NavigationServer:
                 return jsonify({
                     "status": "success",
                     "result": result,
-                    "instruction": instruction
+                    "user_input": user_input
                 })
             except queue.Empty:
                 return jsonify({"error": "Navigation timeout"}), 504
@@ -2480,7 +2633,17 @@ if __name__ == "__main__":
     input_from_gui_q = queue.Queue()
     output_to_gui_q = queue.Queue()
 
+    model = None
+    tokenizer = None
+    model_intent = None
     # * Depending on the backend flag, load the local model
+
+
+    global _HGE_SCENE_ 
+    _HGE_SCENE_ = False
+    if "HGE" in args.scene: #! TODO set to false before deployment
+        _HGE_SCENE_ = True
+
     if args.backend.lower() == "local":
         try:
             model, tokenizer, model_intent = load_local_model(fine_tuned_model=args.finetuned_model)
