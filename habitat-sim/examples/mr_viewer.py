@@ -2188,9 +2188,21 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
             local_llm_input = model is not None and tokenizer is not None and model_intent is not None
             # output_q.put("Processing your request...")
 
+
+            if _HGE_SCENE_:
+                json_path = "./data/scene_datasets/HGE/scene_config.json"
+                with open(json_path, 'r') as f:
+                    scene_config = json.load(f)
+                
+                viewer.action_queue.put((
+                    viewer.hge_pipeline, 
+                    (viewer.sim, scene_config, user_input, output_q, localization(None), model_intent, tokenizer, model), 
+                    {}
+                ))
+
         
 
-            if local_llm_input:
+            elif local_llm_input:
                 print("Using Local LLM for intent classification.")
                 # use the local model to parse the user input 
                 # if the user input is a navigation query, the output of the llm should be "navigation", otherwise the llm should return a friendly response
