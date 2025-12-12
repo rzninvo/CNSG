@@ -271,9 +271,13 @@ class HabitatSimInteractiveViewer(Application):
                     )
             self.draw_region_debug(self.debug_line_render)
 
-    def save_semantic_image(self) -> None:
+    def save_semantic_image(self, side_by_side: bool = True) -> None:
         """
         Captures the current semantic sensor view and saves it as a colored JPG file.
+        
+        Args:
+            side_by_side (bool): If True, saves a single image with RGB on the left
+                and semantic on the right. If False, saves them separately. Default: False.
         """
         try:
             # Get observations from the simulator
@@ -284,7 +288,31 @@ class HabitatSimInteractiveViewer(Application):
                 logger.warning("No semantic sensor found in observations. Cannot save semantic image.")
                 return
 
+            rgb_obs = observations["color_sensor"]
             semantic_obs = observations["semantic_sensor"]
+            
+            # Process RGB observation to handle RGBA or other formats
+            rgb_img = rgb_obs
+            
+            # Handle different array formats from Habitat-sim
+            if rgb_img.ndim == 3:
+                # If RGBA (4 channels), convert to RGB
+                if rgb_img.shape[2] == 4:
+                    rgb_img = rgb_img[:, :, :3]
+                # If single channel, replicate to 3 channels
+                elif rgb_img.shape[2] == 1:
+                    rgb_img = np.repeat(rgb_img, 3, axis=2)
+            
+            # Ensure uint8 type
+            if rgb_img.dtype != np.uint8:
+                if np.issubdtype(rgb_img.dtype, np.floating):
+                    # If float in [0, 1], scale to [0, 255]
+                    if rgb_img.max() <= 1.0:
+                        rgb_img = (rgb_img * 255).astype(np.uint8)
+                    else:
+                        rgb_img = rgb_img.astype(np.uint8)
+                else:
+                    rgb_img = rgb_img.astype(np.uint8)
 
             # Create output directory if it doesn't exist
             output_dir = "semantic_captures"
@@ -292,7 +320,8 @@ class HabitatSimInteractiveViewer(Application):
 
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(output_dir, f"semantic_{timestamp}.jpg")
+            filename_semantic = os.path.join(output_dir, f"semantic_{timestamp}.jpg")
+            filename_rgb = os.path.join(output_dir, f"rgb_{timestamp}.jpg")
 
             # Convert semantic IDs to colored image
             # Get unique semantic IDs
@@ -315,10 +344,30 @@ class HabitatSimInteractiveViewer(Application):
             # Reset random seed to avoid affecting other random operations
             np.random.seed(None)
 
-            # Save the image
-            Image.fromarray(semantic_img_rgb, mode='RGB').save(filename)
-            logger.info(f"✅ Saved colored semantic image to: {filename}")
-            print(f"✅ Saved colored semantic image to: {filename}")
+            # Save the image(s)
+            if side_by_side:
+                # Ensure both images have the same height for concatenation
+                if rgb_img.shape[0] != semantic_img_rgb.shape[0] or rgb_img.shape[1] != semantic_img_rgb.shape[1]:
+                    # Resize semantic to match RGB size
+                    from PIL import Image as PILImage
+                    sem_pil = PILImage.fromarray(semantic_img_rgb)
+                    sem_pil = sem_pil.resize((rgb_img.shape[1], rgb_img.shape[0]), resample=PILImage.NEAREST)
+                    semantic_img_rgb = np.array(sem_pil)
+                
+                # Concatenate horizontally (RGB on left, semantic on right)
+                combined = np.concatenate([rgb_img, semantic_img_rgb], axis=1)
+                filename_combined = os.path.join(output_dir, f"rgb_semantic_{timestamp}.jpg")
+                Image.fromarray(combined, mode='RGB').save(filename_combined)
+                logger.info(f"✅ Saved RGB + semantic side-by-side image to: {filename_combined}")
+                print(f"✅ Saved RGB + semantic side-by-side image to: {filename_combined}")
+            else:
+                # Save separately
+                Image.fromarray(semantic_img_rgb, mode='RGB').save(filename_semantic)
+                Image.fromarray(rgb_img, mode='RGB').save(filename_rgb)
+                logger.info(f"✅ Saved colored semantic image to: {filename_semantic}")
+                logger.info(f"✅ Saved RGB image to: {filename_rgb}")
+                print(f"✅ Saved colored semantic image to: {filename_semantic}")
+                print(f"✅ Saved RGB image to: {filename_rgb}")
 
         except Exception as e:
             logger.error(f"Failed to save semantic image: {e}")
