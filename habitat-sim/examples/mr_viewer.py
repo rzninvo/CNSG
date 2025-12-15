@@ -339,6 +339,9 @@ class NewViewer(BaseViewer):
                     room_bbox[1][2] = max(room_bbox[1][2], obj_bbox[1][2])
                     rooms[region_id]["bbox_world"] = room_bbox
 
+            # Initialize room entry if it doesn't exist (in case region has no valid objects)
+            if region_id not in rooms:
+                rooms[region_id] = {}
 
             rooms[region_id]["region_id"] = region_id
             rooms[region_id]["name"] = room_name
@@ -2245,7 +2248,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--finetuned-model",
-        default=True,
+        default=False,
         type=bool,
         help="Whether to use the finetuned local model (if backend=local).",
     )
