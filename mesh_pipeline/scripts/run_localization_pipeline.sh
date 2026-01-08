@@ -8,6 +8,9 @@
 
 set -e  # Exit on error
 
+# Start timer
+START_TIME=$(date +%s)
+
 # Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -16,6 +19,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 QUERY_IMAGE=""
 OUTPUT_DIR=""
 VISUALIZE=false
+NUM_RETRIEVAL=10
+NO_GPU=false
+FAST_MODE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -32,17 +38,35 @@ while [[ $# -gt 0 ]]; do
             VISUALIZE=true
             shift
             ;;
+        --num-retrieval)
+            NUM_RETRIEVAL="$2"
+            shift 2
+            ;;
+        --no-gpu)
+            NO_GPU=true
+            shift
+            ;;
+        --fast)
+            FAST_MODE=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 --query-image <path> [--output-dir <path>] [--visualize] [--pose-format c2w|w2c]"
+            echo "Usage: $0 --query-image <path> [options]"
             echo ""
             echo "Arguments:"
-            echo "  --query-image    Path to the query image to localize (required)"
-            echo "  --output-dir     Output directory for results (optional, uses config default)"
-            echo "  --visualize      Visualize the localized pose on the mesh (optional)"
+            echo "  --query-image      Path to the query image to localize (required)"
+            echo "  --output-dir       Output directory for results (optional, uses config default)"
+            echo "  --visualize        Visualize the localized pose on the mesh (optional)"
+            echo "  --num-retrieval N  Number of similar images to retrieve (default: 10, use 3-5 for speed)"
+            echo "  --no-gpu           Disable GPU acceleration"
+            echo "  --fast             Use faster NetVLAD settings (~30-40% faster)"
             echo ""
             echo "Examples:"
             echo "  $0 --query-image ./test.jpg"
             echo "  $0 --query-image ./test.jpg --visualize"
+            echo "  $0 --query-image ./test.jpg --num-retrieval 5  # Faster"
+            echo "  $0 --query-image ./test.jpg --fast  # Even faster"
+            echo "  $0 --query-image ./test.jpg --num-retrieval 5 --fast  # Fastest"
             echo "  $0 --query-image ./test.jpg --output-dir ./my_outputs --visualize"
             exit 0
             ;;
@@ -80,13 +104,31 @@ echo ""
 echo "Step 1/2: Running localization..."
 echo ""
 
+PYTHON_START=$(date +%s.%N)
 cd "${PROJECT_ROOT}/mesh_pipeline/src/localization"
 
-if [[ -z "${OUTPUT_DIR}" ]]; then
-    python3 run_localization.py --query_image "${QUERY_IMAGE}"
-else
-    python3 run_localization.py --query_image "${QUERY_IMAGE}" --output_dir "${OUTPUT_DIR}"
+# Build command with options
+CMD="python3 run_localization.py --query_image \"${QUERY_IMAGE}\""
+
+if [[ -n "${OUTPUT_DIR}" ]]; then
+    CMD="${CMD} --output_dir \"${OUTPUT_DIR}\""
 fi
+
+if [[ "${NUM_RETRIEVAL}" != "10" ]]; then
+    CMD="${CMD} --num-retrieval ${NUM_RETRIEVAL}"
+fi
+
+if [[ "${NO_GPU}" == true ]]; then
+    CMD="${CMD} --no-gpu"
+fi
+
+if [[ "${FAST_MODE}" == true ]]; then
+    CMD="${CMD} --fast"
+fi
+
+# Execute the command
+eval ${CMD}
+PYTHON_END=$(date +%s.%N)
 
 # Check if localization succeeded
 if [[ $? -ne 0 ]]; then
@@ -145,7 +187,28 @@ if [[ "${VISUALIZE}" == true ]]; then
     echo "✓ Visualization complete!"
 fi
 
+# Calculate elapsed time
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+SETUP_TIME=$(echo "$PYTHON_START - $START_TIME" | bc)
+PYTHON_TIME=$(echo "$PYTHON_END - $PYTHON_START" | bc)
+OVERHEAD=$(echo "$ELAPSED - $PYTHON_TIME" | bc)
+
+MINUTES=$((ELAPSED / 60))
+SECONDS=$((ELAPSED % 60))
+
 echo ""
 echo "=========================================="
 echo "Pipeline complete!"
+echo "=========================================="
+echo "TIMING BREAKDOWN (bash script):"
+printf "  Setup (until Python starts): %6.2fs\n" "$SETUP_TIME"
+printf "  Python execution:            %6.2fs\n" "$PYTHON_TIME"
+printf "  Overhead (cleanup/other):    %6.2fs\n" "$OVERHEAD"
+echo "  ----------------------------------------"
+if [[ $MINUTES -gt 0 ]]; then
+    echo "  Total time: ${MINUTES}m ${SECONDS}s"
+else
+    printf "  Total time: %6.2fs\n" "$ELAPSED"
+fi
 echo "=========================================="

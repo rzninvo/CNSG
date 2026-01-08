@@ -143,3 +143,8 @@ In the Habitat conda environment (`conda activate habitat`, if not active):
 cd habitat-sim
 python examples/mr_viewer.py  # you can specify --dataset and --scene, otherwise the default is selected 
 ```
+
+
+## Docker container lamar
+cd mesh_pipeline/third_party/lamar-benchmark
+docker build --target lamar -t lamar:lamar -f Dockerfile ./

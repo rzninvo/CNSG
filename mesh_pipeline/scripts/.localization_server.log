@@ -1,0 +1,22 @@
+[2026-01-08 18:33:51] INFO: Initializing localization server...
+[2026-01-08 18:33:51] INFO: ✓ Configuration loaded
+[2026-01-08 18:33:51] INFO: ✓ NavVis data: /home/riccardo/Projects/CNSG-2/CNSG/mesh_pipeline/data/navvis_2022-02-06_12.55.11
+[2026-01-08 18:33:51] INFO: ✓ Using persistent Docker container: lamar-localization-service
+[2026-01-08 18:33:51] INFO: ✓ Server initialized in 0.02s
+[2026-01-08 18:33:51] INFO: Ready to accept localization requests!
+[2026-01-08 18:33:51] INFO: Starting server on 127.0.0.1:5555
+ * Serving Flask app 'localization_server'
+ * Debug mode: off
+[2026-01-08 18:33:51] INFO: [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5555
+[2026-01-08 18:33:51] INFO: [33mPress CTRL+C to quit[0m
+[2026-01-08 18:33:59] INFO: 127.0.0.1 - - [08/Jan/2026 18:33:59] "GET /health HTTP/1.1" 200 -
+[2026-01-08 18:33:59] INFO: Processing localization request:
+[2026-01-08 18:33:59] INFO:   Query image: /home/riccardo/Projects/CNSG-2/CNSG/image_hall_eth.jpeg
+[2026-01-08 18:33:59] INFO:   Num retrieval: 3
+[2026-01-08 18:33:59] INFO:   Fast mode: True
+[2026-01-08 18:33:59] INFO:   GPU: True
+[2026-01-08 18:33:59] INFO: Executing localization...
+[2026-01-08 18:34:12] WARNING: Could not parse pose values: could not convert string to float: '-0.609219717967825,'
+[2026-01-08 18:34:12] INFO: ✓ Localization completed in 13.32s (total: 13.34s)
+[2026-01-08 18:34:12] INFO: 127.0.0.1 - - [08/Jan/2026 18:34:12] "POST /localize HTTP/1.1" 200 -

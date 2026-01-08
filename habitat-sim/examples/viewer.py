@@ -385,6 +385,11 @@ class HabitatSimInteractiveViewer(Application):
         except Exception as e:
             logger.warning(f"Could not compute object bbox: {e}")
             return [[0, 0, 0], [0, 0, 0]]
+        
+    def print_agent_state(self) -> None:
+        agent = self.sim.get_agent(self.agent_id)
+        agent_state = agent.get_state()
+        print(f"Agent State: pos: {agent_state.position}, rot: {agent_state.rotation}")
 
     def print_semantic_objects_info(self) -> None:
         """
@@ -723,6 +728,10 @@ class HabitatSimInteractiveViewer(Application):
             # Print bounding boxes and object info for validation
             logger.info("Command: printing semantic objects bounding boxes")
             self.print_semantic_objects_info()
+
+        elif key == pressed.A:
+            logger.info("Command: print agent state")
+            self.print_agent_state()
 
         elif key == pressed.TAB:
             # NOTE: (+ALT) - reconfigure without cycling scenes
@@ -1362,13 +1371,15 @@ if __name__ == "__main__":
     # optional arguments
     parser.add_argument(
         "--scene",
-        default="./data/test_assets/scenes/simple_room.glb",
+        # default="./data/test_assets/scenes/simple_room.glb",
+        default="./data/scene_datasets/HGE/HGE.basis.glb",
         type=str,
         help='scene/stage file to load (default: "./data/test_assets/scenes/simple_room.glb")',
     )
     parser.add_argument(
         "--dataset",
-        default="default",
+        # default="default",
+        default="data/scene_datasets/HGE.scene_dataset_config.json",
         type=str,
         metavar="DATASET",
         help='dataset configuration file to use (default: "default")',

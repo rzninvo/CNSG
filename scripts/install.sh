@@ -73,16 +73,16 @@ conda activate habitat
 log_info "Installing Python requirements for habitat-sim..."
 pip install -r requirements.txt
 
-# Install system dependencies (Linux only)
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    log_info "Installing system dependencies (requires sudo)..."
-    sudo apt-get update || true
-    sudo apt-get install -y --no-install-recommends \
-        libjpeg-dev libglm-dev libgl1-mesa-glx libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev
-    log_success "System dependencies installed"
-else
-    log_warning "Not on Linux, skipping apt-get dependencies. Please install them manually if needed."
-fi
+# # Install system dependencies (Linux only)
+# if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+#     log_info "Installing system dependencies (requires sudo)..."
+#     sudo apt-get update || true
+#     sudo apt-get install -y --no-install-recommends \
+#         libjpeg-dev libglm-dev libgl1-mesa-glx libegl1-mesa-dev mesa-utils xorg-dev freeglut3-dev
+#     log_success "System dependencies installed"
+# else
+#     log_warning "Not on Linux, skipping apt-get dependencies. Please install them manually if needed."
+# fi
 
 # Build habitat-sim with bullet physics
 log_info "Building habitat-sim with bullet physics (this may take a while)..."
@@ -123,6 +123,26 @@ conda activate CNSG-meshing
 log_info "Installing Python requirements for mesh pipeline..."
 pip install -r requirements.txt
 log_success "Mesh pipeline requirements installed"
+
+log_info "Installing additional Python packages..."
+read -r -p "Install Python/conda audio & TTS packages? [Y/n]: " _install_tts
+if [[ -z "${_install_tts}" || "${_install_tts,,}" == "y" || "${_install_tts,,}" == "yes" ]]; then
+    pip install PySide6 SpeechRecognition gTTS pyttsx3 || log_warning "pip install of TTS/audio packages failed"
+    conda install -c conda-forge pyaudio alsa-plugins jack speex -y || log_warning "conda install of audio packages failed"
+
+    log_info "Installing additional system dependencies (requires sudo)..."
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update || true
+        sudo apt-get install -y espeak || log_warning "apt-get install espeak failed"
+        log_success "espeak installed (or attempted)"
+    else
+        log_warning "apt-get not found — please install 'espeak' manually if needed."
+    fi
+
+    log_success "Additional packages installed (or attempted)"
+else
+    log_info "Skipping audio/TTS package installation"
+fi
 
 # Download data
 log_info "Downloading mesh pipeline data..."
@@ -187,6 +207,8 @@ else
     log_warning "Skipping segmentation pipeline."
     echo -e "You can run it later with: ${YELLOW}bash mesh_pipeline/scripts/run_segmentation_pipeline.sh${NC}"
 fi
+
+# install some usefull libraries
 
 # Deactivate conda env
 conda deactivate

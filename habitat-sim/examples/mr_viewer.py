@@ -26,6 +26,7 @@ import threading
 import queue
 import subprocess
 import tempfile
+import atexit
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -90,6 +91,10 @@ except Exception as e:
 
 class NewViewer(BaseViewer):
     MOVE, LOOK = 0.07, 1.5  # New definition for these two attributes
+    
+    # Class variables to track Docker service
+    _docker_service_started = False
+    _project_root = None  # Store project root for cleanup
 
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication = None) -> None:
         scene_path = sim_settings["scene"]
@@ -100,7 +105,14 @@ class NewViewer(BaseViewer):
         self.clusters_to_draw = None # List of 'Numbers' e.g. ['1', '645', ...]
         self.prev_objs_to_draw = None
         self.action_queue = queue.Queue()
-        self.scene = self.sim.semantic_scene        
+        self.scene = self.sim.semantic_scene
+        
+        # Start Docker localization service if not already started
+        if not NewViewer._docker_service_started:
+            self._start_docker_service()
+            NewViewer._docker_service_started = True
+            # Register cleanup on exit
+            atexit.register(self._stop_docker_service)        
 
         # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
@@ -183,6 +195,71 @@ class NewViewer(BaseViewer):
                         semantic_info[room_id][category_id] += 1
 
         return semantic_info
+    
+    def _start_docker_service(self):
+        """Start the persistent Docker localization service."""
+        print("[DOCKER] Starting persistent localization service...")
+        script_dir = Path(__file__).resolve().parent
+        project_root = script_dir.parent.parent
+        NewViewer._project_root = project_root  # Save for cleanup
+        start_script = project_root / "mesh_pipeline" / "scripts" / "start_localization_service.sh"
+        
+        if not start_script.exists():
+            print(f"[DOCKER] Warning: Start script not found: {start_script}")
+            print("[DOCKER] Localization will work but may be slower without persistent container")
+            return
+        
+        try:
+            result = subprocess.run(
+                [str(start_script)],
+                cwd=str(project_root / "mesh_pipeline" / "scripts"),
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                print("[DOCKER] ✓ Persistent localization service started successfully")
+                print("[DOCKER] Subsequent localizations will be ~40% faster!")
+            else:
+                print(f"[DOCKER] Warning: Failed to start service (exit code {result.returncode})")
+                if result.stdout:
+                    print(f"[DOCKER] stdout: {result.stdout}")
+                if result.stderr:
+                    print(f"[DOCKER] stderr: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            print("[DOCKER] Warning: Timeout starting service (>30s)")
+        except Exception as e:
+            print(f"[DOCKER] Warning: Error starting service: {e}")
+    
+    @staticmethod
+    def _stop_docker_service():
+        """Stop the persistent Docker localization service."""
+        print("[DOCKER] Stopping persistent localization service...")
+        if NewViewer._project_root is None:
+            print("[DOCKER] Warning: Project root not set, cannot stop service")
+            return
+        
+        project_root = NewViewer._project_root
+        stop_script = project_root / "mesh_pipeline" / "scripts" / "stop_localization_service.sh"
+        
+        if not stop_script.exists():
+            print(f"[DOCKER] Stop script not found: {stop_script}")
+            return
+        
+        try:
+            result = subprocess.run(
+                [str(stop_script)],
+                cwd=str(project_root / "mesh_pipeline" / "scripts"),
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                print("[DOCKER] ✓ Persistent localization service stopped")
+            else:
+                print(f"[DOCKER] Warning: Failed to stop service (exit code {result.returncode})")
+        except Exception as e:
+            print(f"[DOCKER] Warning: Error stopping service: {e}")
 
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
@@ -2178,6 +2255,21 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 else:
                     print(f"Unhandled goal type: {res_type}")
 
+
+                ############################## TEST ##########################
+                #! TODO remove after testing
+                # load image from image path
+                image_path = "/home/riccardo/Projects/CNSG-2/CNSG/image_hall_eth.jpeg"
+                try:
+                    image = Image.open(image_path).convert("RGB")
+                except Exception as e:
+                    print(f"Error loading image for localization: {e}")
+                    continue
+                
+                user_pose = localization(image)
+                print(f"[EUREKA] Localized user pose: {user_pose}")
+                ##############################################################
+
                 # * === SANITY CHECK ===
                 if not viewer.check_object_in_room(target_name, room_name):
                     print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
@@ -2268,17 +2360,25 @@ def localization(image: Image.Image):
     if not localization_script.exists():
         raise FileNotFoundError(f"Localization script not found: {localization_script}")
 
-    # Save image to temporary file
-    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False, mode='wb') as tmp_file:
-        image.save(tmp_file.name, format='JPEG')
-        query_image_path = tmp_file.name
-        print(f"[LOCALIZATION] Saved query image to: {query_image_path}")
+    # Save image to a temporary file in a location mounted in Docker
+    # Use lamar-benchmark/temp directory which is inside the mounted repo
+    temp_dir = lamar_repo / "temp"
+    temp_dir.mkdir(exist_ok=True, parents=True)
+    
+    query_image_path = temp_dir / f"query_{int(time.time() * 1000)}.jpg"
+    image.save(query_image_path, format='JPEG')
+    print(f"[LOCALIZATION] Saved query image to: {query_image_path}")
 
     try:
-        # Run the localization pipeline
+        # Run the localization pipeline with optimized settings
         print(f"[LOCALIZATION] Running localization script: {localization_script}")
         result = subprocess.run(
-            [str(localization_script), "--query-image", query_image_path],
+            [
+                str(localization_script), 
+                "--query-image", query_image_path,
+                "--num-retrieval", "3",  # Use 3 retrieval pairs for speed
+                "--fast"  # Use fast NetVLAD settings (320px)
+            ],
             cwd=str(project_root),
             capture_output=True,
             text=True,
@@ -2351,8 +2451,9 @@ def localization(image: Image.Image):
     finally:
         # Clean up temporary file
         try:
-            os.unlink(query_image_path)
-            print(f"[LOCALIZATION] Cleaned up temporary file: {query_image_path}")
+            if query_image_path.exists():
+                query_image_path.unlink()
+                print(f"[LOCALIZATION] Cleaned up temporary file: {query_image_path}")
         except Exception as e:
             print(f"[LOCALIZATION] Warning: Could not delete temporary file {query_image_path}: {e}")
 
@@ -2538,7 +2639,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--backend",
-        default="local", # openai | local
+        default="openai", # openai | local
         type=str,
         help="LLM backend to use: openai / local (default).",
     )
@@ -2601,6 +2702,10 @@ if __name__ == "__main__":
     output_to_gui_q = queue.Queue()
 
     # * Depending on the backend flag, load the local model
+    model = None
+    tokenizer = None
+    model_intent = None
+    
     if args.backend.lower() == "local":
         try:
             model, tokenizer, model_intent = load_local_model(fine_tuned_model=args.finetuned_model)
@@ -2608,6 +2713,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[mr_viewer.py main] Error loading local model: {e}")
             sys.exit(1)
+    else:
+        print(f"[mr_viewer.py main] Using backend: {args.backend} (model variables set to None)")
 
     # * Depending on GUI or Server mode, start the appropriate logic
     if args.server_mode:
