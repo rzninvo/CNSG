@@ -10,5 +10,3 @@ opencv-python
 pyyaml
 scikit-learn
 gdown
-openai
-peft

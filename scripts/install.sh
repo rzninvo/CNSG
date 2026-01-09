@@ -124,25 +124,6 @@ log_info "Installing Python requirements for mesh pipeline..."
 pip install -r requirements.txt
 log_success "Mesh pipeline requirements installed"
 
-log_info "Installing additional Python packages..."
-read -r -p "Install Python/conda audio & TTS packages? [Y/n]: " _install_tts
-if [[ -z "${_install_tts}" || "${_install_tts,,}" == "y" || "${_install_tts,,}" == "yes" ]]; then
-    pip install PySide6 SpeechRecognition gTTS pyttsx3 || log_warning "pip install of TTS/audio packages failed"
-    conda install -c conda-forge pyaudio alsa-plugins jack speex -y || log_warning "conda install of audio packages failed"
-
-    log_info "Installing additional system dependencies (requires sudo)..."
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update || true
-        sudo apt-get install -y espeak || log_warning "apt-get install espeak failed"
-        log_success "espeak installed (or attempted)"
-    else
-        log_warning "apt-get not found — please install 'espeak' manually if needed."
-    fi
-
-    log_success "Additional packages installed (or attempted)"
-else
-    log_info "Skipping audio/TTS package installation"
-fi
 
 # Download data
 log_info "Downloading mesh pipeline data..."
