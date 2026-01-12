@@ -491,7 +491,9 @@ class NewViewer(BaseViewer):
         
         self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q)
 
-    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None):
+    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None):
+        #! NOTE Estract goal pose begins
+        _time_start_extract_goal = time.time()
         if len(candidate_goals) == 0:
             return
         if len(candidate_goals) == 1:
@@ -528,6 +530,13 @@ class NewViewer(BaseViewer):
 
         if goal_pos.y < 2.0:
             goal_pos.y = 0.163378  # Adjust height
+        
+        
+        #! NOTE Estract goal pose end
+        _time_extract_goal = time.time() - _time_start_extract_goal
+
+        #! NOTE Pathfinding begins
+        _time_start_pathfinding = time.time()
         frames = self.shortest_path(sim, goal_pos, target_name)
 
         if len(frames) == 0: 
@@ -559,14 +568,33 @@ class NewViewer(BaseViewer):
             print("No path frames generated, aborting navigation.")
             return
         floor_number = viewer.get_floor_from_room(room_name=room_name)
+        #! NOTE Pathfinding ends
+        _time_pathfinding = time.time() - _time_start_pathfinding
         model = _LOCAL_MODEL #! TODO set this in the generate_path_description call
         tokenizer = _LOCAL_TOKENIZER #! TODO set this in the generate_path_description call
-        instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number) # dry run = not llm_enabled # to allow instructions but not user input menagement
+
+        instructions, clusters_to_draw, _time_landmarks, _time_generation = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number)
         self.set_clusters_to_draw(clusters_to_draw)
 
         print("\n--- GENERATED DESCRIPTION ---\n")
         print(instructions)
         output_q.put(instructions)
+        #! NOTE pipeline ends
+        # -> PRINT PROFILING INFO
+        print("\n--- PROFILING INFO ---")
+        if profiling_times:
+            print(f"User classification: {profiling_times.get('user_classification', 0):.4f}s")
+            _time_goal = _time_extract_goal + profiling_times.get('goal_extraction', 0)
+            print(f"Total goal+pose extraction: {_time_goal:.4f}s")
+        print(f"Pathfinding: {_time_pathfinding:.4f}s")
+        print(f"Landmarks extraction: {_time_landmarks:.4f}s")
+        print(f"Instructions generation: {_time_generation:.4f}s")
+        total_time = _time_extract_goal + _time_pathfinding + _time_landmarks + _time_generation
+        if profiling_times:
+            total_time += profiling_times.get('pipeline', 0)
+        print(f"Total time: {total_time:.4f}s")
+        print("---\n")
+        
 
     def get_closest_object_position(self, target_pos, target_name="", room_name="", max_count=5) -> List[mn.Vector3]:
         """
@@ -2055,6 +2083,8 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
     while True:
         try:
             user_input = input_q.get()
+            #! NOTE pipeline begins
+            _time_start_pipeline = time.time()
             print("Received user input:", user_input)
             if not user_input:
                 continue
@@ -2076,7 +2106,9 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 #     print("Error parsing input without LLM. Please use 'object/room' format.")
                 #     continue
             else: 
-                try:           
+                try:  
+                    #! NOTE user_classification begins
+                    _time_start_user_classification = time.time()
                     response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
                 except Exception as e:
                     print("Error getting response from LLM:", e)
@@ -2113,6 +2145,11 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 else:
                     print(f"Unhandled goal type: {res_type}")
 
+                #! NOTE user_classification ends
+                _time_user_classification = time.time() - _time_start_user_classification
+
+                #! NOTE goal_estraction begins
+                _time_start_goal_extraction = time.time()
                 # * === SANITY CHECK ===
                 if not viewer.check_object_in_room(target_name, room_name):
                     print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
@@ -2124,9 +2161,18 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 
 
                 candidate_goals = [(room_name, target_name)]
-                viewer.action_queue.put((viewer.start_navigation, (viewer.sim, candidate_goals, user_input, output_q), {}))
-                # output_q.put(f"Generating navigation instructions...")
+                #! NOTE goal_estraction ends
+                _time_goal_extraction = time.time() - _time_start_goal_extraction
 
+                #! NOTE start_navigation begins
+                _time_pipeline = time.time() - _time_start_pipeline
+                profiling_times = {
+                    'user_classification': _time_user_classification,
+                    'goal_extraction': _time_goal_extraction,
+                    'pipeline': _time_pipeline
+                }
+                viewer.action_queue.put((viewer.start_navigation, (viewer.sim, candidate_goals, user_input, output_q, profiling_times), {}))
+                # output_q.put(f"Generating navigation instructions...")
 
 
         except EOFError:
@@ -2242,7 +2288,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--backend",
-        default="local", # openai
+        default="openai", # openai
         type=str,
         help="LLM backend to use: openai / local (default).",
     )
@@ -2306,7 +2352,9 @@ if __name__ == "__main__":
             print(f"[mr_viewer.py main] Error loading local model: {e}")
             sys.exit(1)
 
-
+    model = None
+    tokenizer = None
+    model_intent = None
     logic_thread = threading.Thread(
         target=user_input_logic_loop,
         args=(viewer, input_from_gui_q, output_to_gui_q, model, tokenizer, model_intent),
