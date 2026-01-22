@@ -1,0 +1,102 @@
+{
+  "default": {
+    "extraction": {
+      "name": "superpoint",
+      "hloc": {
+        "model": {
+          "name": "superpoint",
+          "nms_radius": 3,
+          "max_keypoints": 2048
+        },
+        "preprocessing": {
+          "grayscale": true,
+          "resize_max": 1024
+        }
+      }
+    },
+    "retrieval": {
+      "name": "netvlad",
+      "hloc": {
+        "model": {
+          "name": "netvlad"
+        },
+        "preprocessing": {
+          "resize_max": 640
+        }
+      }
+    },
+    "matching": {
+      "name": "superglue",
+      "hloc": {
+        "model": {
+          "name": "superglue",
+          "weights": "outdoor",
+          "sinkhorn_iterations": 5
+        }
+      }
+    },
+    "pairs_map": {
+      "num_pairs": 10,
+      "filter_frustum": {
+        "do": true
+      },
+      "filter_pose": {
+        "do": true,
+        "num_pairs_filter": 250
+      }
+    },
+    "pairs_loc": {
+      "num_pairs": 10
+    }
+  },
+  "fast": {
+    "extraction": {
+      "name": "superpoint",
+      "hloc": {
+        "model": {
+          "name": "superpoint",
+          "nms_radius": 3,
+          "max_keypoints": 1024
+        },
+        "preprocessing": {
+          "grayscale": true,
+          "resize_max": 640
+        }
+      }
+    },
+    "retrieval": {
+      "name": "netvlad",
+      "hloc": {
+        "model": {
+          "name": "netvlad"
+        },
+        "preprocessing": {
+          "resize_max": 320
+        }
+      }
+    },
+    "matching": {
+      "name": "superglue",
+      "hloc": {
+        "model": {
+          "name": "superglue",
+          "weights": "outdoor",
+          "sinkhorn_iterations": 3
+        }
+      }
+    },
+    "pairs_map": {
+      "num_pairs": 5,
+      "filter_frustum": {
+        "do": true
+      },
+      "filter_pose": {
+        "do": true,
+        "num_pairs_filter": 100
+      }
+    },
+    "pairs_loc": {
+      "num_pairs": 5
+    }
+  }
+}
