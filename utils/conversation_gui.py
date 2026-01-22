@@ -33,8 +33,6 @@ except Exception as e:
     print(f"Text-to-Speech (TTS) support not available (pip install gTTS playsound). Error: {e}")
     TTS_AVAILABLE = False
 
-
-
 class ModernGui(QWidget):
     """
     Modern chat GUI.
@@ -154,7 +152,7 @@ class ModernGui(QWidget):
                 font-weight: bold;
                 font-size: 11pt;
             }
-                         
+
             QPushButton:hover { background-color: #3AA0FF; }
             
             QScrollBar:vertical {
@@ -178,7 +176,7 @@ class ModernGui(QWidget):
             QScrollBar::sub-page:vertical {
                 background: none;
             }
-                           
+
             #micButton {
                 border-radius: 20px; 
                 padding: 0px;        
@@ -320,7 +318,6 @@ class ModernGui(QWidget):
 
         if self.is_listening:
             # --- INTERRUPT/CANCEL CURRENT RECORDING ---
-            print("[GUI] Mic interrupt clicked.")
             self._reset_mic_ui()
         
         else:

@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Generate a grounded path description from sequential JSON observations."""
+"""
+Generate a grounded path description from sequential JSON observations.
+
+This script reads a set of JSON files representing consecutive frames along a path.
+Each frame contains detected objects and optional spatial relationships. The frames
+are analysed in order to extract the most relevant landmarks, favouring objects at
+a comfortable mid-range distance and ignoring structural elements such as walls or
+floors.
+
+For each frame, a short summary of key objects and spatial relations is built and
+combined into a prompt for a language model. The model is instructed to produce a
+single, concise navigation-style description that helps a listener retrace the path,
+using only the observed landmarks and without inventing details.
+
+The script can either:
+- print the generated prompt for inspection (dry-run), or
+- call the OpenAI Chat API and write the resulting description to a text file.
+"""
 
 from __future__ import annotations
 
@@ -263,7 +280,6 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     # NDC coordinates: x in [-1, 1] (left to right), y in [-1, 1] (bottom to top)
     ndc_x = cluster.get("ndc_x")
     ndc_y = cluster.get("ndc_y")
-    # print("NDC coordinates for", cluster_str_id, ":", ndc_x, ndc_y)
     
     if ndc_x is not None and ndc_y is not None:
         # Position detection with NDC coordinates (screen space)
@@ -288,8 +304,7 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
         else:
             direction = f"{vert}-{horiz}"
         
-        # position = f"(relative position: {direction}), (distance: {distance_bucket(cluster.get('distance_from_camera'))})"
-        position = f"(relative position: {direction})" #! TODO removed distance
+        position = f"(relative position: {direction})"
     else:
         # Fallback if NDC not available
         direction = "unknown"
@@ -299,8 +314,7 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     room = cluster.get("room", "").strip()
     floor_number = cluster.get("floor_number")
     if room and floor_number is not None:
-        # position += f", (room: {room}), (floor: {floor_number})"
-        position += f", (room: {room})" #! NOTE removed floor
+        position += f", (room: {room})"
 
     return f"{cluster_str_id} [{position}]"
 
@@ -338,7 +352,6 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
                 cluster_room = cluster.get("room", "").lower()
                 if cluster_room == target_room.lower():
                     cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object in the target room
-            # cluster["priority_score"] = 9999.0 # * Set the highest priority for the target object
         if label in IGNORED_LABELS or not cluster_str_id or cluster_str_id == "":
             continue
         candidates.append(cluster)
@@ -357,7 +370,6 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
 def extract_relations(
     relationships: Iterable[Dict[str, Any]], limit: int = 2
 ) -> List[str]:
-    # TODO -> need to have better relations
     def natural_direction(relation: str) -> str:
         # Converts relation labels to natural expressions
         table = {
@@ -418,7 +430,6 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
         turn_direction = frame.get("turn_direction")
 
         phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name, target_room)
-        
             
         # clusters_to_draw = {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...}
         current_room = frame.get("current_room", {})
@@ -449,7 +460,7 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
                 clusters_to_draw[cluster_str_id] = obj_str_ids
             
             if target_name and target_name in cluster_str_id.lower() and cluster_room.lower() == target_room.lower():
-                target_found = True #! NOTE added, check if this works better than before
+                target_found = True
         
 
         
@@ -461,7 +472,6 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
         if current_room_name not in rooms_visited_names and "unknown" not in current_room_name.lower():
             rooms_visited.append(current_room)
 
-    # print("All collected IDs:", raw_ids)
     return summaries, clusters_to_draw, rooms_visited
 
 import re
@@ -482,9 +492,6 @@ def clean_text_from_ids(text: str) -> str:
 def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visited, num_clusters_per_frame: int = 2) -> str:
     
     observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
-
-    # Rooms visited in order: \n{', '.join(rooms_visited)}
-
 
     visited_room_strings = []
     for room in rooms_visited:
@@ -642,9 +649,6 @@ def few_shot_examples() -> str:
 
 
 def generate_description(user_prompt: str, model = None, tokenizer = None) -> str:
-
-    
-    
     if model is None and tokenizer is None:
         system_prompt = """
             You are a navigation assistant helping the user locate a target object inside a building.
@@ -672,7 +676,7 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
 
             You will then receive a user question and the list of observations from the path, as well as the rooms visited in order. Imagine you are moving from the starting room to the target location, and provide clear path instructions.
         """
-        system_prompt += few_shot_examples() #! NOTE added few shot examples only for OpenAI API (out of memory issues with local model)
+        system_prompt += few_shot_examples()
     
     else:
         system_prompt = """
@@ -703,10 +707,7 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
             Imagine you are moving from the starting room to the target location, and provide clear path instructions.
         """
 
-    # print("System prompt:\n", system_prompt)
     user_prompt = " ".join(user_prompt.split())
-    print("User prompt:\n", user_prompt)
-
     messages = [
         {
             "role": "system",
@@ -719,8 +720,6 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
     ]
 
     # adjust the user prompt removing newlines and extra spaces
-
-
     if COLLECT_DATA:
         with open("data_collection.jsonl", "a") as f:
             # write only the user message for data collection
@@ -728,8 +727,6 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
             
     
     if model == None or tokenizer == None:
-
-        print("[INFO] Generating description using OpenAI ChatGPT API...")
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise SystemExit("OPENAI_API_KEY environment variable is not set.")
@@ -774,10 +771,7 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
 
         generated = outputs[0][input_ids.shape[-1]:]
         response = tokenizer.decode(generated, skip_special_tokens=True).strip()
-        print("[LOCAL MODEL] Generated response:", response)
         return response
-    
-
 
 # * Used as API
 def generate_path_description(
@@ -803,18 +797,15 @@ def generate_path_description(
         rooms_visited.append({"name": room_name, "floor_number": floor_number})
     prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame)
 
-    print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
     if dry_run: 
         return None, clusters_to_draw
 
     if model == None or tokenizer == None:
-        print("[generate_path_description] - Using OpenAI backend for description generation.")
         description = generate_description(prompt)
     else:
-        print("[generate_path_description] - Using Local LLM backend for description generation.")
         description = generate_description(prompt, model, tokenizer)
 
-    draw_all_clusters = False #! TODO set to false to visualize only clusters mentioned by the LLM
+    draw_all_clusters = False
     if draw_all_clusters:
         clusters_to_draw_final = clusters_to_draw
     else:
@@ -822,7 +813,6 @@ def generate_path_description(
         for cluster_str_id in clusters_to_draw:
             if cluster_str_id in description:
                 clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
-    print("\nDescription before cleaning:", description)
     
     description = " ".join(description.split())
     if COLLECT_DATA:
@@ -833,6 +823,3 @@ def generate_path_description(
     description = clean_text_from_ids(description)
 
     return description, clusters_to_draw_final
-
-
-
