@@ -1,159 +1,198 @@
-# Conversational Indoor Navigation (Mixed Reality Project, ETH/UZH)
+# 🧭 Landmark-Based Conversational Indoor Navigation
 
-## 🧭 Overview
+A **mixed-reality indoor navigation system** that generates **human-like, landmark-grounded navigation instructions** from a **single RGB image and a natural-language query**.
 
-This project aims to develop a **conversational, landmark-based navigation assistant** for **smart glasses**.  
-Unlike traditional Vision-and-Language Navigation (VLN) systems that output low-level actions (turn left, go forward),  
-our goal is to generate **natural, human-like verbal guidance** grounded in 3D indoor environments such as those from the **Replica** and **Matterport3D** datasets.
-
-The assistant should describe paths using **recognizable landmarks** ("walk past the sofa and enter the kitchen") and support **interactive dialogue**,  
-allowing users to ask for clarifications when instructions are unclear (“I don’t see the red chair—can you guide me differently?”).
-
-Ultimately, this system will serve as a prototype for **smart-glass–based navigation**—bridging spatial reasoning, natural language, and 3D perception.
+This project was developed as part of the **Mixed Reality course (ETH Zurich / University of Zurich)** and focuses on practical, deployable indoor navigation rather than abstract VLN benchmarks.
 
 ---
 
-## 🧩 Project Objectives
+## ✨ Key Features
 
-- Build a **Habitat-based VLN environment** that supports arbitrary start–goal navigation inside indoor scans.  
-- Extract **landmark-rich routes** between two points in a 3D scene.  
-- Generate **LLM-based natural language instructions** describing these routes.  
-- Develop a **conversational layer** to handle user feedback and rephrase instructions dynamically.  
-- Integrate results into a **demo app** showing both 3D visualization (avatar perspective) and voice-based interaction.
-
----
-
-## 🧱 Current Pipeline
-
-### 1. Scene Loading (Habitat-Sim / Habitat-Lab)
-- Load indoor environments from **Replica** or **Matterport3D** datasets.
-- Generate a **navigable mesh** and enable semantic rendering.
-- Access 3D scene information: RGB, depth, and semantic labels.
-
-### 2. Path Generation
-- Given arbitrary **start** and **goal** coordinates, compute the **shortest path** using Habitat’s `ShortestPath` API.
-- Optionally sample intermediate waypoints for route segmentation.
-
-### 3. Landmark Extraction
-- Query semantic annotations around each waypoint.
-- Identify nearby objects, room types, or architectural features.
-- Build a **landmark graph** representing rooms, connections, and salient visual anchors.
-
-### 4. Route Graph Representation
-- Encode the route as a graph:
-  ```json
-  {
-    "nodes": [
-      {"id":0, "room":"living room", "landmarks":["sofa","lamp"]},
-      {"id":1, "room":"hallway", "landmarks":["painting","door"]},
-      {"id":2, "room":"kitchen", "landmarks":["fridge","table"]}
-    ],
-    "edges": [[0,1],[1,2]]
-  }
-
-* This serves as the input context for the language model.
-
-### 5. Language Instruction Generation
-
-* Translate the route graph into **natural, landmark-centric navigation instructions** using an LLM.
-* Two generation modes:
-
-  1. **Template-based:** rule-based phrasing (“Walk past the [landmark] and enter the [room]”).
-  2. **Prompted LLM-based:** a large language model (e.g., GPT, Mistral) conditioned on the route graph.
-
-### 6. Conversational Layer (Interactive Dialogue)
-
-* Maintain conversational memory.
-
-* Allow user clarifications:
-
-  > “I don’t see the painting.”
-  > “Okay, after the sofa, look for the white door on your right.”
-
-* The LLM adapts phrasing and focus dynamically using spatial context.
-
-### 7. Visualization & Demo
-
-* Visualize navigation path and avatar movement in **Unity** or **Unreal Engine**.
-* Connect to iPad or AR glasses for voice input/output.
+- 📷 **Single-image user localization** in a reconstructed indoor environment
+- 🧭 **Geometric path planning** with collision-free trajectories
+- 🏷️ **Semantic landmark extraction** from perceptual observations
+- 🗣️ **Concise, human-oriented navigation instructions**
+- 🧠 **Lightweight on-device language model** (LoRA fine-tuned)
+- 📊 **Quantitative evaluation + user study**
 
 ---
 
-## 🔍 Technical Architecture
+## 🧠 Motivation
+
+Indoor navigation differs fundamentally from outdoor navigation: GPS is unreliable, maps are incomplete, and humans rely heavily on **local visual landmarks** rather than metric distances.
+
+Most Vision-and-Language Navigation (VLN) systems:
+
+- output low-level actions (_turn left, move forward_), or
+- generate abstract, verbose instructions poorly aligned with human intuition.
+
+**Our goal** is to generate navigation instructions the way _people_ naturally do:
+
+> _“Walk past the sofa, then turn right at the stairs.”_
+
+---
+
+## 🏗️ System Overview
+
+**Input**
+
+- A single RGB image captured by the user
+- A natural-language navigation query (e.g. _"How do I get to room HG E 3?"_)
+
+**Output**
+
+- Step-by-step navigation instructions grounded in **visible landmarks**
 
 ```
-┌──────────────────────────────┐
-│  Scene Loader (Habitat)      │
-│  - Replica / Matterport3D    │
-└─────────────┬────────────────┘
-              │
-              ▼
-   ┌──────────────────────────┐
-   │  Path & Landmark Module  │
-   │  - A* planner            │
-   │  - Semantic extraction   │
-   └────────────┬─────────────┘
-                │
-                ▼
-   ┌──────────────────────────┐
-   │  Route Graph Builder     │
-   │  - Nodes: landmarks      │
-   │  - Edges: connections    │
-   └────────────┬─────────────┘
-                │
-                ▼
-   ┌──────────────────────────┐
-   │  LLM Instruction Engine  │
-   │  - Template / LLM prompts│
-   │  - Conversational loop   │
-   └────────────┬─────────────┘
-                │
-                ▼
-   ┌──────────────────────────┐
-   │  Visualization / Demo    │
-   │  - Avatar / 3D path      │
-   │  - Speech interface      │
-   └──────────────────────────┘
+User Image + Query
+↓
+User Localization (2D–3D)
+↓
+Path Planning (Habitat-Sim)
+↓
+Landmark Extraction
+↓
+Instruction Generation (LLM)
 ```
 
 ---
 
-## 🧠 Related Work & References
+## 📍 User Localization
 
-Our design builds on several key works in Vision-and-Language Navigation and embodied instruction generation:
+The user is localized from a **single RGB image** using image-based localization against a pre-built 3D reconstruction:
 
-| Paper                                                                                      | Description                                                                                                       |
-| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| **[VLN-CE (Krantz et al.)](https://github.com/jacobkrantz/VLN-CE)**                        | Habitat-based continuous VLN benchmark. Provides environment setup, navigation API, and pretrained baselines.     |
-| **[NaVid-VLN (Zhang et al., RSS 2024)](https://github.com/jzhzhang/NaVid-VLN-CE)**         | Video-based VLN agent that predicts next steps from egocentric view; useful for integrating smart-glasses vision. |
-| **[StreamVLN (InternRobotics, 2025)](https://github.com/InternRobotics/StreamVLN)**        | Streaming vision-language navigation framework for continuous video input and real-world deployment.              |
-| **[Habitat-Sim / Habitat-Lab (Meta AI)](https://github.com/facebookresearch/habitat-sim)** | Simulator and API for embodied navigation, supporting Replica and Matterport3D datasets.                          |
-| **[Replica Dataset](https://github.com/facebookresearch/Replica-Dataset)**                 | High-fidelity indoor scenes with semantic annotations used for navigation and spatial reasoning.                  |
+- Local feature extraction
+- Image retrieval
+- 2D–3D correspondence matching
+- 6-DoF pose estimation (PnP + RANSAC)
 
----
-
-## 🚧 Planned Extensions
-
-* **LoRA fine-tuning** of the instruction LLM on landmark-rich navigation data (WP3).
-* **Speech interface** integration for voice queries and responses.
-* **Comparative evaluation** between rule-based, LLM-based, and hybrid instruction systems.
-* **User study** on clarity and spatial alignment of generated navigation cues.
+The estimated pose initializes the user inside the simulated environment and serves as the start point for navigation.
 
 ---
 
-## 🧑‍💻 Contributors
+## 🧭 Path Planning
 
-* **Riccardo Bianco**
-* **Francesco Bondi**
-* **Roham Zendehdel Nobari**
-* **Shaurya Kishore Panwar**
-* **Fatemeh Sadat Daneshmand**
+Given the localized user pose and a normalized goal representation, the system computes a **collision-free path** using Habitat-Sim’s planning module.
 
-Supervised by: *Mahdi Rad, Gabriele Goletto, and Kate Jaroslavceva*
-Mixed Reality Project – ETH Zurich / University of Zurich (Fall 2025)
+The resulting trajectory is represented as a sequence of waypoints and acts as the geometric backbone of the navigation pipeline.
+
+---
+
+## 🏷️ Landmark Extraction
+
+To ground instructions in perception:
+
+1. The path is densified into viewpoints
+2. At each viewpoint, the simulator provides RGB, depth, and semantic labels
+3. Visible objects are clustered into **persistent semantic landmarks**
+4. A saliency score filters non-informative objects
+
+This produces a **temporally ordered sequence of landmarks** describing what the user is expected to see along the route.
+
+---
+
+## 🗣️ Instruction Generation
+
+Navigation instructions are generated from:
+
+- the target destination
+- the high-level path structure (turns, transitions)
+- the ordered landmark observations
+
+The output is **concise, fluent, and spatially grounded**, explicitly referencing visible landmarks and spatial relations.
+
+---
+
+## 🧠 Lightweight Language Model
+
+Instruction generation runs on a **lightweight local language model**, adapted via **LoRA fine-tuning**:
+
+- ✅ No cloud dependency
+- ✅ Low GPU memory footprint
+- ✅ Suitable for on-device deployment
+
+Despite its small size, the fine-tuned model achieves instruction quality comparable to large proprietary models.
+
+---
+
+## 📊 Experimental Evaluation
+
+The system is evaluated in two settings:
+
+### 🏠 Simulated House Environment
+
+- Known start and goal
+- Isolates instruction generation quality
+
+### 🏫 HG Academic Building
+
+- Full pipeline evaluation
+- Real image-based localization
+- Web-based user interaction
+
+### 📐 Evaluation Metrics
+
+All instructions are rated on a 5-point Likert scale:
+
+- **Reference Object Quality**
+- **Spatial & Directional Correctness**
+- **Naturalness of Language**
+
+Landmark-grounded pipelines consistently outperform language-only baselines.
+
+---
+
+## ⏱️ Latency Analysis
+
+End-to-end latency remains suitable for interactive use:
+
+- Visual localization is the main bottleneck
+- Instruction generation adds minimal overhead
+- Local inference ensures stable latency and privacy
+
+---
+
+## 📱 Demo Application
+
+The system is integrated into a **web-based mobile interface** that allows users to:
+
+- Capture an image of their surroundings
+- Submit a navigation query
+- Receive step-by-step landmark-grounded instructions
+
+The same interface is used for user studies and evaluation.
+
+---
+
+## 🚧 Limitations & Future Work
+
+**Current limitations**
+
+- Single-image localization
+- Batch-style interaction
+
+**Planned extensions**
+
+- Real-time egocentric video localization
+- Continuous instruction refinement
+- Latency optimization
+- Deployment on AR glasses
+
+---
+
+## 👥 Contributors
+
+- Riccardo Bianco (ETH Zurich)
+- Francesco Bondi (ETH Zurich)
+- Roham Zendehdel Nobari (ETH Zurich)
+- Shaurya Kishore Panwar (University of Zurich)
+- Fatemeh Sadat Daneshmand (ZHAW Winterthur)
+
+**Supervised by**
+Mahdi Rad · Gabriele Goletto · Kate Jaroslavceva
 
 ---
 
 ## 📄 License
 
-MIT License © 2025 Conversational Indoor Navigation Team
+MIT License © 2025 Landmark-Based Conversational Indoor Navigation Team
