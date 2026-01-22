@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Generate a grounded path description from sequential JSON observations."""
+"""
+Generate a grounded path description from sequential JSON observations.
+
+This script reads a set of JSON files representing consecutive frames along a path.
+Each frame contains detected objects and optional spatial relationships. The frames
+are analysed in order to extract the most relevant landmarks, favouring objects at
+a comfortable mid-range distance and ignoring structural elements such as walls or
+floors.
+
+For each frame, a short summary of key objects and spatial relations is built and
+combined into a prompt for a language model. The model is instructed to produce a
+single, concise navigation-style description that helps a listener retrace the path,
+using only the observed landmarks and without inventing details.
+
+The script can either:
+- print the generated prompt for inspection (dry-run), or
+- call the OpenAI Chat API and write the resulting description to a text file.
+"""
 
 from __future__ import annotations
 
@@ -294,15 +311,20 @@ def write_output(output_path: Path, description: str) -> None:
 def main() -> None:
     args = parse_args()
 
+    # * Load and summarise frames
     frames = load_frames(args.input_dir, args.max_frames)
     scene_index = frames[0].get("scene_index")
     summaries = summarise_frames(frames)
+
+    # * Build prompt
     prompt = build_prompt(scene_index, summaries)
 
+    # * Dry run option
     if args.dry_run:
         print(prompt)
         return
 
+    # * Generate description (ChatGPT API call)
     description = generate_description(prompt, args.model)
     output_path = args.output_path or (args.input_dir / "path_description.txt")
     write_output(output_path, description)

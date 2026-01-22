@@ -92,7 +92,7 @@ except Exception as e:
 class NewViewer(BaseViewer):
     MOVE, LOOK = 0.07, 1.5  # New definition for these two attributes
     
-    # Class variables to track Docker service
+    # * Class variables to track Docker service
     _docker_service_started = False
     _project_root = None  # Store project root for cleanup
 
@@ -107,7 +107,7 @@ class NewViewer(BaseViewer):
         self.action_queue = queue.Queue()
         self.scene = self.sim.semantic_scene
         
-        # Start Docker localization service if not already started
+        # * Start Docker localization service if not already started
         if not NewViewer._docker_service_started:
             self._start_docker_service()
             NewViewer._docker_service_started = True
@@ -130,12 +130,6 @@ class NewViewer(BaseViewer):
             base_path, f"{scene_name.split('.')[0]}.semantic.txt"
         )
         map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
-        # room_object_file_path = os.path.join(base_path, "scene_room_object_occurences.json")
-
-        print(f"Base path: {base_path}")
-        print(f"Semantic path: {semantic_path}")
-        print(f"Map file path: {map_file_path}")
-        # print(f"Room-object occurences file path: {room_object_file_path}")
 
         if os.path.exists(map_file_path):
             with open(map_file_path, "r", encoding="utf-8") as f:
@@ -150,7 +144,6 @@ class NewViewer(BaseViewer):
             map_room_id_to_name=self.map_room_id_to_name,
             ignore_categories=ignore_categories,
         )
-        print(f"[PIPPO] Semantic info loaded: {semantic_info}")
 
         self.room_objects_occurences = semantic_info
 
@@ -158,16 +151,6 @@ class NewViewer(BaseViewer):
         self.cluster_cnt = 0
         self.clusters = self.cluster_objs(distance_thresh=0.5)
         self.rooms = self.get_rooms_from_sim()
-
-
-        print(self.sim.semantic_scene)
-        print("Objects:", self.sim.semantic_scene.objects)
-        print("Levels:", self.sim.semantic_scene.levels)
-        print("Regions:", self.sim.semantic_scene.regions)
-
-
-        # self.print_scene_semantic_info()
-
 
     def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
         semantic_info = {}
@@ -272,11 +255,11 @@ class NewViewer(BaseViewer):
                     print(f"\tObject id:{obj.id}, category:{obj.category.name()}," f" center:{self.compute_xyz_center(obj.obb)}")
 
     def compute_xyz_center(self, obj_obb):
-        # ottieni i vertici min e max dell'OBB
+        # Obtain the min and max vertices of the OBB
         vmin = (obj_obb.min() if callable(getattr(obj_obb, "min", None)) else obj_obb.min)
         vmax = (obj_obb.max() if callable(getattr(obj_obb, "max", None)) else obj_obb.max)
 
-        # accedi per indice (funziona sia per Vector3 di Magnum che per array-like)
+        # Access by index (works for both Magnum Vector3 and array-like)
         cx = 0.5 * (float(vmin[0]) + float(vmax[0]))
         cy = 0.5 * (float(vmin[1]) + float(vmax[1]))
         cz = 0.5 * (float(vmin[2]) + float(vmax[2]))
@@ -288,9 +271,6 @@ class NewViewer(BaseViewer):
         objs_rooms = {}
         rooms_floors = {} # 
         rooms_heights = []
-        print("[PLUTO] Regions in the scene: ", self.scene.regions)
-        for region in self.scene.regions:
-            print(f"[PLUTO] Region ID: {region.id}, Objects: {[obj.id for obj in region.objects]}")
         for region in self.scene.regions:
             region_id = region.id.strip("_").lower() if region and region.id else ""
             room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
@@ -315,15 +295,10 @@ class NewViewer(BaseViewer):
                 continue
 
             room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
+
             # Get the floor number based on the index of the room_height in the room_heights list
             floor_number = rooms_heights.index(room_height)  # Floors start at 0
-            # print(f"Room: {room_name}, Height: {room_height}, Floor number: {floor_number}")
             rooms_floors[room_name] = floor_number
-
-        # ^ Debug print per rooms_floors
-        # print("Rooms and their floor numbers:")
-        # for room, floor in rooms_floors.items():
-        #     print(f"Room: {room}, Floor: {floor}")
 
         if self.scene is not None:
             
@@ -338,7 +313,6 @@ class NewViewer(BaseViewer):
 
                 if obb is not None:
                     center = mn.Vector3(obb.center)
-                    print(f"[PLUTO] Processing Object ID: {sim_obj.id}, Center: {center}, Room: {room_name}")
                     half_extents = mn.Vector3(obb.half_extents)
                     rot_vec = mn.Vector4(obb.rotation)
                     rotation = mn.Quaternion(
@@ -383,7 +357,6 @@ class NewViewer(BaseViewer):
                         "room": room_name,
                         "floor_number": rooms_floors[room_name],
                     }
-                    print(f"[PLUTO] Object ID: {sim_obj.id}, Label: {objects[sim_obj.id]['label']}, Room: {room_name}, Floor: {rooms_floors[room_name]}, BBox World: {bbox_world}, Centroid World: {centroid_world}")
                 
         return objects
     
@@ -397,7 +370,6 @@ class NewViewer(BaseViewer):
             region_id = region.id.strip("_").lower() if region and region.id else ""
             room_name = self.map_room_id_to_name.get(region_id, {}).get("name", "unknown_room")
             
-            print(f"[PLUTO] Processing region_id: {region_id}, room_name: {room_name}")
             if "unknown" in room_name.lower():
                 continue 
             rooms[region_id] = {}
@@ -435,6 +407,7 @@ class NewViewer(BaseViewer):
                 else:
                     
                     room_bbox = rooms[region_id]["bbox_world"]
+
                     # update room bbox to include obj bbox
                     room_bbox[0][0] = min(room_bbox[0][0], obj_bbox[0][0])
                     room_bbox[0][1] = min(room_bbox[0][1], obj_bbox[0][1])
@@ -491,19 +464,19 @@ class NewViewer(BaseViewer):
         
         def bbox_distance(bbox_a, bbox_b):
             """
-            Calcola la distanza minima tra due bounding boxes 3D.
-            Ogni bbox è nel formato [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            Compute the minimum distance between two 3D bounding boxes.
+            Each bbox is in the format [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             """
-            # Estrai i punti min e max per entrambi i bbox
+            # Extract min and max points for both bboxes
             min_a, max_a = bbox_a[0], bbox_a[1]
             min_b, max_b = bbox_b[0], bbox_b[1]
             
-            # Calcola la distanza lungo ogni asse
+            # Compute distance along each axis
             dx = max(0, max(min_a[0] - max_b[0], min_b[0] - max_a[0]))
             dy = max(0, max(min_a[1] - max_b[1], min_b[1] - max_a[1]))
             dz = max(0, max(min_a[2] - max_b[2], min_b[2] - max_a[2]))
             
-            # Distanza euclidea 3D
+            # Euclidean distance in 3D
             return math.sqrt(dx*dx + dy*dy + dz*dz)
         
         def merge_obbs(obb_a, obb_b):
@@ -524,7 +497,7 @@ class NewViewer(BaseViewer):
             assigned = False
             obj = self.objects[obj_str_id]
             for cluster in clusters:
-                # Usa la distanza tra bbox invece che tra centroidi
+                # Use the distance between bboxes instead of centroids
                 if (bbox_distance(obj["bbox_world"], cluster["bbox_world"]) <= distance_thresh):
                     count_cluster = len(cluster["obj_str_ids"])
                     # centroid (world)
@@ -554,18 +527,12 @@ class NewViewer(BaseViewer):
                                  
         return clusters
         
-
-        
-
-
     def set_clusters_to_draw(self, clusters_to_draw: List[str]):
         self.clusters_to_draw = clusters_to_draw
-        # print(f"Updated clusters_to_draw: {self.clusters_to_draw}")  
 
     def start_local_llm_navigation(self, user_input, tokenizer, model_intent, output_q, user_pose=None):
         try:
             response = classify_user_intent_local(user_input, model_intent, tokenizer)
-            print("Response from Local LLM: ", response)
             if "start" not in response.lower():
                 # remove everything within < >
                 response = re.sub(r'<.*?>', '', response)
@@ -583,7 +550,6 @@ class NewViewer(BaseViewer):
         for room_name, target_name in candidate_goals:
             # perfrom sanity check
             if not viewer.check_object_in_room(target_name, room_name):
-                print(f"Sanity check failed: '{target_name}' not in '{room_name}'")
                 continue
             checked_candidate_goals.append((room_name, target_name))
 
@@ -598,10 +564,8 @@ class NewViewer(BaseViewer):
         if len(candidate_goals) == 0:
             return
         if len(candidate_goals) == 1:
-            print(f"Single candidate goal: {candidate_goals[0]}")
             room_name, target_name = candidate_goals[0]
         else:
-            print(f"Multiple candidate goals: {candidate_goals}")
             # if multiple candidate goals, pick the closest one to the agent
             agent_state = sim.get_agent(self.agent_id).get_state()
             agent_pos = agent_state.position
@@ -615,18 +579,14 @@ class NewViewer(BaseViewer):
                 if distance < min_distance:
                     min_distance = distance
                     closest_goal = (room_name, target_name)
-                    print(f"New closest goal: {closest_goal} at distance {min_distance:.2f}m")
 
             if closest_goal is None:
-                print("No valid goal positions found among candidate goals.")
                 return
             room_name, target_name = closest_goal
 
         goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
-        print(f"Navigating to: '{room_name}/{target_name}' at position {goal_pos}")
 
         if goal_pos is None:
-            print(f"Object '{target_name}' not found in the scene.")
             return
 
         if goal_pos.y < 2.0:
@@ -640,35 +600,27 @@ class NewViewer(BaseViewer):
             
             # Try each nearby object until we find a feasible path
             for i, nearby_pos in enumerate(closest_positions):
-                print(f"Trying nearby object {i+1}/{len(closest_positions)} at position {nearby_pos}")
                 if nearby_pos.y < 2.0:
                     nearby_pos.y = 0.163378  # Adjust height
                 frames = self.shortest_path(sim, nearby_pos, target_name, user_pose=user_pose)
                 if len(frames) > 0:
-                    print(f"Found feasible path to nearby object {i+1}")
                     break
 
         if len(frames) == 0:
             goal_pos = viewer.get_object_position(object_name=None, room_name=room_name)
-            print(f"Retrying navigation to room center at position {goal_pos}")
             if goal_pos is None:
-                print(f"Room '{room_name}' not found in the scene.")
                 return
             if goal_pos.y < 2.0:
                 goal_pos.y = 0.163378  # Adjust height
             frames = self.shortest_path(sim, goal_pos, target_name, user_pose=user_pose)
 
         if len(frames) == 0:
-            print("No path frames generated, aborting navigation.")
             return
         floor_number = viewer.get_floor_from_room(room_name=room_name)
-        model = _LOCAL_MODEL #! TODO set this in the generate_path_description call
-        tokenizer = _LOCAL_TOKENIZER #! TODO set this in the generate_path_description call
+        model = _LOCAL_MODEL 
+        tokenizer = _LOCAL_TOKENIZER 
         instructions, clusters_to_draw = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number) # dry run = not llm_enabled # to allow instructions but not user input menagement
         self.set_clusters_to_draw(clusters_to_draw)
-
-        print("\n--- GENERATED DESCRIPTION ---\n")
-        print(instructions)
         output_q.put(instructions)
 
     def get_closest_object_position(self, target_pos, target_name="", room_name="", max_count=5) -> List[mn.Vector3]:
@@ -695,9 +647,6 @@ class NewViewer(BaseViewer):
         # Sort by distance (ascending) and take the first max_count
         candidates.sort(key=lambda x: x[0])
         closest_positions = [pos for _, pos in candidates[:max_count]]
-        
-        if closest_positions:
-            print(f"Found {len(closest_positions)} nearby objects. Closest at distance {candidates[0][0]:.2f}m")
         
         return closest_positions
         
@@ -737,9 +686,6 @@ class NewViewer(BaseViewer):
                 agent_state.position = snapped_pos
                 agent_state.rotation = mn.Quaternion(rotation[0], rotation[1], rotation[2], rotation[3])
                 agent.set_state(agent_state)
-                print(f"[INFO] Agent moved to localized position: {snapped_pos}")
-                
-
 
             initial_agent_state_position = agent_state.position
             initial_agent_state_rotation = agent_state.rotation
@@ -749,13 +695,6 @@ class NewViewer(BaseViewer):
             path.requested_end = goal
             found_path = sim.pathfinder.find_path(path)
             path_points = path.points
-
-            print("Path found : " + str(found_path))
-            print("Start : " + str(path.requested_start))
-            print("Goal : " + str(path.requested_end))
-            print("Path points : " + str(path_points))
-
-
             save_images = False
 
             output_dir = "output"
@@ -796,7 +735,6 @@ class NewViewer(BaseViewer):
                             tangent_orientation_matrix = mn.Matrix4.look_at(point, point + tangent, np.array([0.0, 1.0, 0]))
                             tangent_orientation_q = mn.Quaternion.from_matrix(tangent_orientation_matrix.rotation())
                             agent_state.rotation = utils.quat_from_magnum(tangent_orientation_q)
-
                             
                             # Compute initial angle for eventual "Turn to your right / left" instructions
                             # Need to get the angle between the initial_rotation and agent_state.rotation around Y axis
@@ -820,8 +758,7 @@ class NewViewer(BaseViewer):
                             cross_product = mn.math.cross(initial_forward_proj, tangent_forward_proj)
                             # If Y component of cross product is positive, turn is to the left; if negative, to the right
                             angle_deg = math.degrees(angle)
-                            print(f"[PAPERINO] Angle to first path segment: {angle_deg:.2f} degrees")
-                            if 50.0 < angle_deg < 110.0: # TODO tune appropriately
+                            if 50.0 < angle_deg < 110.0: 
                                 if cross_product[1] > 0:
                                     turn_direction = "left"
                                 else:
@@ -830,8 +767,6 @@ class NewViewer(BaseViewer):
                                 turn_direction = "forward"
                             else:
                                 turn_direction = "behind"
-                            
-                            # print(f"\n\n[PAPERINO] Initial angle to first path segment: {math.degrees(angle):.2f} degrees ({turn_direction})\n\n")
 
                             agent = sim.get_agent(self.agent_id)
                             agent.set_state(agent_state)
@@ -867,9 +802,7 @@ class NewViewer(BaseViewer):
                                     T_world_sensor = mn.Matrix4.from_(rot_mn.to_matrix(), sensor_state.position)
 
                                     # add a field in frame data with the room name where the agent is located in that frame
-                                    current_room = self.get_room_from_position(agent_state.position) # TODO doesn't work -> try to fix it
-
-                                    # print(f"[PLUTO] Oggetti: {processed_objs}")
+                                    current_room = self.get_room_from_position(agent_state.position)
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{i:06d}",
@@ -883,10 +816,6 @@ class NewViewer(BaseViewer):
 
                                     # save frame data in a list of frames
                                     frames.append(frame_data)
-
-                                    # with open(f"output/frame_{i:06d}.json", "w") as f:
-                                    #     json.dump(frame_data, f, indent=2)
-                                    #     print(f"✅ Saved metadata: output/frame_{i:06d}.json")
                             else:
                                 print("No color sensor found in observations.")
             else: 
@@ -900,18 +829,18 @@ class NewViewer(BaseViewer):
 
     def get_room_from_position(self, position: mn.Vector3) -> str:
         """
-        Trova tutte le stanze che contengono la posizione e seleziona quella più probabile
-        basandosi sulla distanza dall'oggetto più vicino in quelle stanze.
+        Find all rooms that contain the position and select the most probable one
+        based on the distance to the nearest object in those rooms.
         """
         candidate_rooms = []
         
-        # Trova tutte le stanze candidate che contengono la posizione
+        # Find all candidate rooms that contain the position
         for room in self.rooms.values():
             bbox = room.get("bbox_world", None)
             if bbox is None:
                 continue
             
-            # Verifica se la posizione è dentro il bbox
+            # Check if the position is inside the bbox
             if (bbox[0][0] <= position[0] <= bbox[1][0] and
                 bbox[0][1] <= position[1] <= bbox[1][1] and
                 bbox[0][2] <= position[2] <= bbox[1][2]):
@@ -921,31 +850,31 @@ class NewViewer(BaseViewer):
         if not candidate_rooms:
             return None 
         
-        # Se c'è solo una stanza candidata, ritornala direttamente
+        # If there is only one candidate room, return it directly
         if len(candidate_rooms) == 1:
             return candidate_rooms[0]
         
-        # Se ci sono più stanze candidate, trova quella con l'oggetto più vicino
+        # If there are multiple candidate rooms, find the one with the nearest object
         min_distance = float('inf')
         selected_room = None
         
         for room in candidate_rooms:
             room_name = room.get("name", "unknown_room")
             
-            # Trova tutti gli oggetti in questa stanza
+            # Find all objects in this room
             for obj in self.objects.values():
                 if obj.get("room") == room_name:
                     obj_centroid = obj.get("centroid_world")
                     if obj_centroid is None:
                         continue
                     
-                    # Calcola la distanza dall'oggetto alla posizione
+                    # Calculate the distance from the object to the position
                     distance = np.linalg.norm(
                         np.array([position[0], position[1], position[2]]) - 
                         np.array(obj_centroid)
                     )
                     
-                    # Aggiorna la stanza selezionata se questo oggetto è più vicino
+                    # Update the selected room if this object is closer
                     if distance < min_distance:
                         min_distance = distance
                         selected_room = room
@@ -987,13 +916,11 @@ class NewViewer(BaseViewer):
         if key_points is not None:
             for point in key_points:
                 plt.plot(point[0], point[1], marker="o", markersize=10, alpha=0.8)
-        # plt.show(block=False)
 
         self.topdown_map_counter = getattr(self, "topdown_map_counter", 0)
         plt.savefig(f"output/topdown_map{self.topdown_map_counter}.png", bbox_inches="tight")
         self.topdown_map_counter += 1
         plt.close()
-        # logger.info(f"Saved: output/topdown_map.png")
 
     def display_sample(self, rgb_obs, semantic_obs=np.array([]), depth_obs=np.array([])):
         rgb_img = Image.fromarray(rgb_obs, mode="RGBA")
@@ -1020,18 +947,15 @@ class NewViewer(BaseViewer):
             ax.set_title(titles[i])
             plt.imshow(data)
 
-        # Inizializza contatore e cartella output solo la prima volta
+        # initialize counter and output folder only the first time
         if not hasattr(self, "output_counter"):
             self.output_counter = 0
-
-        # incrementa contatore
 
         filename = f"output/sample_output_{self.output_counter}.png"
         self.output_counter += 1
 
         plt.savefig(filename, bbox_inches="tight")
         plt.close()
-        # logger.info(f"Saved: {filename}")
     
     def extract_visible_objs(self, sim, observations) -> Optional[Dict[str, Any]]:
         """
@@ -1047,7 +971,6 @@ class NewViewer(BaseViewer):
         obj_num_ids, counts = np.unique(semantic, return_counts=True)
 
         visible_objects = {}
-
 
         for obj_num_id, pixel_count in zip(obj_num_ids, counts): # obj_num_id is an int
             if obj_num_id == 0 or pixel_count < 50:
@@ -1097,7 +1020,6 @@ class NewViewer(BaseViewer):
                 ndc_x, ndc_y = None, None
 
             obj_str_id = str(sim_obj.id)  # -> Eg. 'wall_clock_231'
-            # print(f"[MINNIE] Visible obj: id={obj_str_id}, label={label}, pixels={pixel_count}, centroid_world={centroid_world}, dist={dist:.2f}m")
             visible_objects[obj_str_id] = {
                 **obj, # "sim_obj", "obj_str_id", "obj_num_id", "label", "centroid_world", "bbox_world", "linear_size", "room", "floor_number"
                 "pixel_count": int(pixel_count),
@@ -1147,7 +1069,7 @@ class NewViewer(BaseViewer):
 
         def is_relation_valid(obj_label, relation):
             """
-            Verifica se una relazione è semanticamente valida per un dato oggetto.
+            Verify if a relation is semantically valid for a given object.
             """
             if obj_label not in SEMANTIC_RULES:
                 return True
@@ -1176,7 +1098,7 @@ class NewViewer(BaseViewer):
                 if size_a <= 0 or size_b <= 0:
                     continue
 
-                ratio = max(size_a, size_b) / min(size_a, size_b) # TODO why this? check
+                ratio = max(size_a, size_b) / min(size_a, size_b)
                 if ratio > size_ratio_thresh:
                     continue
 
@@ -1190,7 +1112,7 @@ class NewViewer(BaseViewer):
                 dx, dy, dz = diff
                 abs_dx, abs_dy, abs_dz = abs(dx), abs(dy), abs(dz)
 
-                # Calcola la relazione dominante
+                # Compute dominant relation
                 rel_ab = None
                 if (abs_dy > vertical_thresh and abs_dy > (abs_dx + abs_dz) / horizontal_bias):
                     rel_ab = "on_top_of" if dy > 0 else "beneath_of"
@@ -1199,8 +1121,8 @@ class NewViewer(BaseViewer):
                 else:
                     rel_ab = "in_front_of" if dz < 0 else "behind"
 
-                # Verifica la validità semantica per entrambi gli oggetti
-                # (obj_b è il "subject", obj_a è l'"object" nella relazione)
+                # Verify semantic validity for both objects
+                # (obj_b is the "subject", obj_a is the "object" in the relation)
                 if not is_relation_valid(obj_a["label"], rel_ab):
                     continue
 
@@ -1299,9 +1221,6 @@ class NewViewer(BaseViewer):
                 visible_cluster["linear_size"] = full_cluster["linear_size"]
                 visible_cluster["bbox_worlds"] = [full_cluster["bbox_world"]]
 
-
-
-        
         # 2. Finalize calculations and apply filter
         updated_visible_clusters = {}
 
@@ -1330,7 +1249,6 @@ class NewViewer(BaseViewer):
                 avg_ndc_y = None
             
             # Merge bounding boxes
-              
             def _merge_bboxes(bboxes):
                 """
                 Merges a list of bounding boxes (min_x, min_y, min_z, max_x, max_y, max_z)
@@ -1409,8 +1327,6 @@ class NewViewer(BaseViewer):
 
         if l in {"stairs", "stair", "step", "stairway"}:
             return "stairs"
-        
-        # TODO add more classes synonyms/groupings as needed
 
         return l
 
@@ -1487,7 +1403,7 @@ class NewViewer(BaseViewer):
 
                     cluster["linear_size"] += visible_obj.get("linear_size", 0.0) 
                     # track raw semantic ids merged
-                    cluster["obj_str_ids"].append(obj_str_id) # TODO check di questa porcata
+                    cluster["obj_str_ids"].append(obj_str_id)
                     assigned = True
                     break
 
@@ -1561,7 +1477,6 @@ class NewViewer(BaseViewer):
         # draw CPU/GPU usage data and other info to the app window
         mn.gl.default_framebuffer.bind()
         self.draw_text(self.render_camera.specification())
-        # self._draw_bbox_label_overlay()
 
         self.swap_buffers()
         Timer.next_frame()
@@ -1661,25 +1576,19 @@ class NewViewer(BaseViewer):
         """
         Draw axis-aligned bounding boxes for every semantic object.
         """
-        # print(f" _draw_object_bboxes called with objs_str_ids_to_draw: {objs_str_ids_to_draw}")
-        # clusters_to_draw: {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...} 
         scene = self.sim.semantic_scene
         if scene is None:
             return
-    
 
         objs_to_draw = []
 
-        clusters_to_draw = None #! TODO remove, testing
+        clusters_to_draw = None
 
         if clusters_to_draw is not None:
             for cluster_str_id, obj_str_ids in clusters_to_draw.items():
                 for obj_str_id in obj_str_ids: 
                     sim_obj = self.objects[obj_str_id]["sim_obj"]
                     objs_to_draw.append((sim_obj, cluster_str_id))
-            # if objs_to_draw != self.prev_objs_to_draw:
-                # for sim_obj, cluster_str_id in objs_to_draw:
-                #     print(f"Cluster {cluster_str_id} includes object ID {sim_obj.id}")
         else:
             for sim_obj in scene.objects:
                 objs_to_draw.append((sim_obj, sim_obj.id))     
@@ -1689,9 +1598,6 @@ class NewViewer(BaseViewer):
         target_labels = []
         max_boxes = 1000
         candidates = []
-
-
-
         
         self.prev_objs_to_draw = objs_to_draw
 
@@ -1732,18 +1638,14 @@ class NewViewer(BaseViewer):
             corners = [rotation.transform_vector(offset) + center for offset in corner_offsets]
 
             volume = max(8.0 * half_extents[0] * half_extents[1] * half_extents[2], 0.0)
-            # print(f"Object ID {obj.id} ('{label}') volume: {volume:.4f} m^3")
             candidates.append((volume, str_id, label, corners, center, rotation, half_extents))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
-        # print("Len candidates", len(candidates))
 
         edges = [(0, 1),(0, 2),(0, 4),(1, 3),(1, 5),(2, 3),(2, 6),(3, 7),(4, 5),(4, 6),(5, 7),(6, 7),]
 
         for (volume, str_id, label, corners, center, rotation, half_extents) in candidates[:max_boxes]:
             color = self._get_bbox_color(str_id)
-            # if objs_to_draw != self.prev_objs_to_draw:
-            #     print("Color", color)
 
             for edge in edges:
                 start = corners[edge[0]]
@@ -1786,7 +1688,6 @@ class NewViewer(BaseViewer):
             idx = obj_id % palette_len
         else:
             raise ValueError(f"Unsupported obj_id type: {type(obj_id)}")
-       
     
         rgb = palette[idx] / 255.0
         color = mn.Color4(float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
@@ -1850,18 +1751,6 @@ class NewViewer(BaseViewer):
         super().move_and_look(repetitions)
 
         self._process_queued_actions()  # process any queued actions from the other thread
-
-
-        #############
-        #! TODO remove
-        if self.cnt % 200 == 0:
-            # self.save_semantic_image()
-            # print agent position every 200 frames
-            # self.print_agent_state()
-            pass
-        self.cnt += 1
-
-        #################
         
     def _process_queued_actions(self):
         """Execute actions enqueued from other threads."""
@@ -2015,16 +1904,11 @@ class NewViewer(BaseViewer):
             {"role": "user", "content": user_input + "\n" + str(self.room_objects_occurences)},
         ]
 
-        print("[PIPPO]: "+str(self.room_objects_occurences))
-
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
-        print("Response from GPT:")
-        print(response.choices[0].message.content)
         return response.choices[0].message.content
     
     def get_rooms_objects(self, user_input):
         # This function retrieves the rooms and objects from the JSON file and prints them
-        print("Rooms and their objects:")
         room_norm_labels = ["living room", "kitchen", "bathroom", "bedroom", "dining room", "hallway", "office", "laundry room", "garage", "balcony", "garden", "entryway", "storage room", "closet", "pantry", "attic", "basement"]
 
         def get_norm_room_label(room_label: str) -> str:
@@ -2056,22 +1940,17 @@ class NewViewer(BaseViewer):
         for room in self.room_objects_occurences.keys():
             if room in user_input.lower():
                 candidate_rooms.append(room)
-                print("Direct match for room:", room)
                 break
         if candidate_rooms:
             best_candidate_room = candidate_rooms[0]
         else:
             best_candidate_room = None
             for room in self.room_objects_occurences.keys():
-                norm_room_name = get_norm_room_label(room) # altirmenti prova a normalizzare e poi cerca tutte le stanze con quella normalizzazione (ritornerà poi una lista)
-                print("Normalized room name:", norm_room_name)
+                norm_room_name = get_norm_room_label(room) # otherwise try to normalize and then search all rooms with that normalization (will return a list)
                 if norm_room_name in user_input.lower():
                     candidate_rooms.append(room)
         
         candidate_rooms = list(set(candidate_rooms))
-        print("Candidate rooms after normalization:", candidate_rooms)
-
-        # TODO se l'ogetto appare in più stanze ma l'utente ha specificato una stanza precisa --> da gestire
 
         candidate_objects = []
         for room, objs in self.room_objects_occurences.items():
@@ -2088,9 +1967,7 @@ class NewViewer(BaseViewer):
                         candidate_rooms.append(room)  # also add the room where the object was found
         
         candidate_rooms = list(set(candidate_rooms))
-        print("Candidate rooms:", candidate_rooms)
         candidate_objects = list(set(candidate_objects))
-        print("Candidate objects:", candidate_objects)
 
         returned_goals = []
         
@@ -2103,16 +1980,9 @@ class NewViewer(BaseViewer):
                     if candidate_object in objs_in_room:
                         if best_candidate_room is not None and room != best_candidate_room:
                             continue
-                        # if objs_in_room[candidate_object] == 1: # object occurs once in room
                         returned_goals.append((room, candidate_object))
-                        # else:
-                        #     returned_goals.append((room, None))  # object repeated in room
         
         return returned_goals
-
-                
-
-
 
 def get_goal_from_response(response: str) -> object:
     response_list = response.split(".", 1)
@@ -2150,7 +2020,6 @@ def get_goal_from_response(response: str) -> object:
         return {"type": "friendly_conversation", "message": content}
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
-
 
 def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
     """
@@ -2192,42 +2061,28 @@ def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
     response = tokenizer.decode(generated, skip_special_tokens=True).strip()
     return response
 
-
 def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: queue.Queue, model=None, tokenizer=None, model_intent=None):
     while True:
         try:
             user_input = input_q.get()
-            print("Received user input:", user_input)
             if not user_input:
                 continue
 
             local_llm_input = model is not None and tokenizer is not None and model_intent is not None
             # output_q.put("Processing your request...")
             if local_llm_input:
-                print("Using Local LLM for intent classification.")
                 # use the local model to parse the user input 
                 # if the user input is a navigation query, the output of the llm should be "navigation", otherwise the llm should return a friendly response
                 viewer.action_queue.put((viewer.start_local_llm_navigation, (user_input, tokenizer, model_intent, output_q), {}))
-                
-
-
-                # try:
-                #     target_name, room_name = user_input.split("/")[0].strip(), user_input.split("/")[1].strip()
-                #     output_q.put(f"Navigating to {room_name}/{target_name}...")
-                # except Exception as e:
-                #     print("Error parsing input without LLM. Please use 'object/room' format.")
-                #     continue
             else: 
                 try:           
                     response = viewer.get_response_LLM(user_input)  # * API Call to ChatGPT
                 except Exception as e:
                     print("Error getting response from LLM:", e)
                     continue
-                print("Response from ChatGPT: ", response)
                 goal_info = get_goal_from_response(
                     response
                 )  # * Handle response and distinguish cases
-                print("Handled Response: ", goal_info)
                 response = response.split(".", 1)[
                     1
                 ].strip()  # Remove numbering from response for user display
@@ -2249,26 +2104,10 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                     or res_type == "not_found"
                     or res_type == "friendly_conversation"
                 ):
-                    print(goal_info["message"])
                     output_q.put(response)
                     continue
                 else:
                     print(f"Unhandled goal type: {res_type}")
-
-
-                ############################## TEST ##########################
-                #! TODO remove after testing
-                # load image from image path
-                image_path = "/home/riccardo/Projects/CNSG-2/CNSG/image_hall_eth.jpeg"
-                try:
-                    image = Image.open(image_path).convert("RGB")
-                except Exception as e:
-                    print(f"Error loading image for localization: {e}")
-                    continue
-                
-                user_pose = localization(image)
-                print(f"[EUREKA] Localized user pose: {user_pose}")
-                ##############################################################
 
                 # * === SANITY CHECK ===
                 if not viewer.check_object_in_room(target_name, room_name):
@@ -2278,13 +2117,8 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                     print(f"Sanity check passed: '{target_name}' in '{room_name}'")
 
                 # * Query scene (and retrieve a point in the 3D space)
-
-
                 candidate_goals = [(room_name, target_name)]
                 viewer.action_queue.put((viewer.start_navigation, (viewer.sim, candidate_goals, user_input, output_q), {}))
-                # output_q.put(f"Generating navigation instructions...")
-
-
 
         except EOFError:
             break
@@ -2348,7 +2182,6 @@ def localization(image: Image.Image):
     Returns:
         dict: Dictionary with 'position' [x, y, z] and 'rotation' [qw, qx, qy, qz]
     """
-    print("[LOCALIZATION] Running localization pipeline...")
 
     # Get the project root (go up from habitat-sim/examples to CNSG)
     script_dir = Path(__file__).resolve().parent
@@ -2367,11 +2200,9 @@ def localization(image: Image.Image):
     
     query_image_path = temp_dir / f"query_{int(time.time() * 1000)}.jpg"
     image.save(query_image_path, format='JPEG')
-    print(f"[LOCALIZATION] Saved query image to: {query_image_path}")
 
     try:
         # Run the localization pipeline with optimized settings
-        print(f"[LOCALIZATION] Running localization script: {localization_script}")
         result = subprocess.run(
             [
                 str(localization_script), 
@@ -2386,12 +2217,7 @@ def localization(image: Image.Image):
         )
 
         if result.returncode != 0:
-            print(f"[LOCALIZATION] Error running localization script:")
-            print(f"[LOCALIZATION] stdout: {result.stdout}")
-            print(f"[LOCALIZATION] stderr: {result.stderr}")
             raise RuntimeError(f"Localization script failed with exit code {result.returncode}")
-
-        print(f"[LOCALIZATION] Localization script completed successfully")
 
         # Find and read the poses.txt file
         # Expected path: lamar-benchmark/outputs/pose_estimation/query_single/map/superpoint/superglue/netvlad-10/triangulation/single_image/poses.txt
@@ -2399,22 +2225,18 @@ def localization(image: Image.Image):
 
         # If not found at expected location, search for it
         if not poses_file.exists():
-            print(f"[LOCALIZATION] Poses file not found at expected location: {poses_file}")
-            print(f"[LOCALIZATION] Searching for poses.txt in outputs directory...")
 
             outputs_dir = lamar_repo / "outputs"
             if outputs_dir.exists():
                 found_poses = list(outputs_dir.rglob("poses.txt"))
                 if found_poses:
                     poses_file = found_poses[0]
-                    print(f"[LOCALIZATION] Found poses.txt at: {poses_file}")
                 else:
                     raise FileNotFoundError(f"Could not find poses.txt in {outputs_dir}")
             else:
                 raise FileNotFoundError(f"Outputs directory does not exist: {outputs_dir}")
 
         # Parse the poses.txt file
-        print(f"[LOCALIZATION] Reading poses from: {poses_file}")
         with open(poses_file, 'r') as f:
             lines = f.readlines()
 
@@ -2442,10 +2264,6 @@ def localization(image: Image.Image):
         if pose_data is None:
             raise RuntimeError(f"Could not parse valid pose from: {poses_file}")
 
-        print(f"[LOCALIZATION] Successfully localized!")
-        print(f"[LOCALIZATION] Position: {pose_data['position']}")
-        print(f"[LOCALIZATION] Rotation (quaternion): {pose_data['rotation']}")
-
         return pose_data
 
     finally:
@@ -2453,7 +2271,6 @@ def localization(image: Image.Image):
         try:
             if query_image_path.exists():
                 query_image_path.unlink()
-                print(f"[LOCALIZATION] Cleaned up temporary file: {query_image_path}")
         except Exception as e:
             print(f"[LOCALIZATION] Warning: Could not delete temporary file {query_image_path}: {e}")
 
@@ -2465,47 +2282,41 @@ class NavigationServer:
         self.model_intent = model_intent
         
         self.app = Flask(__name__)
-        CORS(self.app, resources={r"/*": {"origins": "*"}})  # Abilita CORS per tutte le origini
+        CORS(self.app, resources={r"/*": {"origins": "*"}}) # Allow all origins
         
         # Registra gli endpoint
         self.app.route('/process', methods=['POST'])(self.process_request)
         self.app.route('/health', methods=['GET'])(self.health_check)
     
     def health_check(self):
-        """Endpoint per verificare che il server sia attivo"""
+        """Endpoint to verify that the server is running"""
         return jsonify({"status": "ok", "message": "Navigation server is running"})
     
     def process_request(self):
         """
-        Gestisce le richieste POST con immagine e testo.
-        Formato atteso:
-        - FormData con 'image' (file) e 'instruction' (text)
-        OPPURE
-        - JSON con 'image' (base64) e 'instruction' (text)
+        Handles POST requests with image and text.
+        Expected format:
+        - FormData with 'image' (file) and 'instruction' (text)
+        OR
+        - JSON with 'image' (base64) and 'instruction' (text)
         """
         try:
-
-            # print the image_file and the instruction
-            # print(request.files['image'], "\n")
-            # print(request.form.get('instruction', ''))
-            # print(request.form.get('user_input', ''))
-            # print(request.form)
-            # Caso 1: FormData (come da webapp)
+            # Case 1: FormData (as from webapp)
             if 'image' in request.files:
                 image_file = request.files['image']
                 instruction = request.form.get('instruction', '')
                 
-                # Leggi l'immagine
+                # Read image file
                 image_bytes = image_file.read()
                 image = Image.open(BytesIO(image_bytes))
                 
-            # Caso 2: JSON con base64
+            # Case 2: JSON with base64
             elif request.is_json:
                 data = request.get_json()
                 image_b64 = data.get('image', '')
                 instruction = data.get('instruction', '')
                 
-                # Decodifica base64
+                # Decode base64
                 if image_b64.startswith('data:image'):
                     image_b64 = image_b64.split(',')[1]
                 image_bytes = base64.b64decode(image_b64)
@@ -2516,41 +2327,27 @@ class NavigationServer:
             if not instruction:
                 return jsonify({"error": "No instruction provided"}), 400
             
-            print(f"[SERVER] Received request: '{instruction}'")
-            print(f"[SERVER] Image size: {image.size}")
-            
-            # Salva l'immagine (opzionale, per debug)
+            # Save image (optional, for debugging)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             if not os.path.exists("client_images"):
                 os.makedirs("client_images")
             image.save(f"client_images/received_{timestamp}.jpg")
-            print(f"[SERVER] Saved received image as 'client_images/received_{timestamp}.jpg'")
-            print(f"[SERVER] Instruction: {instruction}")
 
-            # ! #####################
-            # ! NEED TO CALL LOCALIZATION SCRIPT (@SHAURYA)
-            # ! #####################
             user_pose = localization(image)
-            print(f"[SERVER] Localized position: {user_pose}")
-
-
-            # ! #####################################
             
-            # Esegui la pipeline di navigazione
-            print("[SERVER] Starting navigation process...")
+            # Run the navigation pipeline
             result_queue = queue.Queue()
             
-            # Metti l'azione nella coda del viewer #! NOTE this works only for local llm -> fix to make it work for both local and openai
+            # Put the action in the viewer's action queue
             self.viewer.action_queue.put((
                 self.viewer.start_local_llm_navigation,
                 (instruction, self.tokenizer, self.model_intent, result_queue, user_pose),
                 {}
             ))
             
-            # Attendi il risultato (con timeout)
+            # Wait for the result (with timeout)
             try:
-                result = result_queue.get(timeout=60)  # 60 secondi di timeout
-                print(f"[SERVER] Navigation result: {result}")
+                result = result_queue.get(timeout=60)  # 60 seconds of timeout
                 
                 return jsonify({
                     "status": "success",
@@ -2567,7 +2364,7 @@ class NavigationServer:
             return jsonify({"error": str(e)}), 500
     
     def run(self, host='0.0.0.0', port=5000):
-        """Avvia il server Flask"""
+        """Start the Flask server"""
         print(f"[SERVER] Starting navigation server on {host}:{port}")
         self.app.run(host=host, port=port, threaded=True)
 
@@ -2696,7 +2493,6 @@ if __name__ == "__main__":
     sim_settings["semantic_sensor"] = True
     sim_settings["depth_sensor"] = True
     # start the application
-    # HabitatSimInteractiveViewer(sim_settings).exec()
 
     input_from_gui_q = queue.Queue()
     output_to_gui_q = queue.Queue()
@@ -2735,7 +2531,7 @@ if __name__ == "__main__":
         print("[main] Launching server thread...")
         server_thread = threading.Thread(target=run_server, daemon=True)
         print("[main] Server thread started.")
-        # Avvia il server (bloccante)
+        # Start the server (blocking)
         try:
             print("[main] Running server...")
             server_thread.start()
