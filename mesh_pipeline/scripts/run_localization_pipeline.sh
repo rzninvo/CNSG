@@ -19,7 +19,6 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 QUERY_IMAGE=""
 OUTPUT_DIR=""
 VISUALIZE=false
-NUM_RETRIEVAL=10
 NO_GPU=false
 FAST_MODE=false
 
@@ -37,10 +36,6 @@ while [[ $# -gt 0 ]]; do
         --visualize)
             VISUALIZE=true
             shift
-            ;;
-        --num-retrieval)
-            NUM_RETRIEVAL="$2"
-            shift 2
             ;;
         --no-gpu)
             NO_GPU=true
@@ -64,9 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  $0 --query-image ./test.jpg"
             echo "  $0 --query-image ./test.jpg --visualize"
-            echo "  $0 --query-image ./test.jpg --num-retrieval 5  # Faster"
             echo "  $0 --query-image ./test.jpg --fast  # Even faster"
-            echo "  $0 --query-image ./test.jpg --num-retrieval 5 --fast  # Fastest"
             echo "  $0 --query-image ./test.jpg --output-dir ./my_outputs --visualize"
             exit 0
             ;;
@@ -112,10 +105,6 @@ CMD="python3 run_localization.py --query_image \"${QUERY_IMAGE}\""
 
 if [[ -n "${OUTPUT_DIR}" ]]; then
     CMD="${CMD} --output_dir \"${OUTPUT_DIR}\""
-fi
-
-if [[ "${NUM_RETRIEVAL}" != "10" ]]; then
-    CMD="${CMD} --num-retrieval ${NUM_RETRIEVAL}"
 fi
 
 if [[ "${NO_GPU}" == true ]]; then
