@@ -17,6 +17,20 @@ This project was developed as part of the **Mixed Reality course (ETH Zurich / U
 
 ---
 
+## 🛠️ Installation & Setup
+
+Please refer to the [SETUP.md](SETUP.md) for detailed installation instructions.
+
+**Quick Start:**
+
+```bash
+git clone https://github.com/rzninvo/CNSG.git
+cd CNSG
+bash scripts/install.sh
+```
+
+---
+
 ## 🧠 Motivation
 
 Indoor navigation differs fundamentally from outdoor navigation: GPS is unreliable, maps are incomplete, and humans rely heavily on **local visual landmarks** rather than metric distances.
