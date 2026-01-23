@@ -560,7 +560,7 @@ class NewViewer(BaseViewer):
             output_q.put("Could not find the specified object or room. Please provide more details.")
             return
         
-        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q, user_pose=user_pose)
+        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q)
 
     def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None):
         #! NOTE Estract goal pose begins
