@@ -562,8 +562,6 @@ class NewViewer(BaseViewer):
         
         self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q, user_pose=user_pose)
 
-    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, user_pose=None):
-
     def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None):
         #! NOTE Estract goal pose begins
         _time_start_extract_goal = time.time()

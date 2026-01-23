@@ -88,10 +88,17 @@ log_info "Installing habitat-lab..."
 pip install -e habitat-lab
 log_success "Habitat-lab installed"
 
+# Install Habitat-Sim requirements
+echo -e "\n${YELLOW}▶▶▶ Step 5: Installing Habitat-Sim Requirements ◀◀◀${NC}"
+cd "$ROOT_DIR/habitat-sim"
+log_info "Installing Python packages from habitat-sim requirements.txt..."
+pip install -r requirements.txt
+log_success "Habitat-sim requirements installed"
+
 # Install GUI and Audio dependencies
-echo -e "\n${YELLOW}▶▶▶ Step 5: Installing GUI and Audio Dependencies ◀◀◀${NC}"
+echo -e "\n${YELLOW}▶▶▶ Step 6: Installing GUI and Audio Dependencies ◀◀◀${NC}"
 log_info "Installing Python packages for GUI, speech recognition, and audio..."
-pip install PySide6 SpeechRecognition gTTS playsound
+pip install PySide6 SpeechRecognition gTTS playsound3
 
 log_info "Installing audio packages via conda..."
 conda install -c conda-forge pyaudio alsa-plugins jack speex -y
@@ -111,7 +118,7 @@ else
 fi
 
 # Download LoRA adapter weights
-echo -e "\n${YELLOW}▶▶▶ Step 6: Setting up LoRA Adapter Weights ◀◀◀${NC}"
+echo -e "\n${YELLOW}▶▶▶ Step 7: Setting up LoRA Adapter Weights ◀◀◀${NC}"
 cd "$ROOT_DIR"
 LORA_DIR="$ROOT_DIR/finetuning/phi3-mr-lora-fixed-v3"
 
@@ -131,7 +138,7 @@ else
 fi
 
 # Ask about HM3D dataset download
-echo -e "\n${YELLOW}▶▶▶ Step 7: Download HM3D Dataset (Optional) ◀◀◀${NC}"
+echo -e "\n${YELLOW}▶▶▶ Step 8: Download HM3D Dataset (Optional) ◀◀◀${NC}"
 echo -e "${BLUE}Do you want to download the HM3D dataset now?${NC}"
 echo -e "This requires a Matterport API token from:"
 echo -e "${YELLOW}https://my.matterport.com/settings/account/devtools${NC}"
