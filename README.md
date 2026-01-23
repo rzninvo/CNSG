@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="media/figures/logos/cvg_logo_colour-white.svg" alt="CVG Logo" height="80" style="margin: 0 30px"/>
-<img src="media/figures/logos/eth_logo_kurz_neg.png" alt="ETH Zurich Logo" height="80" style="margin: 0 30px"/>
-<img src="media/figures/logos/Microsoft-logo_rgb_c-gray.png" alt="Microsoft Logo" height="80" style="margin: 0 30px"/>
+<img src="media/figures/logos/cvg_logo_colour-white.svg" alt="CVG Logo" height="40" style="margin: 0 30px; vertical-align: middle"/>
+<img src="media/figures/logos/eth_logo_kurz_neg.png" alt="ETH Zurich Logo" height="80" style="margin: 0 30px; vertical-align: middle"/>
+<img src="media/figures/logos/Microsoft-logo_rgb_c-gray.png" alt="Microsoft Logo" height="100" style="margin: 0 30px; vertical-align: middle"/>
 
 # Landmark-Based Conversational Indoor Navigation
 
