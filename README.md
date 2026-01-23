@@ -292,7 +292,7 @@ Our evaluation demonstrates that landmark-grounded instruction generation signif
 ### Latency Analysis
 
 End-to-end latency profile:
-- **Visual localization**: Primary bottleneck (~2-5s)
+- **Visual localization**: Primary bottleneck (~8-11s)
 - **Path planning**: Minimal overhead (<0.5s)
 - **Landmark extraction**: Real-time (~0.3s)
 - **Instruction generation**: Negligible with local model (<1s)

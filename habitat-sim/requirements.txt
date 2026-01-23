@@ -18,3 +18,4 @@ flask-cors
 transformers
 huggingface_hub
 torch
+bitsandbytes
