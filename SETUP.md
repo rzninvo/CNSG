@@ -135,7 +135,14 @@ python -m habitat_sim.utils.datasets_download --username <api-token-id> --passwo
 
 ---
 
-## Run a Scene from HM3D
+## Run the House Environment from HM3D
+
+Install the libraries required for the GUI rendering, Speech recognition and Audio 
+```bash
+pip install PySide6 SpeechRecognition gTTS playsound
+conda install -c conda-forge pyaudio alsa-plugins jack speex
+sudo apt-get install espeak
+```
 
 In the Habitat conda environment (`conda activate habitat`, if not active):
 
@@ -143,3 +150,22 @@ In the Habitat conda environment (`conda activate habitat`, if not active):
 cd habitat-sim
 python examples/mr_viewer.py  # you can specify --dataset and --scene, otherwise the default is selected 
 ```
+
+To use the pipeline using openai as backend an API KEY is required. Inside the habitat-sim folder run:
+
+```bash
+cd ..
+echo OPENAI_API_KEY=<API-KEY> > .env
+```
+Changing the <API-KEY> with your API-KEY.
+
+To use the lightweight LLM as backend, with the base version or the finetuned one, you should run the file with these flags:
+
+
+```bash
+cd habitat-sim
+python examples/mr_viewer.py  --backend=local # for the base model
+python examples/mr_viewer.py  --backend=local --finetuned-model=True # for the finetuned model
+```
+
+It should download the model automatically the first time and load the next times.

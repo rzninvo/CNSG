@@ -8,7 +8,7 @@ import threading
 import os
 
 # Dependencies:
-# pip install PySide6 SpeechRecognition gTTS playsound
+# pip install PySide6 SpeechRecognition gTTS playsound3
 # conda install -c conda-forge pyaudio alsa-plugins jack speex
 # On Linux for TTS: sudo apt-get install espeak
 
@@ -25,12 +25,12 @@ except Exception:
 # Optional Text-to-Speech (TTS) support
 try:
     from gtts import gTTS
-    import playsound
+    import playsound3 as playsound
     TTS_AVAILABLE = True
 except Exception as e:
     gTTS = None
     playsound = None
-    print(f"Text-to-Speech (TTS) support not available (pip install gTTS playsound). Error: {e}")
+    print(f"Text-to-Speech (TTS) support not available (pip install gTTS playsound3). Error: {e}")
     TTS_AVAILABLE = False
 
 
@@ -92,7 +92,7 @@ class ModernGui(QWidget):
         self.speaker_button.setToolTip(
             "Toggle Text-to-Speech (TTS) (TTS is OFF)"
             if TTS_AVAILABLE
-            else "TTS not available (install gTTS, playsound)"
+            else "TTS not available (install gTTS, playsound3)"
         )
         self.speaker_button.clicked.connect(self._on_speaker_toggled)
         if not TTS_AVAILABLE:
