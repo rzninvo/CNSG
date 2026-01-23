@@ -335,22 +335,16 @@ The fine-tuned model is specifically optimized for generating concise, landmark-
 **Team Members**
 
 - [Riccardo Bianco](https://github.com/RiccardoBianco) (ETH Zurich)
-- [Francesco Bondi](https://github.com/FBondi) (ETH Zurich)
+- [Francesco Bondi](https://github.com/francescobondi02) (ETH Zurich)
 - [Roham Zendehdel Nobari](https://github.com/rzninvo) (ETH Zurich)
-- [Shaurya Kishore Panwar](https://github.com/shauryakp) (University of Zurich)
+- [Shaurya Kishore Panwar](https://github.com/KlrShaK) (University of Zurich)
 - [Fatemeh Sadat Daneshmand](https://github.com/fatemeh-sd) (ZHAW Winterthur)
 
 **Supervisors**
 
 [Mahdi Rad](https://www.microsoft.com/en-us/research/people/mahdirad/) · [Gabriele Goletto](https://www.microsoft.com/applied-sciences/people/gabriele-goletto) · [Kate Jaroslavceva](https://www.microsoft.com/en-us/research/people/jekatrinaj/)
 
-**Affiliated Institutions**
-
 <div align="center">
-
-**Computer Vision and Geometry Group** | ETH Zurich
-**Mixed Reality Lab** | University of Zurich
-**Microsoft Mixed Reality & AI Lab** | Zurich
 
 </div>
 
