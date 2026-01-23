@@ -2428,16 +2428,16 @@ if __name__ == "__main__":
     # optional arguments
     parser.add_argument(
         "--scene",
-        # default="./data/scene_datasets/hm3d/minival/00800-TEEsavR23oF/TEEsavR23oF.basis.glb",
-        default="./data/scene_datasets/HGE/HGE.basis.glb",
-
+        # default="./data/scene_datasets/HGE/HGE.basis.glb",
+        default="./data/scene_datasets/hm3d/minival/00800-TEEsavR23oF/TEEsavR23oF.basis.glb",
         type=str,
         help='scene/stage file to load (default: "./data/test_assets/scenes/simple_room.glb")',
     )
     parser.add_argument(
         "--dataset",
         # default dataset config: changed to local HGE dataset to auto-load semantics
-        default="data/scene_datasets/HGE.scene_dataset_config.json",
+        # default="data/scene_datasets/HGE.scene_dataset_config.json",
+        default="./data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json",
         type=str,
         metavar="DATASET",
         help='dataset configuration file to use (default: "default")',

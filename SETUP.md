@@ -4,96 +4,7 @@ Choose your installation path based on what you want to explore:
 
 ---
 
-# Option 1: ETH HG E Floor with Semantic Segmentation
-
-This installation is for exploring the **ETH HG E floor academic building** with full semantic segmentation capabilities.
-
-## Prerequisites
-
-- [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/) (Miniconda or Anaconda)
-- Git
-- Docker (for the localization pipeline)
-
-## Installation
-
-Run the automated installation script:
-
-```bash
-git clone https://github.com/rzninvo/CNSG.git
-cd CNSG
-bash scripts/install.sh
-```
-
-This script will:
-
-1. Initialize git submodules
-2. Create and configure the `habitat-source` conda environment
-3. Build and install habitat-sim with Bullet physics from source
-4. Install habitat-lab
-5. Create and configure the `CNSG-meshing` conda environment for the mesh pipeline
-6. Download required mesh data
-7. Optionally run the segmentation pipeline for ETH HG E floor
-
-### Environment Usage
-
-After installation, you'll have two conda environments:
-
-```bash
-# For Habitat-Sim built from source (ETH HG E floor)
-conda activate habitat-source
-
-# For Mesh Pipeline (3D reconstruction and segmentation)
-conda activate CNSG-meshing
-```
-
-### Docker Container for Localization
-
-The localization pipeline requires a Docker container:
-
-```bash
-cd mesh_pipeline/third_party/lamar-benchmark
-docker build --target lamar -t lamar:lamar -f Dockerfile ./
-```
-
-## Running the ETH HG E Floor Environment
-
-Activate the habitat-source environment and run the viewer:
-
-```bash
-conda activate habitat-source
-cd habitat-sim
-python examples/mr_viewer.py
-```
-
-Use **W/A/S/D** keys to move and arrow keys or mouse to look around. Press **K** to toggle semantic visualization.
-
-### Backend Options
-
-By default, the viewer uses OpenAI as the backend. You can choose different backends:
-
-**OpenAI Backend (default):**
-```bash
-# Create .env file with your API key in the project root
-echo "OPENAI_API_KEY=your_api_key_here" > .env
-python examples/mr_viewer.py --backend=openai
-```
-
-**Local Model (base):**
-```bash
-python examples/mr_viewer.py --backend=local
-```
-
-**Local Model (finetuned):**
-```bash
-# Requires LoRA adapter weights (see LoRA section below)
-python examples/mr_viewer.py --backend=local --finetuned-model=True
-```
-
-> **Important:** The `habitat-source` environment is specifically built for the ETH HG E floor with semantic segmentation. Do not use this environment with HM3D datasets.
-
----
-
-# Option 2: HM3D House with Finetuned Model
+# Option 1: HM3D House with Finetuned Model (Recommended)
 
 This installation is for exploring **HM3D house environments** with our finetuned language model. This is a simpler setup that installs Habitat-Sim from conda-forge (no building from source) and doesn't require the mesh pipeline or segmentation.
 
@@ -167,6 +78,95 @@ python examples/mr_viewer.py --backend=openai
 ```
 
 > **Important:** The `habitat-default` environment uses Habitat-Sim from conda-forge and is specifically for HM3D datasets. Do not use this environment with the ETH HG E floor scene.
+
+---
+
+# Option 2: ETH HG E Floor with Semantic Segmentation (Optional)
+
+This installation is for exploring the **ETH HG E floor academic building** with full semantic segmentation capabilities. This requires building Habitat-Sim from source and running a mesh processing pipeline.
+
+## Prerequisites
+
+- [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/) (Miniconda or Anaconda)
+- Git
+- Docker (for the localization pipeline)
+
+## Installation
+
+Run the automated installation script:
+
+```bash
+git clone https://github.com/rzninvo/CNSG.git
+cd CNSG
+bash scripts/install.sh
+```
+
+This script will:
+
+1. Initialize git submodules
+2. Create and configure the `habitat-source` conda environment
+3. Build and install habitat-sim with Bullet physics from source
+4. Install habitat-lab
+5. Create and configure the `CNSG-meshing` conda environment for the mesh pipeline
+6. Download required mesh data
+7. Optionally run the segmentation pipeline for ETH HG E floor
+
+### Environment Usage
+
+After installation, you'll have two conda environments:
+
+```bash
+# For Habitat-Sim built from source (ETH HG E floor)
+conda activate habitat-source
+
+# For Mesh Pipeline (3D reconstruction and segmentation)
+conda activate CNSG-meshing
+```
+
+### Docker Container for Localization
+
+The localization pipeline requires a Docker container:
+
+```bash
+cd mesh_pipeline/third_party/lamar-benchmark
+docker build --target lamar -t lamar:lamar -f Dockerfile ./
+```
+
+## Running the ETH HG E Floor Environment
+
+Activate the habitat-source environment and run the viewer with the HGE scene:
+
+```bash
+conda activate habitat-source
+cd habitat-sim
+python examples/mr_viewer.py --scene ./data/scene_datasets/HGE/HGE.basis.glb --dataset data/scene_datasets/HGE.scene_dataset_config.json
+```
+
+Use **W/A/S/D** keys to move and arrow keys or mouse to look around. Press **K** to toggle semantic visualization.
+
+### Backend Options
+
+By default, the viewer uses OpenAI as the backend. You can choose different backends:
+
+**OpenAI Backend (default):**
+```bash
+# Create .env file with your API key in the project root
+echo "OPENAI_API_KEY=your_api_key_here" > .env
+python examples/mr_viewer.py --scene ./data/scene_datasets/HGE/HGE.basis.glb --dataset data/scene_datasets/HGE.scene_dataset_config.json --backend=openai
+```
+
+**Local Model (base):**
+```bash
+python examples/mr_viewer.py --scene ./data/scene_datasets/HGE/HGE.basis.glb --dataset data/scene_datasets/HGE.scene_dataset_config.json --backend=local
+```
+
+**Local Model (finetuned):**
+```bash
+# Requires LoRA adapter weights (see LoRA section below)
+python examples/mr_viewer.py --scene ./data/scene_datasets/HGE/HGE.basis.glb --dataset data/scene_datasets/HGE.scene_dataset_config.json --backend=local --finetuned-model=True
+```
+
+> **Important:** The `habitat-source` environment is specifically built for the ETH HG E floor with semantic segmentation. Do not use this environment with HM3D datasets.
 
 ---
 
