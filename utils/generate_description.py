@@ -31,6 +31,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 from dotenv import load_dotenv
 import torch
+import time
 
 load_dotenv()
 
@@ -789,6 +790,8 @@ def generate_path_description(
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
     Does NOT write anything to disk.
     """
+    #! NOTE landmarks_extraction begins
+    _time_start_landmarks = time.time()
     frames = frames[:max_frames] if max_frames else frames
     num_clusters_per_frame = 2
     summaries, clusters_to_draw, rooms_visited = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name, target_room=room_name)
@@ -796,7 +799,12 @@ def generate_path_description(
     if room_name != "" and room_name not in current_room_names:
         rooms_visited.append({"name": room_name, "floor_number": floor_number})
     prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame)
+    #! NOTE landmarks_extraction ends
+    _time_landmarks = time.time() - _time_start_landmarks
 
+    #! NOTE generate description begins
+    _time_start_generation = time.time()
+    print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
     if dry_run: 
         return None, clusters_to_draw
 
@@ -822,4 +830,11 @@ def generate_path_description(
 
     description = clean_text_from_ids(description)
 
-    return description, clusters_to_draw_final
+    #! NOTE generate description ends
+    _time_generation = time.time() - _time_start_generation
+
+
+    return description, clusters_to_draw_final, _time_landmarks, _time_generation
+
+
+
