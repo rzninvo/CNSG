@@ -61,7 +61,9 @@ Indoor navigation differs fundamentally from outdoor navigation: GPS is unreliab
 
 <div align="center">
 
-https://github.com/user-attachments/assets/mr_final_demo.mp4
+
+https://github.com/user-attachments/assets/6b3f5116-117d-4b36-ab10-c9d678826362
+
 
 *End-to-end demonstration of the landmark-based navigation system in action*
 
