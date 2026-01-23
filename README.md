@@ -342,7 +342,7 @@ The fine-tuned model is specifically optimized for generating concise, landmark-
 
 **Supervisors**
 
-[Mahdi Rad](https://people.inf.ethz.ch/mrad/) · [Gabriele Goletto](https://gg22.me/) · [Kate Jaroslavceva](https://people.inf.ethz.ch/kjaroslavceva/)
+[Mahdi Rad](https://www.microsoft.com/en-us/research/people/mahdirad/) · [Gabriele Goletto](https://www.microsoft.com/applied-sciences/people/gabriele-goletto) · [Kate Jaroslavceva](https://www.microsoft.com/en-us/research/people/jekatrinaj/)
 
 **Affiliated Institutions**
 
