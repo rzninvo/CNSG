@@ -27,7 +27,7 @@ bash scripts/install.sh
 This script will:
 
 1. Initialize git submodules
-2. Create and configure the `habitat` conda environment
+2. Create and configure the `habitat-source` conda environment
 3. Build and install habitat-sim with Bullet physics from source
 4. Install habitat-lab
 5. Create and configure the `CNSG-meshing` conda environment for the mesh pipeline
@@ -39,8 +39,8 @@ This script will:
 After installation, you'll have two conda environments:
 
 ```bash
-# For Habitat-Sim (simulation and navigation)
-conda activate habitat
+# For Habitat-Sim built from source (ETH HG E floor)
+conda activate habitat-source
 
 # For Mesh Pipeline (3D reconstruction and segmentation)
 conda activate CNSG-meshing
@@ -57,10 +57,10 @@ docker build --target lamar -t lamar:lamar -f Dockerfile ./
 
 ## Running the ETH HG E Floor Environment
 
-Activate the habitat environment and run the viewer:
+Activate the habitat-source environment and run the viewer:
 
 ```bash
-conda activate habitat
+conda activate habitat-source
 cd habitat-sim
 python examples/mr_viewer.py
 ```
@@ -89,6 +89,8 @@ python examples/mr_viewer.py --backend=local
 python examples/mr_viewer.py --backend=local --finetuned-model=True
 ```
 
+> **Important:** The `habitat-source` environment is specifically built for the ETH HG E floor with semantic segmentation. Do not use this environment with HM3D datasets.
+
 ---
 
 # Option 2: HM3D House with Finetuned Model
@@ -112,7 +114,7 @@ bash scripts/install_hm3d.sh
 
 This script will:
 1. Initialize git submodules
-2. Create the `habitat` conda environment
+2. Create the `habitat-default` conda environment
 3. Install Habitat-Sim from conda-forge (auto-detects headless mode)
 4. Install Habitat-Lab
 5. Install GUI and audio dependencies
@@ -126,16 +128,16 @@ During installation, you'll be prompted to download the HM3D dataset. You'll nee
 If you skip this during installation, you can download it later:
 
 ```bash
-conda activate habitat
+conda activate habitat-default
 python -m habitat_sim.utils.datasets_download --username <api-token-id> --password <api-token-secret> --uids hm3d_minival_v0.2
 ```
 
 ## Running the HM3D House Environment
 
-Activate the habitat environment and run the viewer:
+Activate the habitat-default environment and run the viewer:
 
 ```bash
-conda activate habitat
+conda activate habitat-default
 cd habitat-sim
 python examples/mr_viewer.py --backend=local --finetuned-model=True
 ```
@@ -163,6 +165,8 @@ python examples/mr_viewer.py --backend=local
 echo "OPENAI_API_KEY=your_api_key_here" > .env
 python examples/mr_viewer.py --backend=openai
 ```
+
+> **Important:** The `habitat-default` environment uses Habitat-Sim from conda-forge and is specifically for HM3D datasets. Do not use this environment with the ETH HG E floor scene.
 
 ---
 

@@ -55,18 +55,18 @@ echo -e "\n${YELLOW}▶▶▶ Step 2: Setting up Conda Environment ◀◀◀${NC
 # Source conda
 eval "$(conda shell.bash hook)"
 
-# Check if habitat conda env exists
-if conda env list | grep -q "^habitat "; then
-    log_warning "Conda environment 'habitat' already exists. Skipping creation."
+# Check if habitat-default conda env exists
+if conda env list | grep -q "^habitat-default "; then
+    log_warning "Conda environment 'habitat-default' already exists. Skipping creation."
 else
-    log_info "Creating conda environment 'habitat' with Python 3.9 and cmake 3.14.0..."
-    conda create -n habitat python=3.9 cmake=3.14.0 -y
-    log_success "Conda environment 'habitat' created"
+    log_info "Creating conda environment 'habitat-default' with Python 3.9 and cmake 3.14.0..."
+    conda create -n habitat-default python=3.9 cmake=3.14.0 -y
+    log_success "Conda environment 'habitat-default' created"
 fi
 
-# Activate habitat environment
-log_info "Activating habitat environment..."
-conda activate habitat
+# Activate habitat-default environment
+log_info "Activating habitat-default environment..."
+conda activate habitat-default
 
 # Install Habitat-Sim from conda-forge
 echo -e "\n${YELLOW}▶▶▶ Step 3: Installing Habitat-Sim ◀◀◀${NC}"
@@ -168,7 +168,7 @@ echo "  Installation Complete!"
 echo "=========================================="
 echo -e "${NC}"
 echo -e "To run the HM3D house environment with the finetuned model:"
-echo -e "  1. Activate habitat environment: ${YELLOW}conda activate habitat${NC}"
+echo -e "  1. Activate habitat-default environment: ${YELLOW}conda activate habitat-default${NC}"
 echo -e "  2. Navigate to habitat-sim: ${YELLOW}cd habitat-sim${NC}"
 echo -e "  3. Run the viewer: ${YELLOW}python examples/mr_viewer.py --backend=local --finetuned-model=True${NC}"
 echo ""
