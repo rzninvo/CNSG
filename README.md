@@ -4,7 +4,7 @@
 <table>
   <tr>
     <td align="center" valign="middle">
-      <img src="media/figures/logos/cvg_logo_colour-white.svg" height="40"/>
+      <img src="media/figures/logos/cvg_logo_colour-white.png" height="40"/>
     </td>
     <td align="center" valign="middle">
       <img src="media/figures/logos/eth_logo_kurz_neg.png" height="80"/>
