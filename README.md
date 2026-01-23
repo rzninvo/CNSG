@@ -334,7 +334,7 @@ The fine-tuned model is specifically optimized for generating concise, landmark-
 
 **Team Members**
 
-- [Riccardo Bianco](https://github.com/riccardobia) (ETH Zurich)
+- [Riccardo Bianco](https://github.com/RiccardoBianco) (ETH Zurich)
 - [Francesco Bondi](https://github.com/FBondi) (ETH Zurich)
 - [Roham Zendehdel Nobari](https://github.com/rzninvo) (ETH Zurich)
 - [Shaurya Kishore Panwar](https://github.com/shauryakp) (University of Zurich)
