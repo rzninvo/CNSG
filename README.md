@@ -109,7 +109,7 @@ This controlled environment allows us to:
 
 <div align="center">
 
-<img src="media/figures/sim_hg.png" alt="HG Building Environment" width="70%"/>
+<img src="media/figures/sim_hg.png" alt="HG Building Environment" width="50%"/>
 
 *ETH HG E floor environment with full semantic segmentation in Habitat-Sim*
 
@@ -170,7 +170,7 @@ The system includes a **mobile-friendly web interface** that enables real-world 
 
 <div align="center">
 
-<img src="media/figures/ui_query.png" alt="Web Interface" width="80%"/>
+<img src="media/figures/ui_query.png" alt="Web Interface" width="30%"/>
 
 *Web interface for image submission and natural-language navigation queries*
 
