@@ -338,7 +338,6 @@ The fine-tuned model is specifically optimized for generating concise, landmark-
 - [Francesco Bondi](https://github.com/francescobondi02) (ETH Zurich)
 - [Roham Zendehdel Nobari](https://github.com/rzninvo) (ETH Zurich)
 - [Shaurya Kishore Panwar](https://github.com/KlrShaK) (University of Zurich)
-- [Fatemeh Sadat Daneshmand](https://github.com/fatemeh-sd) (ZHAW Winterthur)
 
 **Supervisors**
 
