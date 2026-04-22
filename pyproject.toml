@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cnsg"
+version = "0.1.0"
+description = "Conversational indoor navigation — landmark-grounded instruction generation on Habitat-Sim."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "See LICENSE" }
+
+# Runtime env (`cnsg` conda env, py3.9). Excludes torch/torchvision (installed via
+# PyTorch cu128 index) and habitat-sim (installed via conda -c aihabitat) — see SETUP.md.
+dependencies = [
+    "numpy<2",
+    "scipy",
+    "scikit-learn",
+    "opencv-python",
+    "Pillow",
+    "h5py",
+    "pyyaml",
+    "trimesh",
+    "open3d",
+    "tqdm",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "huggingface_hub<1.0",
+    "transformers>=4.40",
+    "peft>=0.11",
+    "accelerate",
+    "bitsandbytes",
+    "python-dotenv",
+    # Localization stack (hloc pulls kornia/pycolmap/lightglue transitively).
+    "hloc @ git+https://github.com/cvg/Hierarchical-Localization@master",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio",
+    "ruff",
+]
+viewer = [
+    # Qt viewer — only needed for the optional development UI.
+    "PySide6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cnsg*"]
+exclude = ["tests*", "docs*", "data*", "scripts*", "webapp*", "finetuning*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

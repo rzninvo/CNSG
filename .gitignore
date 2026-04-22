@@ -21,3 +21,14 @@ mesh_pipeline/outputs/*
 
 docs/
 CLAUDE.md
+
+# Build + local artifacts
+cnsg.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Vendored hloc (fetched with --recursive by scripts/install.sh)
+third_party/
+
+# Claude Code local state
+.claude/
