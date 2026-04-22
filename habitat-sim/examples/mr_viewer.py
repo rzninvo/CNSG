@@ -2147,48 +2147,16 @@ _LOCALIZER = None
 
 
 def _get_localizer():
-    """Lazy-load the in-process Localizer. Loads COLMAP recon + feature DBs on first call."""
+    """Lazy-load the in-process Localizer. Loads COLMAP recon + feature DBs on first call.
+
+    Reads the map layout from `cnsg.config.get_settings().localization.map_dir`.
+    If the map isn't built, raises FileNotFoundError — run
+    `scripts/download_data.sh` then `scripts/build_hge_map.sh` once.
+    """
     global _LOCALIZER
-    if _LOCALIZER is not None:
-        return _LOCALIZER
-
-    from cnsg.config import get_settings
-    from cnsg.localization.inference import Localizer
-
-    settings = get_settings().localization
-    sfm_dir = settings.map_dir / "sfm"
-
-    # Phase 1 transitional: if the stable data/maps/hge/ layout hasn't been
-    # built yet, fall back to the existing LaMAR-benchmark outputs.
-    # scripts/build_hge_map.sh (landing next) will produce the stable layout.
-    if not sfm_dir.exists():
-        project_root = Path(__file__).resolve().parent.parent.parent
-        lout = (
-            project_root
-            / "mesh_pipeline" / "third_party" / "lamar-benchmark" / "outputs"
-        )
-        fallback_sfm = (
-            lout / "mapping" / "map" / "triangulation" / "superpoint"
-            / "netvlad-10_frustum_pose-120-20-250" / "superglue" / "sfm"
-        )
-        if not fallback_sfm.exists():
-            raise FileNotFoundError(
-                f"localizer: no map at {settings.map_dir} and no LaMAR fallback at "
-                f"{fallback_sfm}. Run scripts/download_data.sh then scripts/build_hge_map.sh."
-            )
-        print(
-            f"[WARN] localizer map_dir: expected={settings.map_dir}, got=missing, "
-            f"fallback=LaMAR outputs at {lout}. Run scripts/build_hge_map.sh to migrate.",
-            flush=True,
-        )
-        _LOCALIZER = Localizer(
-            sfm_dir=fallback_sfm,
-            map_features_path=lout / "extraction" / "map" / "superpoint" / "features.h5",
-            map_retrieval_path=lout / "extraction" / "map" / "netvlad" / "features.h5",
-            settings=settings,
-        )
-    else:
-        _LOCALIZER = Localizer.from_settings(settings)
+    if _LOCALIZER is None:
+        from cnsg.localization.inference import Localizer
+        _LOCALIZER = Localizer.from_settings()
     return _LOCALIZER
 
 

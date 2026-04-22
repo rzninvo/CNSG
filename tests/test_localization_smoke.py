@@ -41,14 +41,12 @@ from cnsg.localization.capture_io import parse_images, parse_sensors
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_DIR = REPO_ROOT / "mesh_pipeline" / "data" / "navvis_2022-02-06_12.55.11"
-LAMAR_OUT = REPO_ROOT / "mesh_pipeline" / "third_party" / "lamar-benchmark" / "outputs"
-SFM_DIR = (
-    LAMAR_OUT
-    / "mapping/map/triangulation/superpoint"
-    / "netvlad-10_frustum_pose-120-20-250/superglue/sfm"
-)
-MAP_SP = LAMAR_OUT / "extraction/map/superpoint/features.h5"
-MAP_NV = LAMAR_OUT / "extraction/map/netvlad/features.h5"
+
+# Stable map layout produced by `scripts/build_hge_map.sh`.
+MAP_DIR = REPO_ROOT / "data" / "maps" / "hge"
+SFM_DIR = MAP_DIR / "sfm"
+MAP_SP = MAP_DIR / "features_superpoint.h5"
+MAP_NV = MAP_DIR / "features_netvlad.h5"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -86,17 +84,12 @@ def test_localize_known_map_image_matches_colmap_reconstruction() -> None:
     from cnsg.localization.inference import Localizer
 
     settings = LocalizationSettings(
-        map_dir=REPO_ROOT / "data" / "maps" / "hge",  # paths below override the defaults
+        map_dir=MAP_DIR,
         retrieval_num_pairs=10,
         ransac_max_error_px=12.0,
         ransac_min_inliers=20,
     )
-    localizer = Localizer(
-        sfm_dir=SFM_DIR,
-        map_features_path=MAP_SP,
-        map_retrieval_path=MAP_NV,
-        settings=settings,
-    )
+    localizer = Localizer.from_settings(settings)
 
     images = parse_images(SESSION_DIR / "images.txt")
     sensors = parse_sensors(SESSION_DIR / "sensors.txt")

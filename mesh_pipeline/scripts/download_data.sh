@@ -38,11 +38,17 @@ else
   rm -f "$ZIP_PATH"
 fi
 
-OUTPUTS_DIR="$ROOT_DIR/third_party/lamar-benchmark/outputs"
+REPO_ROOT="$(cd -- "$ROOT_DIR/.." >/dev/null 2>&1 && pwd)"
+STAGED_DIR="$REPO_ROOT/data/maps/hge_staged"
 
-# Check if localization outputs already exist
-if [[ -d "$OUTPUTS_DIR" && "$FORCE_DOWNLOAD" == false ]]; then
-  echo "Localization outputs already exist at $OUTPUTS_DIR (skipping download)"
+# The Google Drive archive ships LaMAR-format localization artifacts; they are
+# unpacked to a staging directory here, then normalised to the stable
+# `data/maps/hge/` layout by `scripts/build_hge_map.sh` (see Phase 1 in
+# docs/report/01_architecture-lean-migration/plan.md).
+
+# Check if localization outputs already exist (either staged or already built).
+if [[ ( -d "$STAGED_DIR/outputs" || -d "$REPO_ROOT/data/maps/hge/sfm" ) && "$FORCE_DOWNLOAD" == false ]]; then
+  echo "Localization outputs already present (skipping download)"
   echo "Use --force to re-download"
 else
   if ! command -v gdown >/dev/null 2>&1; then
@@ -62,16 +68,11 @@ else
 
   if [[ -n "$LOCALIZATION_ZIP" && -f "$LOCALIZATION_ZIP" ]]; then
     echo "Found localization.zip: $LOCALIZATION_ZIP"
-
-    # Ensure lamar-benchmark submodule is initialized
-    if [[ ! -d "$ROOT_DIR/third_party/lamar-benchmark/.git" ]]; then
-      echo "LaMAR benchmark submodule not initialized. Initializing..."
-      git -C "$ROOT_DIR/.." submodule update --init mesh_pipeline/third_party/lamar-benchmark
-    fi
-
-    echo "Unzipping to $ROOT_DIR/third_party/lamar-benchmark ..."
-    unzip -o "$LOCALIZATION_ZIP" -d "$ROOT_DIR/third_party/lamar-benchmark"
-    echo "Localization outputs extracted to $ROOT_DIR/third_party/lamar-benchmark/outputs"
+    mkdir -p "$STAGED_DIR"
+    echo "Unzipping to $STAGED_DIR ..."
+    unzip -o "$LOCALIZATION_ZIP" -d "$STAGED_DIR"
+    echo "Localization outputs staged at $STAGED_DIR/outputs"
+    echo "Next: run  scripts/build_hge_map.sh  to normalise into data/maps/hge/"
     rm -f "$LOCALIZATION_ZIP"
   else
     echo "No localization.zip found. Skipping localization outputs."
