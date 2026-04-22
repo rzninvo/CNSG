@@ -19,9 +19,8 @@ Strategy:
     pycolmap's internal float rounding.
 
 Preconditions (skipped cleanly when missing):
-  - LaMAR-derived map artifacts under
-    `mesh_pipeline/third_party/lamar-benchmark/outputs/...` (from
-    `scripts/download_data.sh`).
+  - Stable map layout at `data/maps/hge/` (produced by
+    `scripts/build_hge_map.sh` after `scripts/download_data.sh`).
   - NavVis session under `mesh_pipeline/data/navvis_2022-02-06_12.55.11/`.
 """
 

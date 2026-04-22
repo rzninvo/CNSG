@@ -33,8 +33,12 @@ dependencies = [
     "accelerate",
     "bitsandbytes",
     "python-dotenv",
-    # Localization stack (hloc pulls kornia/pycolmap/lightglue transitively).
-    "hloc @ git+https://github.com/cvg/Hierarchical-Localization@master",
+    # Localization stack: pycolmap installs via pip directly. hloc must be
+    # installed from a recursive git clone (pip's VCS installer does not
+    # fetch git submodules, and hloc's SuperPoint extractor depends on the
+    # vendored SuperGluePretrainedNetwork submodule). See SETUP.md.
+    "pycolmap>=3.13",
+    "kornia>=0.6.11",
 ]
 
 [project.optional-dependencies]
