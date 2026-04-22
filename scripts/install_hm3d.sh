@@ -103,19 +103,19 @@ pip install PySide6 SpeechRecognition gTTS playsound3
 log_info "Installing audio packages via conda..."
 conda install -c conda-forge pyaudio alsa-plugins jack speex -y
 
-# Install espeak (Linux only)
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    if command -v apt-get &> /dev/null; then
-        log_info "Installing espeak (requires sudo)..."
-        sudo apt-get update || true
-        sudo apt-get install -y espeak
-        log_success "espeak installed"
-    else
-        log_warning "apt-get not found. Please install espeak manually."
-    fi
+# Install espeak (Linux only) — SKIPPED in automated run (requires sudo, user will run manually)
+if command -v espeak &> /dev/null; then
+    log_success "espeak already installed"
 else
-    log_warning "Not on Linux, skipping espeak installation. Please install manually if needed."
+    log_warning "espeak not installed. After this script finishes, run manually:"
+    echo -e "    ${YELLOW}sudo apt-get install -y espeak${NC}"
 fi
+
+# Install PyTorch with CUDA 12.8 support (required for RTX 5090 / Blackwell / sm_120)
+echo -e "\n${YELLOW}▶▶▶ Step 6b: Installing PyTorch with CUDA 12.8 (for RTX 5090) ◀◀◀${NC}"
+log_info "Installing torch/torchvision/torchaudio from PyTorch cu128 index..."
+pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+log_success "PyTorch (cu128) installed"
 
 # Download LoRA adapter weights
 echo -e "\n${YELLOW}▶▶▶ Step 7: Setting up LoRA Adapter Weights ◀◀◀${NC}"

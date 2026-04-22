@@ -98,6 +98,24 @@ log_info "Installing habitat-lab (should be in habitat-source env)..."
 pip install -e habitat-lab
 log_success "Habitat-lab installed"
 
+# Install PyTorch with CUDA 12.8 (RTX 5090 / Blackwell) in habitat-source env
+log_info "Installing PyTorch cu128 for habitat-source env..."
+pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+log_info "Pinning huggingface_hub<1.0 for transformers compatibility..."
+pip install "huggingface_hub<1.0"
+log_success "PyTorch (cu128) installed in habitat-source"
+
+# Install GUI/audio extras (match install_hm3d.sh so the viewer runs)
+log_info "Installing GUI and audio Python packages..."
+pip install PySide6 SpeechRecognition gTTS playsound3
+log_info "Installing audio packages via conda..."
+conda install -c conda-forge pyaudio alsa-plugins jack speex -y
+if command -v espeak &> /dev/null; then
+    log_success "espeak already installed"
+else
+    log_warning "espeak not installed. Run manually: sudo apt-get install -y espeak"
+fi
+
 # Deactivate habitat-source env
 log_info "Deactivating habitat-source environment..."
 conda deactivate
@@ -122,6 +140,8 @@ conda activate CNSG-meshing
 # Install Python requirements
 log_info "Installing Python requirements for mesh pipeline..."
 pip install -r requirements.txt
+log_info "Upgrading torch to cu128 (for RTX 5090 / Blackwell)..."
+pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
 log_success "Mesh pipeline requirements installed"
 
 
