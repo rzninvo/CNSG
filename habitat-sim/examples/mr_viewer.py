@@ -24,9 +24,7 @@ import datetime
 import re
 import threading
 import queue
-import subprocess
 import tempfile
-import atexit
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -91,10 +89,6 @@ except Exception as e:
 
 class NewViewer(BaseViewer):
     MOVE, LOOK = 0.07, 1.5  # New definition for these two attributes
-    
-    # * Class variables to track Docker service
-    _docker_service_started = False
-    _project_root = None  # Store project root for cleanup
 
     def __init__(self, sim_settings: Dict[str, Any], q_app: QApplication = None) -> None:
         scene_path = sim_settings["scene"]
@@ -106,13 +100,6 @@ class NewViewer(BaseViewer):
         self.prev_objs_to_draw = None
         self.action_queue = queue.Queue()
         self.scene = self.sim.semantic_scene
-        
-        # * Start Docker localization service if not already started
-        if not NewViewer._docker_service_started:
-            self._start_docker_service()
-            NewViewer._docker_service_started = True
-            # Register cleanup on exit
-            atexit.register(self._stop_docker_service)        
 
         # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
@@ -178,71 +165,6 @@ class NewViewer(BaseViewer):
                         semantic_info[room_id][category_id] += 1
 
         return semantic_info
-    
-    def _start_docker_service(self):
-        """Start the persistent Docker localization service."""
-        print("[DOCKER] Starting persistent localization service...")
-        script_dir = Path(__file__).resolve().parent
-        project_root = script_dir.parent.parent
-        NewViewer._project_root = project_root  # Save for cleanup
-        start_script = project_root / "mesh_pipeline" / "scripts" / "start_localization_service.sh"
-        
-        if not start_script.exists():
-            print(f"[DOCKER] Warning: Start script not found: {start_script}")
-            print("[DOCKER] Localization will work but may be slower without persistent container")
-            return
-        
-        try:
-            result = subprocess.run(
-                [str(start_script)],
-                cwd=str(project_root / "mesh_pipeline" / "scripts"),
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode == 0:
-                print("[DOCKER] ✓ Persistent localization service started successfully")
-                print("[DOCKER] Subsequent localizations will be ~40% faster!")
-            else:
-                print(f"[DOCKER] Warning: Failed to start service (exit code {result.returncode})")
-                if result.stdout:
-                    print(f"[DOCKER] stdout: {result.stdout}")
-                if result.stderr:
-                    print(f"[DOCKER] stderr: {result.stderr}")
-        except subprocess.TimeoutExpired:
-            print("[DOCKER] Warning: Timeout starting service (>30s)")
-        except Exception as e:
-            print(f"[DOCKER] Warning: Error starting service: {e}")
-    
-    @staticmethod
-    def _stop_docker_service():
-        """Stop the persistent Docker localization service."""
-        print("[DOCKER] Stopping persistent localization service...")
-        if NewViewer._project_root is None:
-            print("[DOCKER] Warning: Project root not set, cannot stop service")
-            return
-        
-        project_root = NewViewer._project_root
-        stop_script = project_root / "mesh_pipeline" / "scripts" / "stop_localization_service.sh"
-        
-        if not stop_script.exists():
-            print(f"[DOCKER] Stop script not found: {stop_script}")
-            return
-        
-        try:
-            result = subprocess.run(
-                [str(stop_script)],
-                cwd=str(project_root / "mesh_pipeline" / "scripts"),
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                print("[DOCKER] ✓ Persistent localization service stopped")
-            else:
-                print(f"[DOCKER] Warning: Failed to stop service (exit code {result.returncode})")
-        except Exception as e:
-            print(f"[DOCKER] Warning: Error stopping service: {e}")
 
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
@@ -2221,110 +2143,87 @@ def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct", fine_tuned_mode
     return _LOCAL_MODEL, _LOCAL_TOKENIZER, _LOCAL_MODEL_INTENT
 
 
-def localization(image: Image.Image):
-    """
-    Localization function that uses the LaMAR-based localization pipeline.
+_LOCALIZER = None
 
-    This function:
-    1. Saves the image to a temporary file
-    2. Calls the localization script at mesh_pipeline/scripts/run_localization_pipeline.sh
-    3. Reads the resulting pose from poses.txt
-    4. Returns the pose in the format expected by the navigation system
+
+def _get_localizer():
+    """Lazy-load the in-process Localizer. Loads COLMAP recon + feature DBs on first call."""
+    global _LOCALIZER
+    if _LOCALIZER is not None:
+        return _LOCALIZER
+
+    from cnsg.config import get_settings
+    from cnsg.localization.inference import Localizer
+
+    settings = get_settings().localization
+    sfm_dir = settings.map_dir / "sfm"
+
+    # Phase 1 transitional: if the stable data/maps/hge/ layout hasn't been
+    # built yet, fall back to the existing LaMAR-benchmark outputs.
+    # scripts/build_hge_map.sh (landing next) will produce the stable layout.
+    if not sfm_dir.exists():
+        project_root = Path(__file__).resolve().parent.parent.parent
+        lout = (
+            project_root
+            / "mesh_pipeline" / "third_party" / "lamar-benchmark" / "outputs"
+        )
+        fallback_sfm = (
+            lout / "mapping" / "map" / "triangulation" / "superpoint"
+            / "netvlad-10_frustum_pose-120-20-250" / "superglue" / "sfm"
+        )
+        if not fallback_sfm.exists():
+            raise FileNotFoundError(
+                f"localizer: no map at {settings.map_dir} and no LaMAR fallback at "
+                f"{fallback_sfm}. Run scripts/download_data.sh then scripts/build_hge_map.sh."
+            )
+        print(
+            f"[WARN] localizer map_dir: expected={settings.map_dir}, got=missing, "
+            f"fallback=LaMAR outputs at {lout}. Run scripts/build_hge_map.sh to migrate.",
+            flush=True,
+        )
+        _LOCALIZER = Localizer(
+            sfm_dir=fallback_sfm,
+            map_features_path=lout / "extraction" / "map" / "superpoint" / "features.h5",
+            map_retrieval_path=lout / "extraction" / "map" / "netvlad" / "features.h5",
+            settings=settings,
+        )
+    else:
+        _LOCALIZER = Localizer.from_settings(settings)
+    return _LOCALIZER
+
+
+def localization(image: Image.Image):
+    """Localize a single RGB image against the HGE map.
 
     Returns:
-        dict: Dictionary with 'position' [x, y, z] and 'rotation' [qw, qx, qy, qz]
+        dict: {'position': [x, y, z], 'rotation': [qw, qx, qy, qz]}
+            world-from-camera. Same schema as the legacy LaMAR-Docker
+            wrapper, so callers in this file do not need to change.
     """
-
-    # Get the project root (go up from habitat-sim/examples to CNSG)
-    script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent  # Up two levels: habitat-sim/examples -> habitat-sim -> CNSG
-    localization_script = project_root / "mesh_pipeline" / "scripts" / "run_localization_pipeline.sh"
-    lamar_repo = project_root / "mesh_pipeline" / "third_party" / "lamar-benchmark"
-
-    # Validate paths
-    if not localization_script.exists():
-        raise FileNotFoundError(f"Localization script not found: {localization_script}")
-
-    # Save image to a temporary file in a location mounted in Docker
-    # Use lamar-benchmark/temp directory which is inside the mounted repo
-    temp_dir = lamar_repo / "temp"
-    temp_dir.mkdir(exist_ok=True, parents=True)
-    
-    query_image_path = temp_dir / f"query_{int(time.time() * 1000)}.jpg"
-    image.save(query_image_path, format='JPEG')
-
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        temp_path = Path(tf.name)
     try:
-        # Run the localization pipeline with optimized settings
-        result = subprocess.run(
-            [
-                str(localization_script), 
-                "--query-image", query_image_path,
-                "--num-retrieval", "3",  # Use 3 retrieval pairs for speed
-                "--fast"  # Use fast NetVLAD settings (320px)
-            ],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            check=False
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Localization script failed with exit code {result.returncode}")
-
-        # Find and read the poses.txt file
-        # Expected path: lamar-benchmark/outputs/pose_estimation/query_single/map/superpoint/superglue/netvlad-10/triangulation/single_image/poses.txt
-        poses_file = lamar_repo / "outputs" / "pose_estimation" / "query_single" / "map" / "superpoint" / "superglue" / "netvlad-10" / "triangulation" / "single_image" / "poses.txt"
-
-        # If not found at expected location, search for it
-        if not poses_file.exists():
-
-            outputs_dir = lamar_repo / "outputs"
-            if outputs_dir.exists():
-                found_poses = list(outputs_dir.rglob("poses.txt"))
-                if found_poses:
-                    poses_file = found_poses[0]
-                else:
-                    raise FileNotFoundError(f"Could not find poses.txt in {outputs_dir}")
-            else:
-                raise FileNotFoundError(f"Outputs directory does not exist: {outputs_dir}")
-
-        # Parse the poses.txt file
-        with open(poses_file, 'r') as f:
-            lines = f.readlines()
-
-        # Find the first valid pose line (skip comments and empty lines)
-        pose_data = None
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-
-            # Parse the pose: timestamp, sensor_id, qw, qx, qy, qz, tx, ty, tz, ...
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 9:
-                try:
-                    qw, qx, qy, qz = map(float, parts[2:6])
-                    tx, ty, tz = map(float, parts[6:9])
-                    pose_data = {
-                        'position': [tx, ty, tz],
-                        'rotation': [qw, qx, qy, qz]
-                    }
-                    break
-                except ValueError:
-                    continue
-
-        if pose_data is None:
-            raise RuntimeError(f"Could not parse valid pose from: {poses_file}")
-
-        return pose_data
-
+        image.save(temp_path, format="JPEG")
+        localizer = _get_localizer()
+        result = localizer.localize(temp_path)
+        if not result.success:
+            raise RuntimeError(
+                f"localization failed: {result.num_inliers} inliers "
+                f"(min={localizer._settings.ransac_min_inliers})"
+            )
+        return {
+            "position": result.position.tolist(),
+            "rotation": result.rotation_wxyz.tolist(),
+        }
     finally:
-        # Clean up temporary file
         try:
-            if query_image_path.exists():
-                query_image_path.unlink()
+            temp_path.unlink(missing_ok=True)
         except Exception as e:
-            print(f"[LOCALIZATION] Warning: Could not delete temporary file {query_image_path}: {e}")
+            print(
+                f"[WARN] localizer tempfile: expected=delete {temp_path}, got={e}, "
+                f"fallback=leak",
+                flush=True,
+            )
 
 class NavigationServer:
     def __init__(self, viewer: NewViewer, model, tokenizer, model_intent):
