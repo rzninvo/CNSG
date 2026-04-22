@@ -44,6 +44,7 @@ Not emitted (per spec):
 from __future__ import annotations
 
 import json
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,16 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 from cnsg.segmentation.palette import instance_color, instance_hex
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write bytes to `path` atomically: write to sibling .tmp then os.replace.
+
+    Protects against partial exports when a write is interrupted.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 # --- output bundle -----------------------------------------------------------
@@ -116,6 +127,14 @@ def _assign_instance_ids(
     Per-vertex instance IDs start at 1; class_id == 0 → instance 0 ("Unknown"
     sentinel, not emitted). Per-instance labels align by index (instance_id i
     has label list[i-1]).
+
+    Stability: instance_ids are assigned deterministically, sorted by
+    `(class_id, region_id, min_vertex_index)`. A face permutation of the
+    input mesh will produce the same instance_id → (class, region) mapping.
+
+    Filtering: CCs with zero incident triangle faces (e.g. isolated vertices
+    or degenerate vertex-only islands) are DROPPED. Habitat's CC bbox pass
+    cannot handle them meaningfully and they would pollute `.semantic.txt`.
     """
     n_verts = len(mesh.vertices)
     per_vertex_instance = np.zeros(n_verts, dtype=np.int64)
@@ -123,29 +142,50 @@ def _assign_instance_ids(
     adjacency = _build_vertex_adjacency_same_label(mesh, class_ids, region_ids)
     n_cc, labels = connected_components(adjacency, directed=False)
 
-    # Aggregate: for each CC, collect its (class_id, region_id). We keep only
-    # CCs where class_id != 0 (zero = "ignore").
-    cc_to_instance: dict[int, int] = {}
-    instance_labels: list[tuple[int, int]] = []  # (class_id, region_id) per instance
+    # Pre-compute: count of faces incident on each CC. A valid semantic
+    # instance needs at least one face; isolated vertices or strand-only
+    # CCs get dropped.
+    faces = np.asarray(mesh.faces)
+    # A face belongs to a CC iff all 3 vertices share the same CC label.
+    face_cc = labels[faces[:, 0]]
+    face_cc_consistent = (
+        (labels[faces[:, 1]] == face_cc) & (labels[faces[:, 2]] == face_cc)
+    )
+    face_counts = np.bincount(
+        face_cc[face_cc_consistent], minlength=n_cc
+    )
 
-    next_instance = 1
+    # Collect candidate CCs deterministically (class, region, min vertex idx).
+    candidates: list[tuple[int, int, int, int]] = []  # (class, region, min_idx, cc)
     for cc in range(n_cc):
         members = np.flatnonzero(labels == cc)
         if len(members) == 0:
             continue
         cls = int(class_ids[members[0]])
         if cls == 0:
-            continue  # drop: untagged vertices get instance_id 0 (Unknown)
-        # Sanity: all members must share the same (class, region).
+            continue  # untagged — stays at instance_id 0
+        if face_counts[cc] == 0:
+            continue  # isolated / non-face-bearing
+        reg = int(region_ids[members[0]])
+        # Sanity: all members share (class, region). The adjacency filter
+        # only links same-label vertices, so a violation = filter bug.
         if not np.all(class_ids[members] == cls):
             raise AssertionError(
                 f"CC {cc} straddles class boundaries — adjacency filter bug?"
             )
-        reg = int(region_ids[members[0]])
-        cc_to_instance[cc] = next_instance
+        if not np.all(region_ids[members] == reg):
+            raise AssertionError(
+                f"CC {cc} straddles region boundaries — adjacency filter bug?"
+            )
+        candidates.append((cls, reg, int(members[0]), cc))
+
+    candidates.sort()
+
+    instance_labels: list[tuple[int, int]] = []
+    for instance_id, (cls, reg, _min_idx, cc) in enumerate(candidates, start=1):
+        members = np.flatnonzero(labels == cc)
+        per_vertex_instance[members] = instance_id
         instance_labels.append((cls, reg))
-        per_vertex_instance[members] = next_instance
-        next_instance += 1
 
     return per_vertex_instance, instance_labels
 
@@ -203,6 +243,13 @@ def _write_glb_with_float_colors(
     §"GLB vertex colors".
     """
     positions = np.asarray(mesh.vertices, dtype=np.float32)
+    if not np.all(np.isfinite(positions)):
+        bad_count = int((~np.isfinite(positions)).any(axis=1).sum())
+        raise ValueError(
+            f"mesh has {bad_count} vertices with non-finite coordinates (NaN or Inf); "
+            f"glTF's JSON accessor min/max must be finite, and downstream Habitat "
+            f"loaders silently corrupt GLBs with non-finite accessor bounds"
+        )
     faces = np.asarray(mesh.faces, dtype=np.uint32)
     # Pre-decode RGB (alpha stays linear; Habitat strips alpha).
     rgb_f32 = _srgb_decode_u8(colors_uint8[:, :3])
@@ -284,13 +331,9 @@ def _write_glb_with_float_colors(
         ],
     }
 
-    json_chunk = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
-    json_chunk = _pad4(json_chunk)  # 4-byte aligned, 0x20 space padding is per spec; 0x00 also accepted
-    # Spec says JSON chunk padding should be 0x20 (space), not 0x00. Re-pad properly:
-    if len(json_chunk) > 0 and json_chunk[-1] == 0:
-        # replace trailing nulls with spaces
-        json_chunk = json_chunk.rstrip(b"\0")
-        json_chunk += b" " * ((-len(json_chunk)) % 4)
+    # glTF 2.0 §3.4.2: JSON chunk padded to 4-byte alignment with 0x20 (space).
+    raw_json = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_chunk = raw_json + b" " * ((-len(raw_json)) % 4)
 
     # GLB assembly
     # header: magic (12 46 54 67) + version (2) + total length
@@ -304,7 +347,7 @@ def _write_glb_with_float_colors(
     out += json_chunk
     out += struct.pack("<II", len(bin_blob), 0x004E4942)
     out += bin_blob
-    out_path.write_bytes(bytes(out))
+    _atomic_write_bytes(out_path, bytes(out))
 
 
 def _validate_category_name(name: str) -> str:
@@ -381,15 +424,23 @@ def export_habitat(
     _write_glb_with_float_colors(mesh, colors_uint8, semantic_glb)
 
     # 2. .semantic.txt (the SSD that drives scene.regions / .objects).
+    # LF-only line terminator; `write_bytes` avoids Windows LF→CRLF translation
+    # (the HM3D parser's `.back().trim(" ,")` does not strip `\r`, silently
+    # truncating the last int on CRLF input).
     txt_path = out_dir / f"{stem}.semantic.txt"
     lines = ["HM3D Semantic Annotations"]
     for idx, (cls, reg) in enumerate(instance_labels, start=1):
         name = _validate_category_name(class_id_to_name.get(cls, f"class_{cls}"))
         lines.append(f'{idx},{instance_hex(idx)},"{name}",{reg}')
-    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write_bytes(txt_path, ("\n".join(lines) + "\n").encode("utf-8"))
 
     # 3. room_id_to_name_map.json (mr_viewer.py convention).
-    region_ids_seen = sorted({reg for _, reg in instance_labels})
+    # Include every region_id that appears with a non-zero class_id, not just
+    # those that produced at least one instance — otherwise unknown_room
+    # disappears silently when every unknown vertex was also class_id=0.
+    kept_region_ids: set[int] = {int(r) for r in np.unique(region_ids[class_ids != 0])}
+    kept_region_ids.update(reg for _, reg in instance_labels)
+    region_ids_seen = sorted(kept_region_ids)
     region_name_map: dict[str, dict] = {}
     for reg in region_ids_seen:
         name = (
@@ -399,39 +450,43 @@ def export_habitat(
         if region_id_to_position and reg in region_id_to_position:
             pos = list(region_id_to_position[reg])
         else:
-            # Vertex-mean of everything labeled with this region.
+            # Vertex-mean of everything labeled with this region, in Habitat
+            # world-frame (Y-up). Our mesh is authored Z-up per the dataset
+            # config's `"up": [0,0,1]` — Habitat rotates so mesh-Z becomes
+            # world-Y. `mr_viewer.py` reads `position[1]` as floor height in
+            # Habitat's world, so we emit (mesh_x, mesh_z, mesh_y).
             mask = region_ids == reg
             if np.any(mask):
-                pos = mesh.vertices[mask].mean(axis=0).astype(float).tolist()
+                mean_mesh = mesh.vertices[mask].mean(axis=0).astype(float)
+                pos = [float(mean_mesh[0]), float(mean_mesh[2]), float(mean_mesh[1])]
             else:
                 pos = [0.0, 0.0, 0.0]
         region_name_map[str(int(reg))] = {"name": name, "position": pos}
     room_json = out_dir / "room_id_to_name_map.json"
-    room_json.write_text(json.dumps(region_name_map, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_bytes(
+        room_json, (json.dumps(region_name_map, indent=2) + "\n").encode("utf-8")
+    )
 
     # 4. Minimum scene_dataset_config.json so Habitat can load the scene by name.
     ds_config = out_dir / f"{stem}.scene_dataset_config.json"
-    ds_config.write_text(
-        json.dumps(
-            {
-                "stages": {
-                    "paths": {".glb": [f"{stem}.glb"]},
-                    "default_attributes": {
-                        "shader_type": "flat",
-                        "up": [0, 0, 1],
-                        "front": [0, 1, 0],
-                        "origin": [0, 0, 0],
-                        "semantic_descriptor_filename": "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.txt",
-                        "semantic_asset": "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.glb",
-                        "has_semantic_textures": False,
-                    },
+    ds_config_json = json.dumps(
+        {
+            "stages": {
+                "paths": {".glb": [f"{stem}.glb"]},
+                "default_attributes": {
+                    "shader_type": "flat",
+                    "up": [0, 0, 1],
+                    "front": [0, 1, 0],
+                    "origin": [0, 0, 0],
+                    "semantic_descriptor_filename": "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.txt",
+                    "semantic_asset": "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.glb",
+                    "has_semantic_textures": False,
                 },
             },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+        },
+        indent=2,
+    ) + "\n"
+    _atomic_write_bytes(ds_config, ds_config_json.encode("utf-8"))
 
     return ExportManifest(
         out_dir=out_dir,
