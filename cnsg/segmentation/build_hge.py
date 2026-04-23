@@ -2,13 +2,17 @@
 
 Chains the four Phase-3 components into a single offline run:
 
-    NavVis frames
+    NavVis frames  +  alignment_global.txt  →  poses in absolute frame
         → Mask2FormerBackbone           (structural ADE20K-150 → S3DIS-13)
-        → Sam3Segmenter                 (open-vocab foreground instances)
+        → Sam3Segmenter                 (open-vocab foreground instances,
+                                         state-reused across prompts → ~4× faster)
         → per-frame (instance_mask, class_mask) composite
+        → (optional) seg_cache npz      (hash-tagged, hit skips M2F + SAM 3)
         → lift_masks_to_3d              (project + depth-test + union-find)
+        → coverage sanity gate          ([WARN] when labeled fraction < 15 %)
         → hierarchy.segment_building    (floor + room IDs)
-        → export_habitat                (HM3D-compatible .semantic.glb + .txt)
+        → export_habitat                (HM3D-compatible .semantic.glb + .txt,
+                                         brightened stage GLB + Unknown gray)
 
 Runtime env: `cnsg-seg` (py3.12 + torch 2.10+ cu128 + SAM 3 + flash-attn-3).
 
@@ -19,9 +23,15 @@ exhaustive per-pixel output; foreground objects (chairs, tables, doors,
 stairs, etc.) come from SAM 3's per-instance masks. Where they overlap,
 SAM 3 wins (its masks are tighter and instance-aware).
 
+See `docs/report/02_hge-lift-frame-mismatch/findings.md` for the
+alignment-global fix that rescued a 0.44 %-coverage regression — and is
+the reason this module now refuses to feed poses to the lifter without
+first composing `T_absolute_from_pose_graph` onto them.
+
 Exit criterion: the run produces `<out_dir>/HGE.semantic.glb` that loads
 in Habitat with `semantic_scene.regions` and `semantic_scene.objects`
-populating per the HM3D-compatible schema.
+populating per the HM3D-compatible schema, AND `build_summary.json`'s
+`coverage.labeled_fraction` is above the sanity threshold.
 """
 
 from __future__ import annotations
