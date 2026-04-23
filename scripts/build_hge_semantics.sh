@@ -24,6 +24,11 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 SESSION="$ROOT_DIR/mesh_pipeline/data/navvis_2022-02-06_12.55.11"
 MESH="$ROOT_DIR/mesh_pipeline/data/HGE_cut.voxelized.ply"
 OUT_DIR="$ROOT_DIR/data/maps/hge"
+# Cache per-frame segmentation outputs so iterating on lift / export knobs
+# doesn't re-run Mask2Former + SAM 3 (~52 min). Entries self-invalidate when
+# prompts or confidence change (hash-tagged). Delete the dir to force a
+# full re-run.
+SEG_CACHE_DIR="$ROOT_DIR/data/maps/hge/seg_cache"
 
 mkdir -p "$OUT_DIR"
 
@@ -36,4 +41,5 @@ exec python -m cnsg.segmentation.build_hge \
     --mesh "$MESH" \
     --out-dir "$OUT_DIR" \
     --stem HGE \
+    --seg-cache-dir "$SEG_CACHE_DIR" \
     "$@"

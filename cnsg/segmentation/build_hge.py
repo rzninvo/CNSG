@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,17 @@ from typing import Iterable, Optional
 import numpy as np
 import trimesh
 from PIL import Image
+
+
+# When this module is run via `python -m ... | tee` or piped through bash,
+# stdout is block-buffered by default and progress logs sit invisibly in a
+# 4-KB pipe buffer. Flip to line buffering so every `print(...)` hits the
+# pipe immediately — the cost is negligible and the user gains live visibility
+# into the ~55-minute segmentation loop.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except (AttributeError, OSError):
+    pass
 
 
 # --- structural instance IDs (offset so SAM 3 instances can't collide) -----
@@ -80,6 +92,94 @@ class HgeBuildConfig:
         "computer", "kitchen counter", "whiteboard",
     )
     sam3_confidence: float = 0.3
+
+    # Directory for caching per-frame (instance_mask, class_mask) post-combine.
+    # A cache hit skips Mask2Former + SAM 3 inference (dominant ~52 min of a
+    # full HGE build). Cache entries are tagged with a hash of
+    # `(sam3_prompts, sam3_confidence)` so changing either invalidates
+    # individual files loudly rather than serving stale masks. `None` =
+    # no caching (always re-run models).
+    seg_cache_dir: Optional[Path] = None
+
+
+# --- per-frame segmentation cache ------------------------------------------
+
+
+def _seg_cache_config_hash(prompts: tuple[str, ...], confidence: float) -> str:
+    """Stable 16-hex-char fingerprint of the segmentation-affecting knobs.
+
+    Changes to `sam3_prompts` or `sam3_confidence` invalidate every cached
+    frame because both alter the combined (instance_mask, class_mask) output.
+    The Mask2Former backbone is pinned to a single checkpoint so it's not
+    part of the hash today — if we ever swap backbones, add it here.
+    """
+    import hashlib
+
+    blob = json.dumps(
+        {"prompts": sorted(prompts), "confidence": round(float(confidence), 6)},
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _seg_cache_load(
+    cache_dir: Path, frame_id: int, expected_hash: str
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Return `(instance_mask, class_mask)` if a matching cache entry exists.
+
+    Returns `None` for three distinct reasons (all logged loudly so
+    silent-fallback bugs can't hide here):
+      1. file missing — normal on first run for a frame
+      2. hash mismatch — prompts/confidence changed; caller will re-run
+      3. corrupt npz — io error, caller will re-run
+
+    A re-run on miss overwrites the stale file automatically.
+    """
+    path = cache_dir / f"frame_{frame_id:06d}.npz"
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            got_hash = str(z["config_hash"].item()) if "config_hash" in z.files else ""
+            if got_hash != expected_hash:
+                print(
+                    f"[WARN] seg_cache: expected=hash={expected_hash}, "
+                    f"got=hash={got_hash!r} for frame {frame_id}, "
+                    f"fallback=re-run segmentation",
+                    flush=True,
+                )
+                return None
+            return z["instance_mask"].astype(np.int32), z["class_mask"].astype(np.int16)
+    except (OSError, ValueError, EOFError) as exc:
+        print(
+            f"[WARN] seg_cache: expected=readable {path}, got={type(exc).__name__}: "
+            f"{exc}, fallback=re-run segmentation",
+            flush=True,
+        )
+        return None
+
+
+def _seg_cache_save(
+    cache_dir: Path,
+    frame_id: int,
+    config_hash: str,
+    instance_mask: np.ndarray,
+    class_mask: np.ndarray,
+) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"frame_{frame_id:06d}.npz"
+    # np.savez_compressed auto-appends `.npz` if the given filename does not
+    # end in `.npz`, so we use an explicit `.tmp.npz` suffix to get a valid
+    # sibling that survives the atomic rename below.
+    tmp = cache_dir / f"frame_{frame_id:06d}.tmp.npz"
+    np.savez_compressed(
+        tmp,
+        instance_mask=instance_mask.astype(np.int32),
+        class_mask=class_mask.astype(np.int16),
+        config_hash=np.array(config_hash),
+    )
+    import os
+    os.replace(tmp, path)
 
 
 # --- per-frame combiner ----------------------------------------------------
@@ -297,32 +397,65 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
     # 3. Pre-compute prompt → S3DIS class lookup for SAM 3.
     prompt_to_class = {p: ade20k_name_to_s3dis(p) for p in cfg.sam3_prompts}
 
-    # 4. Load segmentation models once.
-    t0 = time.time()
-    m2f = Mask2FormerBackbone()
-    print(f"[build_hge] Mask2Former loaded ({time.time()-t0:.1f}s)")
-    t0 = time.time()
-    sam3 = Sam3Segmenter(
-        prompts=cfg.sam3_prompts, confidence_threshold=cfg.sam3_confidence,
-    )
-    print(f"[build_hge] SAM 3 loaded ({time.time()-t0:.1f}s)")
+    # 4. Set up per-frame segmentation cache if requested; defer heavy model
+    #    loads until we know we actually need them (pure cache hits skip both).
+    cache_dir = cfg.seg_cache_dir
+    cache_hash = _seg_cache_config_hash(cfg.sam3_prompts, cfg.sam3_confidence)
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[build_hge] seg_cache: {cache_dir} (hash={cache_hash})")
+
+    m2f = None
+    sam3 = None
+    n_cache_hits = 0
+    n_cache_misses = 0
+
+    def _ensure_models_loaded():
+        nonlocal m2f, sam3
+        if m2f is not None and sam3 is not None:
+            return
+        t0 = time.time()
+        m2f = Mask2FormerBackbone()
+        print(f"[build_hge] Mask2Former loaded ({time.time()-t0:.1f}s)")
+        t0 = time.time()
+        sam3 = Sam3Segmenter(
+            prompts=cfg.sam3_prompts, confidence_threshold=cfg.sam3_confidence,
+        )
+        print(f"[build_hge] SAM 3 loaded ({time.time()-t0:.1f}s)")
 
     # 5. Per-frame segment + combine, then hand to the lifter.
     lift_frames: list[Frame] = []
     t_seg = time.time()
     for i, f in enumerate(frames):
         t0 = time.time()
-        rgb = Image.open(f.rgb_path).convert("RGB")
         depth = _load_navvis_depth(f.depth_path)
 
-        m2f_out = m2f.segment(rgb)
-        sam3_out = sam3.segment(rgb)
-        sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
-        instance_mask, class_mask = _combine_per_frame(
-            sam3_mask=sam3_out.instance_mask,
-            sam3_class_lut=sam3_class_lut,
-            m2f_class=m2f_out.s3dis_labels,
-        )
+        instance_mask: Optional[np.ndarray] = None
+        class_mask: Optional[np.ndarray] = None
+
+        if cache_dir is not None:
+            cached = _seg_cache_load(cache_dir, f.frame_id, cache_hash)
+            if cached is not None:
+                instance_mask, class_mask = cached
+                n_cache_hits += 1
+
+        if instance_mask is None:
+            _ensure_models_loaded()
+            rgb = Image.open(f.rgb_path).convert("RGB")
+            m2f_out = m2f.segment(rgb)
+            sam3_out = sam3.segment(rgb)
+            sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
+            instance_mask, class_mask = _combine_per_frame(
+                sam3_mask=sam3_out.instance_mask,
+                sam3_class_lut=sam3_class_lut,
+                m2f_class=m2f_out.s3dis_labels,
+            )
+            n_cache_misses += 1
+            if cache_dir is not None:
+                _seg_cache_save(
+                    cache_dir, f.frame_id, cache_hash, instance_mask, class_mask
+                )
 
         lift_frames.append(
             Frame(
@@ -343,7 +476,11 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
                 f"{time.time()-t0:.2f}s/frame (avg {avg:.2f}s) "
                 f"ETA {eta_min:.1f}min"
             )
-    print(f"[build_hge] segmentation done ({(time.time()-t_seg)/60:.1f}min)")
+    seg_elapsed_min = (time.time() - t_seg) / 60
+    print(
+        f"[build_hge] segmentation done ({seg_elapsed_min:.1f}min) — "
+        f"cache hits={n_cache_hits} misses={n_cache_misses}"
+    )
 
     # 6. Lift.
     t0 = time.time()
@@ -405,6 +542,8 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         "export_num_instances": int(manifest.num_instances),
         "export_num_regions": int(manifest.num_regions),
         "total_time_s": round(time.time() - t_all, 1),
+        "seg_cache_hits": n_cache_hits,
+        "seg_cache_misses": n_cache_misses,
         "out_dir": str(cfg.out_dir),
     }
     (cfg.out_dir / "build_summary.json").write_text(json.dumps(summary, indent=2))
@@ -433,6 +572,14 @@ def _main() -> None:
              "crashes on a single CC above ~150k verts; 300k faces gives "
              "~150k verts. Pass 0 to disable.",
     )
+    p.add_argument(
+        "--seg-cache-dir", type=Path, default=None,
+        help="If set, cache per-frame (instance_mask, class_mask) post-combine "
+             "here. Cache hits skip Mask2Former + SAM 3 (~52 min of a full run) "
+             "on subsequent invocations. Entries are hash-tagged with prompts "
+             "and confidence so stale masks can't silently feed a rerun with "
+             "different knobs.",
+    )
     args = p.parse_args()
 
     cfg = HgeBuildConfig(
@@ -444,6 +591,7 @@ def _main() -> None:
         depth_tolerance_m=args.depth_tolerance,
         sam3_confidence=args.sam3_confidence,
         decimate_target_faces=(args.decimate_target_faces or None),
+        seg_cache_dir=args.seg_cache_dir,
     )
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     build_hge_semantics(cfg)
