@@ -103,6 +103,15 @@ class HgeBuildConfig:
     )
     sam3_confidence: float = 0.3
 
+    # Optional path to a pre-existing photorealistic stage GLB (e.g. NavVis'
+    # `HGE.basis.glb` with baked photographic textures). When set, the
+    # emitted scene_dataset_config.json points at this file as the stage,
+    # so mr_viewer renders a real building instead of flat-shaded palette
+    # colours. The palette stage `<stem>.glb` is still written so semantic-
+    # visualization tools that expect it keep working. If the file lives
+    # outside out_dir it's copied in (so the config's relative path resolves).
+    external_stage_glb: Optional[Path] = None
+
     # Minimum fraction of mesh vertices that must carry a non-zero class_id
     # after the lift. Below this, the build prints a loud banner warning —
     # ships the output anyway (caller decides whether to accept it) but
@@ -602,6 +611,7 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         # Drop instances with fewer than 20 verts — sparse lift coverage
         # produces singletons that also crash Habitat's CC-bbox pass.
         min_verts_per_instance=20,
+        external_stage_glb=cfg.external_stage_glb,
     )
     print(
         f"[build_hge] export: {manifest.num_instances} instances, "
@@ -659,6 +669,13 @@ def _main() -> None:
              "and confidence so stale masks can't silently feed a rerun with "
              "different knobs.",
     )
+    p.add_argument(
+        "--external-stage-glb", type=Path, default=None,
+        help="Pre-existing photorealistic stage GLB (e.g. NavVis' "
+             "HGE.basis.glb). If set, the scene_dataset_config.json points "
+             "the stage here instead of the palette fallback — mr_viewer "
+             "renders a real building.",
+    )
     args = p.parse_args()
 
     cfg = HgeBuildConfig(
@@ -671,6 +688,7 @@ def _main() -> None:
         sam3_confidence=args.sam3_confidence,
         decimate_target_faces=(args.decimate_target_faces or None),
         seg_cache_dir=args.seg_cache_dir,
+        external_stage_glb=args.external_stage_glb,
     )
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     build_hge_semantics(cfg)

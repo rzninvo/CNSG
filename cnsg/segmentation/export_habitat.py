@@ -421,6 +421,7 @@ def export_habitat(
     group_per_class_region: bool = False,
     min_verts_per_instance: int = 1,
     stage_rgb_floor: int = 80,
+    external_stage_glb: Path | None = None,
 ) -> ExportManifest:
     """Write an HM3D-compatible semantic scene.
 
@@ -445,6 +446,13 @@ def export_habitat(
             flat` stage. Does NOT affect `<stem>.semantic.glb` —
             SemanticSensor decoding always uses the exact palette.
             Set to 0 for a no-op (identical stage + semantic).
+        external_stage_glb: optional path to a pre-existing stage GLB
+            (typically a photorealistic basis-compressed mesh from the
+            NavVis pipeline, e.g. `mesh_pipeline/data/HGE.basis.glb`).
+            If provided, the emitted scene_dataset_config.json references
+            this file as the stage instead of the palette-colored fallback.
+            The palette stage is still written to disk as `<stem>.glb` so
+            semantic-visualization tools that expect it keep working.
 
     Returns:
         `ExportManifest` with paths and count summary.
@@ -539,11 +547,28 @@ def export_habitat(
     )
 
     # 4. Minimum scene_dataset_config.json so Habitat can load the scene by name.
+    # Prefer an external photorealistic stage if the caller provided one
+    # (typically `HGE.basis.glb` from mesh_pipeline). The palette stage
+    # `<stem>.glb` is always written to disk, but the config points at the
+    # prettier mesh when available so mr_viewer renders a real building
+    # instead of coloured polygons.
+    if external_stage_glb is not None:
+        external_stage_glb = Path(external_stage_glb)
+        stage_basename = external_stage_glb.name
+        if external_stage_glb.parent.resolve() != out_dir.resolve():
+            # Copy into out_dir so the config's relative path resolves.
+            dest = out_dir / stage_basename
+            if not dest.exists() or dest.stat().st_size != external_stage_glb.stat().st_size:
+                import shutil
+                shutil.copy2(external_stage_glb, dest)
+    else:
+        stage_basename = f"{stem}.glb"
+
     ds_config = out_dir / f"{stem}.scene_dataset_config.json"
     ds_config_json = json.dumps(
         {
             "stages": {
-                "paths": {".glb": [f"{stem}.glb"]},
+                "paths": {".glb": [stage_basename]},
                 "default_attributes": {
                     "shader_type": "flat",
                     "up": [0, 0, 1],

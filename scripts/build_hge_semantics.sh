@@ -29,6 +29,11 @@ OUT_DIR="$ROOT_DIR/data/maps/hge"
 # prompts or confidence change (hash-tagged). Delete the dir to force a
 # full re-run.
 SEG_CACHE_DIR="$ROOT_DIR/data/maps/hge/seg_cache"
+# Photorealistic stage from the NavVis / mesh_pipeline install. Referenced
+# by the emitted scene_dataset_config.json so mr_viewer renders the real
+# building (baked textures, PBR-like look) rather than the palette-coloured
+# debug fallback at `HGE.glb`. Copied into $OUT_DIR on export if not there.
+STAGE_BASIS="$ROOT_DIR/mesh_pipeline/data/HGE.basis.glb"
 
 mkdir -p "$OUT_DIR"
 
@@ -42,4 +47,5 @@ exec python -m cnsg.segmentation.build_hge \
     --out-dir "$OUT_DIR" \
     --stem HGE \
     --seg-cache-dir "$SEG_CACHE_DIR" \
+    --external-stage-glb "$STAGE_BASIS" \
     "$@"
