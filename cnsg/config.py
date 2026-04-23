@@ -28,6 +28,15 @@ class LocalizationSettings(BaseSettings):
     # Built once offline, read-only at serve time.
     map_dir: Path = Field(default_factory=lambda: _project_root() / "data" / "maps" / "hge")
 
+    # NavVis Capture-format session the map was built from. Consumed at
+    # localizer-load time to pre-compose `alignment_global.txt` onto returned
+    # poses so they live in the absolute frame (= what Habitat uses).
+    session_dir: Path = Field(
+        default_factory=lambda: (
+            _project_root() / "mesh_pipeline" / "data" / "navvis_2022-02-06_12.55.11"
+        )
+    )
+
     # Feature extractor (Phase 1: SuperPoint).
     feature_name: str = "superpoint_max"  # hloc config name
 

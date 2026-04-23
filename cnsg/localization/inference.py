@@ -28,6 +28,7 @@ from hloc import extract_features, match_features, pairs_from_retrieval, localiz
 from PIL import Image
 
 from cnsg.config import LocalizationSettings, get_settings
+from cnsg.localization.capture_io import parse_alignment_global
 
 
 # -------- hloc feature configurations --------
@@ -101,6 +102,8 @@ class Localizer:
         map_features_path: Path,
         map_retrieval_path: Path,
         settings: Optional[LocalizationSettings] = None,
+        *,
+        alignment_global_path: Optional[Path] = None,
     ):
         self._settings = settings or get_settings().localization
         self._sfm_dir = Path(sfm_dir)
@@ -117,15 +120,42 @@ class Localizer:
 
         self._reconstruction = pycolmap.Reconstruction(str(self._sfm_dir))
 
+        # hloc/COLMAP reconstruction is in the NavVis pose-graph frame; Habitat
+        # loads the mesh in the absolute frame (~60 m offset on HGE). If the
+        # caller passes the session's alignment_global.txt we pre-compose
+        # T_abs_pg onto every returned pose so the result is directly usable
+        # for agent placement. See docs/report/02_hge-lift-frame-mismatch/.
+        self._T_abs_src: Optional[np.ndarray] = None
+        if alignment_global_path is not None:
+            self._T_abs_src = parse_alignment_global(Path(alignment_global_path))
+            if self._T_abs_src is None:
+                print(
+                    f"[WARN] localizer alignment: expected=readable "
+                    f"alignment_global.txt at {alignment_global_path}, "
+                    f"got=missing-or-empty, fallback=returning colmap-frame poses",
+                    flush=True,
+                )
+
     @classmethod
-    def from_settings(cls, settings: Optional[LocalizationSettings] = None) -> "Localizer":
-        """Build from LocalizationSettings map_dir convention."""
+    def from_settings(
+        cls,
+        settings: Optional[LocalizationSettings] = None,
+        *,
+        alignment_global_path: Optional[Path] = None,
+    ) -> "Localizer":
+        """Build from LocalizationSettings map_dir convention.
+
+        If `alignment_global_path` is provided, returned poses are composed
+        into the absolute frame (what Habitat expects); otherwise they stay
+        in the underlying COLMAP/hloc frame (≈ NavVis pose-graph frame).
+        """
         s = settings or get_settings().localization
         return cls(
             sfm_dir=s.map_dir / "sfm",
             map_features_path=s.map_dir / "features_superpoint.h5",
             map_retrieval_path=s.map_dir / "features_netvlad.h5",
             settings=s,
+            alignment_global_path=alignment_global_path,
         )
 
     # ---- public API ----
@@ -320,6 +350,23 @@ class Localizer:
         q_xyzw = world_from_cam.rotation.quat
         q_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
         t_wc = np.asarray(world_from_cam.translation)
+
+        # Compose into the absolute frame if an alignment was provided.
+        # T_abs_cam = T_abs_src @ T_src_cam (LEFT multiply, same convention as
+        # scantools/proc/alignment/scan_align.py).
+        if self._T_abs_src is not None:
+            T_src_cam = np.eye(4, dtype=np.float64)
+            from scipy.spatial.transform import Rotation
+            T_src_cam[:3, :3] = Rotation.from_quat(
+                [q_xyzw[0], q_xyzw[1], q_xyzw[2], q_xyzw[3]]
+            ).as_matrix()
+            T_src_cam[:3, 3] = t_wc
+            T_abs_cam = self._T_abs_src @ T_src_cam
+            q_abs_xyzw = Rotation.from_matrix(T_abs_cam[:3, :3]).as_quat()
+            q_wxyz = np.array(
+                [q_abs_xyzw[3], q_abs_xyzw[0], q_abs_xyzw[1], q_abs_xyzw[2]]
+            )
+            t_wc = T_abs_cam[:3, 3]
 
         success = num_inliers >= self._settings.ransac_min_inliers
         return LocalizationResult(
