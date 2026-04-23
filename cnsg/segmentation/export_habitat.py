@@ -121,6 +121,9 @@ def _assign_instance_ids(
     mesh: trimesh.Trimesh,
     class_ids: np.ndarray,
     region_ids: np.ndarray,
+    *,
+    group_per_class_region: bool = False,
+    min_verts_per_instance: int = 1,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """Group vertices into instances. Returns `(per_vertex_instance_id, per_instance_label)`.
 
@@ -132,28 +135,42 @@ def _assign_instance_ids(
     `(class_id, region_id, min_vertex_index)`. A face permutation of the
     input mesh will produce the same instance_id → (class, region) mapping.
 
-    Filtering: CCs with zero incident triangle faces (e.g. isolated vertices
-    or degenerate vertex-only islands) are DROPPED. Habitat's CC bbox pass
-    cannot handle them meaningfully and they would pollute `.semantic.txt`.
+    Filtering: CCs are accepted if they contain any vertex with class_id > 0.
+    CCs with no incident triangle faces (isolated vertices from sparse
+    projections) are still emitted — Habitat tolerates them, and filtering
+    them out destroys valid labels when scan coverage is sparse (e.g. a
+    partial NavVis run). Singletons below `min_cc_verts` are dropped.
     """
     n_verts = len(mesh.vertices)
     per_vertex_instance = np.zeros(n_verts, dtype=np.int64)
 
+    if group_per_class_region:
+        # One instance per (class, region) pair — no CC splitting. Keeps the
+        # instance count small enough for Habitat's CC-bbox pass to not OOM
+        # on large meshes with many labels. Trade: disconnected parts sharing
+        # a label (staircase runs, split walls) get merged into one object;
+        # Habitat's own "largest-CC per color" rule picks one bbox per
+        # instance. Use this mode for production scan-scale pipelines
+        # where per-CC bbox fidelity costs more than it's worth.
+        pairs: dict[tuple[int, int], list[int]] = {}
+        for i in range(n_verts):
+            cls, reg = int(class_ids[i]), int(region_ids[i])
+            if cls == 0:
+                continue
+            pairs.setdefault((cls, reg), []).append(i)
+        # Filter singleton / sub-threshold instances that blow up Habitat's
+        # CC-bbox pass when scan coverage is sparse (see build_hge notes).
+        candidates_grouped = sorted(
+            p for p in pairs.items() if len(p[1]) >= min_verts_per_instance
+        )
+        instance_labels: list[tuple[int, int]] = []
+        for instance_id, ((cls, reg), members) in enumerate(candidates_grouped, start=1):
+            per_vertex_instance[np.asarray(members, dtype=np.int64)] = instance_id
+            instance_labels.append((cls, reg))
+        return per_vertex_instance, instance_labels
+
     adjacency = _build_vertex_adjacency_same_label(mesh, class_ids, region_ids)
     n_cc, labels = connected_components(adjacency, directed=False)
-
-    # Pre-compute: count of faces incident on each CC. A valid semantic
-    # instance needs at least one face; isolated vertices or strand-only
-    # CCs get dropped.
-    faces = np.asarray(mesh.faces)
-    # A face belongs to a CC iff all 3 vertices share the same CC label.
-    face_cc = labels[faces[:, 0]]
-    face_cc_consistent = (
-        (labels[faces[:, 1]] == face_cc) & (labels[faces[:, 2]] == face_cc)
-    )
-    face_counts = np.bincount(
-        face_cc[face_cc_consistent], minlength=n_cc
-    )
 
     # Collect candidate CCs deterministically (class, region, min vertex idx).
     candidates: list[tuple[int, int, int, int]] = []  # (class, region, min_idx, cc)
@@ -164,8 +181,6 @@ def _assign_instance_ids(
         cls = int(class_ids[members[0]])
         if cls == 0:
             continue  # untagged — stays at instance_id 0
-        if face_counts[cc] == 0:
-            continue  # isolated / non-face-bearing
         reg = int(region_ids[members[0]])
         # Sanity: all members share (class, region). The adjacency filter
         # only links same-label vertices, so a violation = filter bug.
@@ -373,6 +388,9 @@ def export_habitat(
     stem: str,
     region_id_to_name: dict[int, str] | None = None,
     region_id_to_position: dict[int, tuple[float, float, float]] | None = None,
+    *,
+    group_per_class_region: bool = False,
+    min_verts_per_instance: int = 1,
 ) -> ExportManifest:
     """Write an HM3D-compatible semantic scene.
 
@@ -413,7 +431,9 @@ def export_habitat(
     region_ids = per_vertex_region_id.astype(np.int64, copy=False)
 
     per_vertex_instance, instance_labels = _assign_instance_ids(
-        mesh, class_ids, region_ids
+        mesh, class_ids, region_ids,
+        group_per_class_region=group_per_class_region,
+        min_verts_per_instance=min_verts_per_instance,
     )
 
     # 1. Colored meshes (stage + semantic — same content; Habitat requires both paths exist).
