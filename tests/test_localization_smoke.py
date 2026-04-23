@@ -8,12 +8,15 @@ Strategy:
   - Pick one of the NavVis map images as the query. Because this image is
     already registered in the COLMAP reconstruction, localization should
     recover the reconstruction's own pose for it to sub-cm precision.
-  - Ground truth comes from the COLMAP reconstruction, NOT from NavVis's
-    `trajectories.txt`. The two are in different world frames (the
-    session-relative NavVis frame and COLMAP's internal frame differ by
-    the transform in `proc/alignment_global.txt`). The Localizer returns
-    poses in COLMAP's frame; downstream Habitat consumers handle frame
-    conversion separately (Phase 2 concern).
+  - Ground truth comes from the COLMAP reconstruction. It is **already in
+    the absolute frame** — LaMAR's map-building pipeline applies
+    `alignment_global.txt` once when constructing the SfM, so the
+    COLMAP frame matches the `__absolute__` frame used by Habitat and
+    by `HGE_cut.voxelized.ply`. Verified empirically: for 500 registered
+    images, COLMAP `world_from_cam.translation` matches
+    `T_abs_pg @ trajectories.txt pose` to 0.000 m. The Localizer therefore
+    returns absolute-frame poses directly — no compose step needed. See
+    `docs/report/02_hge-lift-frame-mismatch/findings.md §correction`.
   - A 20 cm / 2° gate catches catastrophic regressions (inverted quaternion
     convention, wrong PnP solver, broken hloc pipeline) while tolerating
     pycolmap's internal float rounding.

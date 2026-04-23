@@ -2153,19 +2153,15 @@ def _get_localizer():
     If the map isn't built, raises FileNotFoundError — run
     `scripts/download_data.sh` then `scripts/build_hge_map.sh` once.
 
-    The Habitat stage (`HGE.glb`) is in the `__absolute__` frame but hloc's
-    reconstruction is in the NavVis pose-graph frame (~60 m offset for HGE).
-    We pass the session's `alignment_global.txt` so the Localizer returns
-    poses directly in Habitat's world frame — otherwise every AgentState
-    placement would be ~60 m off. See docs/report/02_hge-lift-frame-mismatch/.
+    Frame note: the LaMAR-built COLMAP reconstruction for HGE is already in
+    the absolute frame (verified — `docs/report/02_hge-lift-frame-mismatch/
+    findings.md §correction`), so the returned pose is directly compatible
+    with the Habitat stage loaded from `HGE.glb`. No alignment-compose step.
     """
     global _LOCALIZER
     if _LOCALIZER is None:
-        from cnsg.config import get_settings
         from cnsg.localization.inference import Localizer
-        session = get_settings().localization.session_dir
-        alignment_path = session / "proc" / "alignment_global.txt" if session else None
-        _LOCALIZER = Localizer.from_settings(alignment_global_path=alignment_path)
+        _LOCALIZER = Localizer.from_settings()
     return _LOCALIZER
 
 
