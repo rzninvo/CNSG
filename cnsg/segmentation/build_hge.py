@@ -154,16 +154,32 @@ def _iter_navvis_frames(session: Path) -> Iterable[_NavVisFrame]:
     """Yield one `_NavVisFrame` per (timestamp, sensor_id) in the session.
 
     Pairs each RGB path with its depth-map (if present) and the sensor's
-    intrinsics + trajectory pose.
+    intrinsics + trajectory pose. If `alignment_global.txt` is present, every
+    emitted pose is pre-composed with `T_absolute_from_pose_graph` so the
+    returned `pose_T_wc` is in the absolute frame — matching the mesh that
+    downstream consumers (the lifter, Habitat) work in. Without this step,
+    trajectories live in the NavVis scanner's internal pose-graph frame while
+    the Poisson mesh is in the absolute frame, and projection fails almost
+    entirely (see `docs/report/02_hge-lift-frame-mismatch/findings.md`).
     """
     from cnsg.localization.capture_io import (
-        parse_images, parse_sensors, parse_trajectories,
+        parse_alignment_global, parse_images, parse_sensors, parse_trajectories,
     )
     from scipy.spatial.transform import Rotation
 
     images = parse_images(session / "images.txt")
     sensors = parse_sensors(session / "sensors.txt")
     poses = parse_trajectories(session / "trajectories.txt")
+    # Capture format writes `alignment_global.txt` under `{session}/proc/`
+    # (confirmed against real NavVis HGE data and scantools source layout).
+    T_abs_pg = parse_alignment_global(session / "proc" / "alignment_global.txt")
+    if T_abs_pg is None:
+        print(
+            f"[WARN] _iter_navvis_frames: alignment_global.txt not found in "
+            f"{session}; emitting trajectories unaligned. Downstream lifting "
+            f"WILL fail silently if the target mesh is in the absolute frame.",
+            flush=True,
+        )
 
     depth_dir = session / "depth_maps"
     raw_dir = session / "raw_data"
@@ -182,13 +198,19 @@ def _iter_navvis_frames(session: Path) -> Iterable[_NavVisFrame]:
         if not rgb_path.exists() or not depth_path.exists():
             continue
 
-        # Trajectory stores world ← camera directly as (q_wxyz, t).
+        # Trajectory stores world_pg ← camera (world = NavVis pose-graph frame).
         R = Rotation.from_quat(
             [pose.qx, pose.qy, pose.qz, pose.qw]  # scipy expects xyzw
         ).as_matrix()
         T_wc = np.eye(4, dtype=np.float64)
         T_wc[:3, :3] = R
         T_wc[:3, 3] = [pose.tx, pose.ty, pose.tz]
+
+        # Compose absolute ← camera = absolute ← pose_graph × pose_graph ← camera.
+        # Verified against scantools/proc/alignment/scan_align.py which applies
+        # `pose = T_session2w * pose` as a LEFT multiply.
+        if T_abs_pg is not None:
+            T_wc = T_abs_pg @ T_wc
 
         yield _NavVisFrame(
             frame_id=i,

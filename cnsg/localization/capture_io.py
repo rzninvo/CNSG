@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,58 @@ def parse_images(path: Path) -> list[ImageRecord]:
     if not records:
         raise ValueError(f"No image records found in {path}")
     return records
+
+
+def parse_alignment_global(
+    path: Path, *, label: str = "pose_graph_optimized"
+) -> Optional[np.ndarray]:
+    """Read `alignment_global.txt` and return the 4x4 `T_absolute_from_label` matrix.
+
+    The Capture format's global alignment file stores one row per session label
+    describing the rigid transform that maps points FROM that label's frame
+    (usually `pose_graph_optimized`, the NavVis scanner's internal reconstruction
+    frame) INTO the `__absolute__` reference frame:
+
+        `label, reference_id, qw, qx, qy, qz, tx, ty, tz, [info]+`
+
+    Verified against the LaMAR scantools source:
+        - `scantools/capture/proc/capture_proc.py` — `GlobalAlignment.get_abs_pose`
+          returns the stored pose under the name `T_session2w` at the call site.
+        - `scantools/proc/alignment/scan_align.py` — `pose = T_session2w * pose`
+          composes LEFT: `T_abs_cam = T_abs_pg @ T_pg_cam`.
+        - `scantools/capture/pose.py:Pose.transform_points` — `p_out = R @ p_in + t`.
+
+    Real-data sanity check (HGE session):
+        - trajectory centroid in pose-graph frame:       (-16.94, +28.33, +0.95)
+        - `HGE_cut.voxelized.ply` centroid (absolute):   (+44.60, -0.77, +5.79)
+        - applying `p_abs = R_align @ p_pg + t_align`:   (+41.86, -4.61, +1.97)
+          ← matches the mesh centroid to a few metres (the residual is the
+          camera-path vs whole-building geometric offset).
+
+    Returns `None` if the file is missing or doesn't contain a row for `label` —
+    callers should treat that as "identity transform already applied" and
+    consume trajectories as-is. Raises on malformed content.
+    """
+    if not path.exists():
+        return None
+    for cells in _iter_data_lines(path):
+        if len(cells) < 9:
+            continue
+        if cells[0] != label:
+            continue
+        q = Pose(
+            qw=float(cells[2]), qx=float(cells[3]),
+            qy=float(cells[4]), qz=float(cells[5]),
+            tx=float(cells[6]), ty=float(cells[7]), tz=float(cells[8]),
+        )
+        from scipy.spatial.transform import Rotation
+
+        R = Rotation.from_quat([q.qx, q.qy, q.qz, q.qw]).as_matrix()
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = [q.tx, q.ty, q.tz]
+        return T
+    return None
 
 
 def parse_trajectories(path: Path) -> dict[tuple[int, str], Pose]:
