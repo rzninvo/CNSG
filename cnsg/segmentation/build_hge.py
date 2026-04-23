@@ -93,6 +93,12 @@ class HgeBuildConfig:
     )
     sam3_confidence: float = 0.3
 
+    # Minimum fraction of mesh vertices that must carry a non-zero class_id
+    # after the lift. Below this, the build prints a loud banner warning —
+    # ships the output anyway (caller decides whether to accept it) but
+    # makes silent regressions impossible. 0.0 disables the check.
+    min_coverage_fraction: float = 0.15
+
     # Directory for caching per-frame (instance_mask, class_mask) post-combine.
     # A cache hit skips Mask2Former + SAM 3 inference (dominant ~52 min of a
     # full HGE build). Cache entries are tagged with a hash of
@@ -100,6 +106,57 @@ class HgeBuildConfig:
     # individual files loudly rather than serving stale masks. `None` =
     # no caching (always re-run models).
     seg_cache_dir: Optional[Path] = None
+
+
+# --- coverage sanity check --------------------------------------------------
+
+
+def _coverage_stats(
+    class_ids: np.ndarray, class_id_to_name: dict[int, str]
+) -> dict:
+    """Compute per-class labeled-vertex counts + the overall coverage fraction.
+
+    Returns a dict with:
+      - `total_verts`
+      - `labeled_verts`
+      - `labeled_fraction`
+      - `per_class`: {name: count} for every non-zero class
+    """
+    n_total = int(class_ids.size)
+    nonzero = class_ids > 0
+    n_labeled = int(nonzero.sum())
+
+    per_class: dict[str, int] = {}
+    if n_labeled > 0:
+        ids, counts = np.unique(class_ids[nonzero], return_counts=True)
+        for cid, c in zip(ids.tolist(), counts.tolist()):
+            per_class[class_id_to_name.get(int(cid), f"class_{cid}")] = int(c)
+
+    return {
+        "total_verts": n_total,
+        "labeled_verts": n_labeled,
+        "labeled_fraction": (n_labeled / n_total) if n_total else 0.0,
+        "per_class": per_class,
+    }
+
+
+def _log_coverage(stats: dict, min_fraction: float) -> None:
+    frac = stats["labeled_fraction"]
+    print(
+        f"[build_hge] coverage: {stats['labeled_verts']:,} / "
+        f"{stats['total_verts']:,} verts labeled ({frac * 100:.2f} %)"
+    )
+    for name, count in sorted(stats["per_class"].items(), key=lambda kv: -kv[1]):
+        print(f"[build_hge]   {name:12s}  {count:>8,} verts")
+    if min_fraction > 0 and frac < min_fraction:
+        print(
+            "[WARN] coverage below sanity threshold: "
+            f"expected=>={min_fraction * 100:.0f} %, got={frac * 100:.2f} %, "
+            "fallback=shipping anyway. Likely causes: frame/pose mismatch "
+            "(see docs/report/02_hge-lift-frame-mismatch/findings.md), "
+            "depth-unit mismatch, or a wrong mesh.",
+            flush=True,
+        )
 
 
 # --- per-frame segmentation cache ------------------------------------------
@@ -493,6 +550,17 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         f"({time.time()-t0:.1f}s)"
     )
 
+    # 6b. Coverage sanity check. Phase 3's first full HGE build shipped at
+    # 0.44 % labeled-vertex coverage because no one noticed the
+    # alignment-mismatch bug — Habitat loaded the output fine because the
+    # exporter tolerates sparse labels. This gate makes a silent regression
+    # loud at build time instead of at evaluation time. See
+    # `docs/report/02_hge-lift-frame-mismatch/findings.md`.
+    coverage_stats = _coverage_stats(
+        lift_result.class_ids, {c.id: c.name for c in S3DIS_CLASSES}
+    )
+    _log_coverage(coverage_stats, cfg.min_coverage_fraction)
+
     # 7. Hierarchy (floors + rooms).
     t0 = time.time()
     floor_ids, room_ids = segment_building(verts_np)
@@ -544,6 +612,7 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         "total_time_s": round(time.time() - t_all, 1),
         "seg_cache_hits": n_cache_hits,
         "seg_cache_misses": n_cache_misses,
+        "coverage": coverage_stats,
         "out_dir": str(cfg.out_dir),
     }
     (cfg.out_dir / "build_summary.json").write_text(json.dumps(summary, indent=2))
