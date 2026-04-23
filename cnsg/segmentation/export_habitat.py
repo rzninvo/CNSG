@@ -226,6 +226,35 @@ def _per_vertex_colors_uint8(
     return colors
 
 
+# Mid-grey assigned to Unknown verts in the stage GLB (visible under flat
+# shading without drowning out real labeled instances).
+_STAGE_UNKNOWN_GRAY: tuple[int, int, int] = (128, 128, 128)
+
+
+def _brighten_rgb_u8(rgb_u8: np.ndarray, floor: int) -> np.ndarray:
+    """Linearly lift uint8 RGB so the darkest channel value becomes `floor`.
+
+    Purely a *visual* transform for the rendered stage GLB. Bijective inside
+    each channel (preserves distinctness of the source palette) because it is
+    a strictly-increasing linear map on [0, 255] → [floor, 255]. Semantic
+    decoding must not touch this path — it operates on the exact palette in
+    `<stem>.semantic.glb` / `.semantic.txt`.
+
+    `floor=0` is the no-op (exact palette). With Habitat's `"shader_type":
+    "flat"` stages there is no diffuse/ambient lift, so a raw LCG palette
+    drawn uniformly from [0, 255] tends to render dim; `floor≈80` produces
+    a readable-but-still-distinguishable stage without affecting the
+    semantic sensor, whose decode pass reads the separate `.semantic.glb`.
+    """
+    if floor <= 0:
+        return rgb_u8
+    if floor > 255:
+        raise ValueError(f"floor must be in [0, 255], got {floor}")
+    scale = (255 - floor) / 255.0
+    lifted = floor + rgb_u8.astype(np.float64) * scale
+    return np.clip(np.round(lifted), 0, 255).astype(np.uint8)
+
+
 def _srgb_decode_u8(rgb_u8: np.ndarray) -> np.ndarray:
     """Inverse of Habitat's `toSrgb<UnsignedByte>` applied component-wise on [0,1].
 
@@ -391,6 +420,7 @@ def export_habitat(
     *,
     group_per_class_region: bool = False,
     min_verts_per_instance: int = 1,
+    stage_rgb_floor: int = 80,
 ) -> ExportManifest:
     """Write an HM3D-compatible semantic scene.
 
@@ -408,6 +438,13 @@ def export_habitat(
         region_id_to_position: optional map of region_id → [x, y, z] centroid
             used by `mr_viewer.py` as a floor-height heuristic. Missing keys
             default to the region's vertex-mean position.
+        stage_rgb_floor: uint8 floor applied to `<stem>.glb` (the visual
+            stage) to keep flat-shaded vertex colors readable. The LCG
+            palette spans [0, 255] uniformly, so without a lift ~30 % of
+            instances render as near-black under Habitat's `shader_type:
+            flat` stage. Does NOT affect `<stem>.semantic.glb` —
+            SemanticSensor decoding always uses the exact palette.
+            Set to 0 for a no-op (identical stage + semantic).
 
     Returns:
         `ExportManifest` with paths and count summary.
@@ -436,12 +473,26 @@ def export_habitat(
         min_verts_per_instance=min_verts_per_instance,
     )
 
-    # 1. Colored meshes (stage + semantic — same content; Habitat requires both paths exist).
+    # 1. Colored meshes. `.semantic.glb` uses the exact LCG palette so
+    # SemanticSensor's sRGB-encoded lookup lands on the hex in `.semantic.txt`;
+    # Unknown verts stay `(0,0,0)` — the HM3D "ignore me" sentinel.
+    # `.glb` (rendered stage) gets a brightened copy for the labeled verts and
+    # a mid-gray baseline for the Unknown ones — flat-shaded `(0,0,0)` renders
+    # as pitch black, which makes the whole scene unreadable whenever labeled
+    # coverage is sparse (commonly the case with `group_per_class_region=True`
+    # + a min-verts filter).
     colors_uint8 = _per_vertex_colors_uint8(len(mesh.vertices), per_vertex_instance)
     stage_glb = out_dir / f"{stem}.glb"
     semantic_glb = out_dir / f"{stem}.semantic.glb"
-    _write_glb_with_float_colors(mesh, colors_uint8, stage_glb)
     _write_glb_with_float_colors(mesh, colors_uint8, semantic_glb)
+    if stage_rgb_floor > 0:
+        stage_colors = colors_uint8.copy()
+        stage_colors[:, :3] = _brighten_rgb_u8(colors_uint8[:, :3], stage_rgb_floor)
+        unknown = per_vertex_instance == 0
+        stage_colors[unknown, :3] = _STAGE_UNKNOWN_GRAY
+    else:
+        stage_colors = colors_uint8
+    _write_glb_with_float_colors(mesh, stage_colors, stage_glb)
 
     # 2. .semantic.txt (the SSD that drives scene.regions / .objects).
     # LF-only line terminator; `write_bytes` avoids Windows LF→CRLF translation
