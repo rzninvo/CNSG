@@ -373,59 +373,6 @@ class HabitatSimInteractiveViewer(Application):
                     )
             self.draw_region_debug(self.debug_line_render)
 
-    def save_semantic_image(self) -> None:
-        """
-        Captures the current semantic sensor view and saves it as a colored JPG file.
-        """
-        try:
-            # Get observations from the simulator
-            observations = self.sim.get_sensor_observations()
-
-            # Check if semantic sensor exists
-            if "semantic_sensor" not in observations:
-                logger.warning("No semantic sensor found in observations. Cannot save semantic image.")
-                return
-
-            semantic_obs = observations["semantic_sensor"]
-
-            # Create output directory if it doesn't exist
-            output_dir = "semantic_captures"
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(output_dir, f"semantic_{timestamp}.jpg")
-
-            # Convert semantic IDs to colored image
-            # Get unique semantic IDs
-            unique_ids = np.unique(semantic_obs)
-
-            # Create a colormap for semantic IDs
-            # Use a deterministic color mapping based on ID
-            semantic_img_rgb = np.zeros((semantic_obs.shape[0], semantic_obs.shape[1], 3), dtype=np.uint8)
-
-            for semantic_id in unique_ids:
-                # Generate a unique color for each semantic ID using a hash-like function
-                # This ensures consistent colors across saves
-                np.random.seed(int(semantic_id))
-                color = np.random.randint(0, 256, 3, dtype=np.uint8)
-
-                # Apply color to all pixels with this semantic ID
-                mask = semantic_obs == semantic_id
-                semantic_img_rgb[mask] = color
-
-            # Reset random seed to avoid affecting other random operations
-            np.random.seed(None)
-
-            # Save the image
-            Image.fromarray(semantic_img_rgb, mode='RGB').save(filename)
-            logger.info(f"✅ Saved colored semantic image to: {filename}")
-            print(f"✅ Saved colored semantic image to: {filename}")
-
-        except Exception as e:
-            logger.error(f"Failed to save semantic image: {e}")
-            print(f"❌ Failed to save semantic image: {e}")
-
     def compute_object_center(self, obj_obb):
         """
         Compute the center of an object's oriented bounding box.
