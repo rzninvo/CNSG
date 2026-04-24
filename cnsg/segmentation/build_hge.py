@@ -746,7 +746,7 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
     summary = {
         "navvis_session": str(cfg.navvis_session),
         "mesh_path": str(cfg.mesh_path),
-        "num_frames_processed": len(lift_frames),
+        "num_frames_processed": lift_frames_count,
         "num_verts": int(len(mesh.vertices)),
         "num_faces": int(len(mesh.faces)),
         "lift_num_instances": int(lift_result.num_instances),
