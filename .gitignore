@@ -19,6 +19,9 @@ mesh_pipeline/.vscode/*
 habitat-sim/semantic_captures/*
 mesh_pipeline/outputs/*
 
+# Vendored third-party clones (cloned on-demand; not our source to commit)
+mesh_pipeline/third_party/MaskClustering/
+
 # Top-level runtime data: NavVis sessions, built HGE semantic outputs,
 # hloc feature caches. Large (GB-scale) and user-specific.
 data/
