@@ -1603,7 +1603,6 @@ class NewViewer(BaseViewer):
                 start = corners[edge[0]]
                 end = corners[edge[1]]
                 debug_line_render.draw_transformed_line(start, end, color)
-                debug_line_render.draw_transformed_line(start, end, color)
 
             top_center = (center + rotation.transform_vector(mn.Vector3(0.0, half_extents[1], 0.0)) + mn.Vector3(0.0, 0.05, 0.0))
             screen_pos = self._project_to_screen(top_center)

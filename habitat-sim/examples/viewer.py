@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image
@@ -1182,16 +1183,64 @@ class HabitatSimInteractiveViewer(Application):
         """
         This method is setup to be overridden in for setting config accessibility
         in inherited classes.
+
+        Navmesh recompute on a 4 M-vert HGE stage is ~12 s (Recast is single-
+        threaded). Cache the result to a `.navmesh` sidecar keyed by
+        `(scene_id, height, radius)` so subsequent launches skip the recompute.
         """
         self.navmesh_settings = habitat_sim.NavMeshSettings()
         self.navmesh_settings.set_defaults()
         self.navmesh_settings.agent_height = self.cfg.agents[self.agent_id].height
         self.navmesh_settings.agent_radius = self.cfg.agents[self.agent_id].radius
         self.navmesh_settings.include_static_objects = True
+
+        # Cache path lives next to the scene file so it invalidates naturally
+        # when the scene moves or gets rebuilt. Hash the settings that affect
+        # the navmesh so different agent sizes don't share a cache file.
+        scene_id = str(self.cfg.sim_cfg.scene_id)
+        scene_path = Path(scene_id)
+        import hashlib
+        settings_key = hashlib.sha1(
+            f"{self.navmesh_settings.agent_height:.4f}|"
+            f"{self.navmesh_settings.agent_radius:.4f}|"
+            f"{self.navmesh_settings.include_static_objects}".encode("utf-8")
+        ).hexdigest()[:12]
+        cache_path = scene_path.with_suffix(f".{settings_key}.navmesh")
+
+        if cache_path.exists():
+            try:
+                t0 = time.time()
+                loaded = self.sim.pathfinder.load_nav_mesh(str(cache_path))
+                if loaded:
+                    logger.info(
+                        f"navmesh cache HIT: {cache_path.name} "
+                        f"({time.time()-t0:.2f}s)"
+                    )
+                    return
+                logger.warning(
+                    f"[WARN] navmesh load: expected=readable {cache_path}, "
+                    f"got=load_nav_mesh returned False, fallback=recompute"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[WARN] navmesh load: expected=readable {cache_path}, "
+                    f"got={type(exc).__name__}: {exc}, fallback=recompute"
+                )
+
+        t0 = time.time()
         self.sim.recompute_navmesh(
             self.sim.pathfinder,
             self.navmesh_settings,
         )
+        logger.info(f"navmesh recomputed in {time.time()-t0:.2f}s")
+        try:
+            self.sim.pathfinder.save_nav_mesh(str(cache_path))
+            logger.info(f"navmesh cached to {cache_path.name}")
+        except Exception as exc:
+            logger.warning(
+                f"[WARN] navmesh save: expected=writable {cache_path}, "
+                f"got={type(exc).__name__}: {exc}, fallback=will recompute next launch"
+            )
 
     def exit_event(self, event: Application.ExitEvent):
         """
