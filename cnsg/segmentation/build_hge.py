@@ -92,14 +92,37 @@ class HgeBuildConfig:
     decimate_target_faces: Optional[int] = 300_000
 
     # Lift algorithm knobs.
-    depth_tolerance_m: float = 0.05
+    # Depth tolerance for the 2D→3D lift. 5 cm is the thorough-literature
+    # choice; 15 cm is what we measured as the best-compromise ceiling on our
+    # Poisson mesh (see docs/report/04_segmentation-upgrade-plan §measured
+    # ceilings). 99.7% of Unknown verts fail depth-test at 5 cm; loosening
+    # to 15 cm recovers +4 pp with negligible false-positive increase.
+    depth_tolerance_m: float = 0.15
 
-    # SAM 3 config.
+    # SAM 3 open-vocabulary prompts. Curated for ETH HG E floor
+    # (landmark-based navigation per docs/papers/MR_Final_Report.pdf §3.3).
+    # Categories:
+    #   - HG E-specific architecture / decor: fountain, statue, bust, column,
+    #     arched doorway, staircase (flight), hall, balustrade, pillar, vault
+    #   - Navigation landmarks the LLM refers to: lecture hall door,
+    #     display case, notice board, bench, information board, plaque
+    #   - Standard furniture (kept from the original generic list where still
+    #     relevant): chair, table, desk, door, elevator, bookcase
+    # The list is intentionally verbose — SAM 3 runs once per prompt per
+    # frame (image encoder cached), so adding prompts costs linear time but
+    # recovers landmarks the ADE20K taxonomy lumps into "other".
     sam3_prompts: tuple[str, ...] = (
-        "door", "chair", "table", "desk", "sofa", "bed",
-        "stairs", "elevator", "printer", "water fountain",
-        "trash can", "cabinet", "shelf", "bookcase", "television",
-        "computer", "kitchen counter", "whiteboard",
+        # HG E specific landmarks (Bianco et al §3.3)
+        "fountain", "statue", "bust", "pillar", "column",
+        "arched doorway", "arched ceiling", "archway",
+        "staircase", "staircase flight", "balustrade", "handrail",
+        "lecture hall door", "entrance door", "information board",
+        "display case", "notice board", "plaque", "signboard",
+        # Common interior furniture (retained from generic list)
+        "door", "chair", "table", "desk", "bench", "sofa",
+        "bookcase", "cabinet", "shelf", "whiteboard",
+        # Facilities the user may ask about
+        "elevator", "printer", "trash can", "water cooler",
     )
     sam3_confidence: float = 0.3
 
