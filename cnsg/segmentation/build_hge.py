@@ -126,6 +126,14 @@ class HgeBuildConfig:
     )
     sam3_confidence: float = 0.3
 
+    # Structural backbone. "mask2former" (default, stable) uses
+    # `facebook/mask2former-swin-large-ade-semantic`. "eomt" uses
+    # `tue-mps/ade20k_semantic_eomt_large_512` — CVPR'25 Highlight, beats
+    # Mask2Former accuracy with ~4× speedup per the paper. Both return the
+    # same ADE20K-150 label space so the S3DIS remap carries over unchanged.
+    # See `docs/report/04_segmentation-upgrade-plan/findings.md`.
+    structural_backbone: str = "mask2former"
+
     # Optional path to a pre-existing photorealistic stage GLB (e.g. NavVis'
     # `HGE.basis.glb` with baked photographic textures). When set, the
     # emitted scene_dataset_config.json points at this file as the stage,
@@ -204,21 +212,35 @@ def _log_coverage(stats: dict, min_fraction: float) -> None:
 # --- per-frame segmentation cache ------------------------------------------
 
 
-def _seg_cache_config_hash(prompts: tuple[str, ...], confidence: float) -> str:
+def _seg_cache_config_hash(
+    prompts: tuple[str, ...],
+    confidence: float,
+    structural_backbone: str = "mask2former",
+) -> str:
     """Stable 16-hex-char fingerprint of the segmentation-affecting knobs.
 
-    Changes to `sam3_prompts` or `sam3_confidence` invalidate every cached
-    frame because both alter the combined (instance_mask, class_mask) output.
-    The Mask2Former backbone is pinned to a single checkpoint so it's not
-    part of the hash today — if we ever swap backbones, add it here.
+    Changes to `sam3_prompts`, `sam3_confidence`, or `structural_backbone`
+    invalidate every cached frame because all three alter the combined
+    (instance_mask, class_mask) output.
+
+    The hash blob OMITS `structural_backbone` when it equals the historical
+    default ("mask2former") so cache files written before the backbone knob
+    existed still match. Any other backbone (e.g. "eomt") is included and
+    therefore gets its own isolated cache partition.
     """
     import hashlib
 
-    blob = json.dumps(
-        {"prompts": sorted(prompts), "confidence": round(float(confidence), 6)},
-        sort_keys=True,
-    ).encode("utf-8")
+    blob_dict: dict[str, object] = {
+        "prompts": sorted(prompts),
+        "confidence": round(float(confidence), 6),
+    }
+    if structural_backbone != "mask2former":
+        blob_dict["backbone"] = structural_backbone
+    blob = json.dumps(blob_dict, sort_keys=True).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:16]
+
+
+_seg_cache_mismatch_warned: set[str] = set()
 
 
 def _seg_cache_load(
@@ -232,7 +254,9 @@ def _seg_cache_load(
       2. hash mismatch — prompts/confidence changed; caller will re-run
       3. corrupt npz — io error, caller will re-run
 
-    A re-run on miss overwrites the stale file automatically.
+    A re-run on miss overwrites the stale file automatically. Hash-mismatch
+    warnings dedupe to one message per unique `(got_hash, expected_hash)`
+    pair per process so 2408 stale files don't spam 2408 WARN lines.
     """
     path = cache_dir / f"frame_{frame_id:06d}.npz"
     if not path.exists():
@@ -241,12 +265,17 @@ def _seg_cache_load(
         with np.load(path, allow_pickle=False) as z:
             got_hash = str(z["config_hash"].item()) if "config_hash" in z.files else ""
             if got_hash != expected_hash:
-                print(
-                    f"[WARN] seg_cache: expected=hash={expected_hash}, "
-                    f"got=hash={got_hash!r} for frame {frame_id}, "
-                    f"fallback=re-run segmentation",
-                    flush=True,
-                )
+                key = f"{got_hash}->{expected_hash}"
+                if key not in _seg_cache_mismatch_warned:
+                    _seg_cache_mismatch_warned.add(key)
+                    print(
+                        f"[WARN] seg_cache: entries hash={got_hash!r} but "
+                        f"expected={expected_hash!r} (config changed). "
+                        f"First stale frame: {frame_id}. Re-running "
+                        f"segmentation for all mismatched frames — this "
+                        f"message prints once per unique mismatch.",
+                        flush=True,
+                    )
                 return None
             return z["instance_mask"].astype(np.int32), z["class_mask"].astype(np.int16)
     except (OSError, ValueError, EOFError) as exc:
@@ -450,7 +479,17 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
     from cnsg.segmentation.hierarchy import segment_building
     from cnsg.segmentation.lift_2d_to_3d import Frame, lift_masks_to_3d
     from cnsg.segmentation.sam3_per_frame import Sam3Segmenter
-    from cnsg.segmentation.structural_ade20k import Mask2FormerBackbone
+    # Structural backbone is pluggable — pick by cfg.structural_backbone.
+    # Both expose the same `.segment(PIL.Image) -> FrameSemantics` API.
+    if cfg.structural_backbone == "eomt":
+        from cnsg.segmentation.structural_eomt import EomtBackbone as _StructuralBackbone
+    elif cfg.structural_backbone == "mask2former":
+        from cnsg.segmentation.structural_ade20k import Mask2FormerBackbone as _StructuralBackbone
+    else:
+        raise ValueError(
+            f"Unknown structural_backbone {cfg.structural_backbone!r}; "
+            f"expected 'mask2former' or 'eomt'"
+        )
     from cnsg.segmentation.taxonomy import (
         S3DIS_CLASSES, S3DIS_NAME_TO_ID, ade20k_name_to_s3dis,
     )
@@ -499,7 +538,9 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
     # 4. Set up per-frame segmentation cache if requested; defer heavy model
     #    loads until we know we actually need them (pure cache hits skip both).
     cache_dir = cfg.seg_cache_dir
-    cache_hash = _seg_cache_config_hash(cfg.sam3_prompts, cfg.sam3_confidence)
+    cache_hash = _seg_cache_config_hash(
+        cfg.sam3_prompts, cfg.sam3_confidence, cfg.structural_backbone
+    )
     if cache_dir is not None:
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -515,8 +556,11 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         if m2f is not None and sam3 is not None:
             return
         t0 = time.time()
-        m2f = Mask2FormerBackbone()
-        print(f"[build_hge] Mask2Former loaded ({time.time()-t0:.1f}s)")
+        m2f = _StructuralBackbone()
+        print(
+            f"[build_hge] {cfg.structural_backbone} backbone loaded "
+            f"({time.time()-t0:.1f}s)"
+        )
         t0 = time.time()
         sam3 = Sam3Segmenter(
             prompts=cfg.sam3_prompts, confidence_threshold=cfg.sam3_confidence,
@@ -676,8 +720,15 @@ def _main() -> None:
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--stem", default="HGE")
     p.add_argument("--max-frames", type=int, default=None)
-    p.add_argument("--depth-tolerance", type=float, default=0.05)
+    p.add_argument("--depth-tolerance", type=float, default=0.15)
     p.add_argument("--sam3-confidence", type=float, default=0.3)
+    p.add_argument(
+        "--structural-backbone", choices=("mask2former", "eomt"),
+        default="mask2former",
+        help="Structural-seg backbone. 'eomt' is faster + higher mIoU on "
+             "ADE20K (CVPR'25 Highlight, tue-mps/ade20k_semantic_eomt_large_512). "
+             "Changing this invalidates the seg_cache.",
+    )
     p.add_argument(
         "--decimate-target-faces", type=int, default=300_000,
         help="Target face count after decimation. Habitat's CC-bbox pass "
@@ -712,6 +763,7 @@ def _main() -> None:
         decimate_target_faces=(args.decimate_target_faces or None),
         seg_cache_dir=args.seg_cache_dir,
         external_stage_glb=args.external_stage_glb,
+        structural_backbone=args.structural_backbone,
     )
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     build_hge_semantics(cfg)
