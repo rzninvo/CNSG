@@ -150,65 +150,84 @@ log_info "Downloading mesh pipeline data..."
 bash scripts/download_data.sh
 log_success "Data downloaded"
 
-# Step 5: Ask about segmentation
-echo -e "\n${YELLOW} Step 5: Semantic Segmentation (Optional) ${NC}"
-echo -e "${BLUE}Do you want to run the segmentation pipeline?${NC}"
-echo -e "This will generate semantic meshes for Habitat-Sim to use with ETH HG E floor."
-echo -e "Note: This can take several hours depending on your hardware."
+# Step 5: Wire HGE assets into habitat-sim's scene_datasets layout so the
+# README's `python examples/mr_viewer.py --scene ./data/scene_datasets/HGE/
+# HGE.basis.glb ...` invocation works out of the box. We symlink rather than
+# copy — the source bytes in mesh_pipeline/data/ (basis) and data/maps/hge/
+# (semantics) are the authoritative location; symlinks keep both paths in
+# sync when we rebuild semantics.
+echo -e "\n${YELLOW} Step 5: Wiring HGE into habitat-sim/data/scene_datasets/ ${NC}"
+
+SCENE_DATASETS_DIR="$ROOT_DIR/habitat-sim/data/scene_datasets"
+HGE_DIR="$SCENE_DATASETS_DIR/HGE"
+MESH_PIPELINE_DATA="$ROOT_DIR/mesh_pipeline/data"
+BUILD_DIR="$ROOT_DIR/data/maps/hge"
+
+mkdir -p "$HGE_DIR"
+
+# Shipped from the Google Drive bundle (required for any render of HGE).
+# Scene config + basis stage live relative to scene_datasets/ per the README.
+log_info "Linking HGE.scene_dataset_config.json ..."
+ln -sfn "$MESH_PIPELINE_DATA/HGE.scene_dataset_config.json" \
+       "$SCENE_DATASETS_DIR/HGE.scene_dataset_config.json"
+
+log_info "Linking HGE/HGE.basis.glb ..."
+ln -sfn "$MESH_PIPELINE_DATA/HGE.basis.glb" "$HGE_DIR/HGE.basis.glb"
+
+# Room names + semantic assets: prefer the freshly-built versions under
+# data/maps/hge/ when they exist (cnsg/segmentation/build_hge output), fall
+# back to whatever the Google Drive bundle shipped. Loud [WARN] if neither —
+# the viewer still runs but SemanticSensor returns zero regions/objects.
+link_first_existing() {
+    local target="$1"
+    shift
+    for src in "$@"; do
+        if [[ -f "$src" ]]; then
+            ln -sfn "$src" "$target"
+            log_info "   linked $(basename "$target") -> $src"
+            return 0
+        fi
+    done
+    log_warning "[WARN] $(basename "$target"): expected=readable one of [$*], got=none-exist, fallback=not-linked"
+    return 1
+}
+
+link_first_existing "$SCENE_DATASETS_DIR/HGE.semantic.glb" \
+    "$BUILD_DIR/HGE.semantic.glb" "$MESH_PIPELINE_DATA/HGE.semantic.glb"
+link_first_existing "$SCENE_DATASETS_DIR/HGE.semantic.txt" \
+    "$BUILD_DIR/HGE.semantic.txt" "$MESH_PIPELINE_DATA/HGE.semantic.txt"
+link_first_existing "$SCENE_DATASETS_DIR/room_id_to_name_map.json" \
+    "$BUILD_DIR/room_id_to_name_map.json" "$MESH_PIPELINE_DATA/room_id_to_name_map.json"
+
+log_success "scene_datasets/HGE wired up"
+
+# Step 6: Ask about (re)building semantics. The legacy run_segmentation_
+# pipeline.sh is gone (replaced by our Phase-3 cnsg/segmentation pipeline
+# in `scripts/build_hge_semantics.sh`).
+echo -e "\n${YELLOW} Step 6: HGE Semantic Mesh (Optional Rebuild) ${NC}"
+echo -e "${BLUE}The Google Drive bundle ships a pre-built semantic mesh.${NC}"
+echo -e "Rebuild it from scratch (Mask2Former + SAM 3, ~30 min on RTX 5090)?"
+echo -e "Skip unless you changed prompts / confidence in HgeBuildConfig."
 echo ""
-read -p "Run segmentation pipeline? (y/n): " -n 1 -r
+read -p "Run the semantic build pipeline? (y/n): " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    log_info "Running segmentation pipeline..."
-    bash scripts/run_segmentation_pipeline.sh
-    log_success "Segmentation pipeline completed"
+    log_info "Running cnsg.segmentation.build_hge (needs the cnsg-seg env) ..."
+    bash "$ROOT_DIR/scripts/build_hge_semantics.sh"
+    log_success "Semantic build done — Step 5 symlinks already point at the fresh output"
 
-    # Copy files to habitat-sim
-    echo -e "\n${YELLOW} Step 6: Copying Semantic Data to Habitat-Sim ${NC}"
-
-    # Create scene_datasets directory if it doesn't exist
-    SCENE_DATASETS_DIR="$ROOT_DIR/habitat-sim/data/scene_datasets"
-    log_info "Creating scene_datasets directory at: $SCENE_DATASETS_DIR"
-    mkdir -p "$SCENE_DATASETS_DIR"
-
-    # Copy scene dataset config to scene_datasets
-    log_info "Copying HGE.scene_dataset_config.json..."
-    cp "$ROOT_DIR/mesh_pipeline/data/HGE.scene_dataset_config.json" "$SCENE_DATASETS_DIR/"
-
-    # Create HGE directory
-    HGE_DIR="$SCENE_DATASETS_DIR/HGE"
-    log_info "Creating HGE directory at: $HGE_DIR"
-    mkdir -p "$HGE_DIR"
-
-    # Copy files to HGE directory
-    log_info "Copying semantic files to HGE directory..."
-
-    FILES_TO_COPY=(
-        "room_id_to_name_map.json"
-        "HGE.semantic.txt"
-        "HGE.semantic.scn"
-        "HGE.semantic.glb"
-        "HGE.basis.glb"
-    )
-
-    for file in "${FILES_TO_COPY[@]}"; do
-        SOURCE_FILE="$ROOT_DIR/mesh_pipeline/data/$file"
-        if [[ -f "$SOURCE_FILE" ]]; then
-            cp "$SOURCE_FILE" "$HGE_DIR/"
-            log_info "   Copied $file"
-        else
-            log_warning "   File not found: $file (may be generated by segmentation pipeline)"
-        fi
-    done
-
-    log_success "Semantic data copied to habitat-sim!"
-    log_info "Scene dataset location: $SCENE_DATASETS_DIR/HGE"
+    # Re-run symlink step so any new files land correctly
+    link_first_existing "$SCENE_DATASETS_DIR/HGE.semantic.glb" \
+        "$BUILD_DIR/HGE.semantic.glb" "$MESH_PIPELINE_DATA/HGE.semantic.glb"
+    link_first_existing "$SCENE_DATASETS_DIR/HGE.semantic.txt" \
+        "$BUILD_DIR/HGE.semantic.txt" "$MESH_PIPELINE_DATA/HGE.semantic.txt"
+    link_first_existing "$SCENE_DATASETS_DIR/room_id_to_name_map.json" \
+        "$BUILD_DIR/room_id_to_name_map.json" "$MESH_PIPELINE_DATA/room_id_to_name_map.json"
 else
-    log_warning "Skipping segmentation pipeline."
-    echo -e "You can run it later with: ${YELLOW}bash mesh_pipeline/scripts/run_segmentation_pipeline.sh${NC}"
+    log_warning "Skipping semantic rebuild; using whatever's on disk."
+    echo -e "You can run it later with: ${YELLOW}bash scripts/build_hge_semantics.sh${NC}"
 fi
-
 # install some usefull libraries
 
 # Deactivate conda env

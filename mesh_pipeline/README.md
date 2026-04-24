@@ -38,19 +38,22 @@ Underlying components (`src/mesh_generation`):
 - `generate_depth.py` — raycast depth maps using trajectories.
 
 ### 3D segmentation
-```bash
-./scripts/run_segmentation_pipeline.sh
-```
-Behavior:
-- Verifies `depth_maps`; offers to run `generate_depth.py` if missing.
-- Executes in order: `run_segmentation.py` → `fuse_labels.py` → `clean_mesh.py` → `transfer_labels_to_trimesh.py` → `export_hm3d.py`.
 
-Underlying components (`src/3D_segmentation`):
-- `run_segmentation.py` — Mask2Former semantic inference on NavVis images.
-- `fuse_labels.py` — project per-frame masks onto the mesh via depth + poses.
-- `clean_mesh.py` — DBSCAN + KNN smoothing of vertex labels.
-- `transfer_labels_to_trimesh.py` — align labels to trimesh vertex order.
-- `export_hm3d.py` — Habitat GLB + TXT semantic export.
+The legacy chain (`run_segmentation_pipeline.sh` → Mask2Former + DBSCAN + trimesh transfer + hm3d export) was replaced in Phase 3 — see [docs/report/01_architecture-lean-migration/phase3-status.md](../docs/report/01_architecture-lean-migration/phase3-status.md). Current entry point lives at the repo root:
+
+```bash
+bash ../scripts/build_hge_semantics.sh
+```
+
+What runs under the hood (in the `cnsg-seg` conda env, py3.12 + torch 2.11 cu128 + SAM 3 + flash-attn-3):
+
+- `cnsg.segmentation.structural_ade20k` — Mask2Former-ADE20K for structural classes (wall, floor, ceiling, window, door, column, clutter).
+- `cnsg.segmentation.sam3_per_frame` — SAM 3 open-vocab text-prompt instances for foreground objects.
+- `cnsg.segmentation.lift_2d_to_3d` — per-frame project + depth-test + union-find → per-vertex instance + class.
+- `cnsg.segmentation.hierarchy` — floor / room partitioning (HOV-SG-style watershed on BEV).
+- `cnsg.segmentation.export_habitat` — HM3D-compatible `.semantic.glb` + `.semantic.txt` + `scene_dataset_config.json`.
+
+The script writes into `data/maps/hge/` (repo root). `scripts/install.sh` Step 5 symlinks those outputs into `habitat-sim/data/scene_datasets/` so the viewer invocation in the top-level README works without manual file copies.
 
 ### Image localization
 
