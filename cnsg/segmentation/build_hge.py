@@ -310,6 +310,21 @@ def _seg_cache_save(
     os.replace(tmp, path)
 
 
+def _print_seg_progress(
+    i: int, n_frames: int, t0_frame: float, t_seg_start: float
+) -> None:
+    """Tiny shared helper to keep both branches of the seg loop logging
+    the same way."""
+    elapsed = time.time() - t_seg_start
+    avg = elapsed / (i + 1)
+    eta_min = (n_frames - (i + 1)) * avg / 60.0
+    print(
+        f"[build_hge]  seg {i+1:4d}/{n_frames:4d}  "
+        f"{time.time() - t0_frame:.2f}s/frame (avg {avg:.2f}s) "
+        f"ETA {eta_min:.1f}min"
+    )
+
+
 # --- per-frame combiner ----------------------------------------------------
 
 
@@ -567,69 +582,112 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         )
         print(f"[build_hge] SAM 3 loaded ({time.time()-t0:.1f}s)")
 
-    # 5. Per-frame segment + combine, then hand to the lifter.
-    lift_frames: list[Frame] = []
+    # 5a. Per-frame segment-or-cache-hit, WITHOUT accumulating Frames in RAM.
+    # Each NavVis frame at 1280×1920 carries ~25 MB of (depth + instance_mask +
+    # class_mask). Pre-Phase-3-OOM-fix this loop appended every frame to a
+    # `list[Frame]` then passed it to `lift_masks_to_3d` — at 2408 frames that
+    # was ~59 GB, which the OOM killer reaped reliably on a 64 GB host. We now
+    # split into two phases: Phase 5a ensures the cache is populated (only
+    # `(instance_mask, class_mask)` is held briefly per frame, and even those
+    # get freed at end of iteration); Phase 5b streams `Frame` objects to the
+    # lifter via a generator so peak memory stays at one frame at a time.
+    lift_frames_count = 0  # for the lift summary; len() of generator unavailable
     t_seg = time.time()
     for i, f in enumerate(frames):
         t0 = time.time()
-        depth = _load_navvis_depth(f.depth_path)
-
-        instance_mask: Optional[np.ndarray] = None
-        class_mask: Optional[np.ndarray] = None
 
         if cache_dir is not None:
             cached = _seg_cache_load(cache_dir, f.frame_id, cache_hash)
             if cached is not None:
-                instance_mask, class_mask = cached
                 n_cache_hits += 1
+                lift_frames_count += 1
+                if (i + 1) % 10 == 0 or i == 0:
+                    _print_seg_progress(i, len(frames), t0, t_seg)
+                continue
 
-        if instance_mask is None:
-            _ensure_models_loaded()
-            rgb = Image.open(f.rgb_path).convert("RGB")
-            m2f_out = m2f.segment(rgb)
-            sam3_out = sam3.segment(rgb)
-            sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
-            instance_mask, class_mask = _combine_per_frame(
-                sam3_mask=sam3_out.instance_mask,
-                sam3_class_lut=sam3_class_lut,
-                m2f_class=m2f_out.s3dis_labels,
-            )
-            n_cache_misses += 1
-            if cache_dir is not None:
-                _seg_cache_save(
-                    cache_dir, f.frame_id, cache_hash, instance_mask, class_mask
-                )
-
-        lift_frames.append(
-            Frame(
-                frame_id=f.frame_id,
-                depth=depth,
-                instance_mask=instance_mask,
-                class_mask=class_mask.astype(np.int16),
-                T_world_cam=f.pose_T_wc,
-                fx=f.fx, fy=f.fy, cx=f.cx, cy=f.cy,
-            )
+        # Cache miss (or no cache configured). Segment, optionally save, drop.
+        _ensure_models_loaded()
+        rgb = Image.open(f.rgb_path).convert("RGB")
+        m2f_out = m2f.segment(rgb)
+        sam3_out = sam3.segment(rgb)
+        sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
+        instance_mask, class_mask = _combine_per_frame(
+            sam3_mask=sam3_out.instance_mask,
+            sam3_class_lut=sam3_class_lut,
+            m2f_class=m2f_out.s3dis_labels,
         )
-        if (i + 1) % 10 == 0 or i == 0:
-            elapsed = time.time() - t_seg
-            avg = elapsed / (i + 1)
-            eta_min = (len(frames) - (i + 1)) * avg / 60.0
-            print(
-                f"[build_hge]  seg {i+1:4d}/{len(frames):4d}  "
-                f"{time.time()-t0:.2f}s/frame (avg {avg:.2f}s) "
-                f"ETA {eta_min:.1f}min"
+        n_cache_misses += 1
+        if cache_dir is not None:
+            _seg_cache_save(
+                cache_dir, f.frame_id, cache_hash, instance_mask, class_mask
             )
+        lift_frames_count += 1
+        # Free large per-frame tensors before the next iteration so peak RSS
+        # stays bounded by one frame's worth even when cache_dir is None.
+        del rgb, m2f_out, sam3_out, sam3_class_lut, instance_mask, class_mask
+        if (i + 1) % 10 == 0 or i == 0:
+            _print_seg_progress(i, len(frames), t0, t_seg)
     seg_elapsed_min = (time.time() - t_seg) / 60
     print(
         f"[build_hge] segmentation done ({seg_elapsed_min:.1f}min) — "
         f"cache hits={n_cache_hits} misses={n_cache_misses}"
     )
 
+    if cache_dir is None:
+        # No-cache path is structurally incompatible with streaming because
+        # we can't re-read what we never wrote. The Phase 3 plan always uses
+        # a seg_cache; if a caller drops it on the floor and has 2408+ NavVis
+        # frames, fail loud rather than OOM. For small smoke runs (max_frames
+        # < ~500) it's still safe to materialize, but the user should opt in
+        # explicitly.
+        if lift_frames_count > 500:
+            raise RuntimeError(
+                f"cache_dir is None and {lift_frames_count} frames were "
+                f"queued; materialising them all would OOM on a 64 GB host. "
+                f"Pass --seg-cache-dir."
+            )
+
+    # 5b. Stream Frame objects from cache → lift. One frame in memory at a time.
+    def _frame_stream():
+        for f in frames:
+            depth = _load_navvis_depth(f.depth_path)
+            if cache_dir is not None:
+                cached = _seg_cache_load(cache_dir, f.frame_id, cache_hash)
+                if cached is None:
+                    # We just populated the cache for this frame in Phase 5a;
+                    # a miss now indicates a hash-stamp race or an io error.
+                    raise RuntimeError(
+                        f"frame {f.frame_id}: cache populated in Phase 5a "
+                        f"but missing in Phase 5b (race or io error)"
+                    )
+                inst, cls = cached
+            else:
+                # Re-segment for this frame. Only safe for small smoke runs
+                # — Phase 5a's count guard above caps `frames` to ≤500.
+                _ensure_models_loaded()
+                rgb = Image.open(f.rgb_path).convert("RGB")
+                m2f_out = m2f.segment(rgb)
+                sam3_out = sam3.segment(rgb)
+                sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
+                inst, cls = _combine_per_frame(
+                    sam3_mask=sam3_out.instance_mask,
+                    sam3_class_lut=sam3_class_lut,
+                    m2f_class=m2f_out.s3dis_labels,
+                )
+            yield Frame(
+                frame_id=f.frame_id,
+                depth=depth,
+                instance_mask=inst,
+                class_mask=cls.astype(np.int16),
+                T_world_cam=f.pose_T_wc,
+                fx=f.fx, fy=f.fy, cx=f.cx, cy=f.cy,
+            )
+
     # 6. Lift.
     t0 = time.time()
     verts_np = np.asarray(mesh.vertices, dtype=np.float32)
     lift_result = lift_masks_to_3d(
-        verts_np, lift_frames, depth_tolerance=cfg.depth_tolerance_m,
+        verts_np, _frame_stream(), depth_tolerance=cfg.depth_tolerance_m,
     )
     print(
         f"[build_hge] lift: {lift_result.num_instances} instances "
