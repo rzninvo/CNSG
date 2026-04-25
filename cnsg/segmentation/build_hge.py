@@ -157,6 +157,33 @@ class HgeBuildConfig:
     # no caching (always re-run models).
     seg_cache_dir: Optional[Path] = None
 
+    # ----- GPT-5.5 per-frame VLM tagger (Phase-4 upgrade) ------------------
+    #
+    # When `use_gpt5_tagger=True`, every frame is FIRST sent to OpenAI's
+    # GPT-5.5 (or pinned snapshot) for an open-vocab list of landmark
+    # phrases — heritage-quality terms like "marble bust on plinth",
+    # "ornate stone fountain", "wooden lecture-hall door" that the
+    # hand-curated `sam3_prompts` list doesn't cover. The returned phrases
+    # become SAM 3's per-frame text prompts (replacing or augmenting the
+    # static list, depending on `gpt5_merge_with_curated`).
+    #
+    # Tagger output is content-addressed and cached on disk
+    # (`gpt5_cache_dir/frame_*.gpt5.json`); a full 2 408-frame HGE build
+    # is ~$96 once at high fidelity, then $0 on every re-run. The
+    # seg_cache hash incorporates the GPT tagger's config-hash so changing
+    # the model or prompt template invalidates the downstream
+    # (instance_mask, class_mask) entries automatically.
+    #
+    # See `docs/report/05_vlm-driven-segmentation/findings.md` for the
+    # research that picked GPT-5.5 over RAM++ / Qwen3-VL / Florence-2.
+    use_gpt5_tagger: bool = False
+    gpt5_cache_dir: Optional[Path] = None  # e.g. `data/maps/hge/gpt5_cache`
+    gpt5_model: str = "gpt-5.5"
+    gpt5_high_fidelity: bool = True
+    gpt5_landmarks_only: bool = True       # drop incidental clutter from prompts
+    gpt5_max_concurrency: int = 16         # parallel API calls; raise on Tier-5
+    gpt5_merge_with_curated: bool = True   # union(VLM_phrases, sam3_prompts)
+
 
 # --- coverage sanity check --------------------------------------------------
 
@@ -216,6 +243,8 @@ def _seg_cache_config_hash(
     prompts: tuple[str, ...],
     confidence: float,
     structural_backbone: str = "mask2former",
+    *,
+    gpt5_tagger_hash: Optional[str] = None,
 ) -> str:
     """Stable 16-hex-char fingerprint of the segmentation-affecting knobs.
 
@@ -227,6 +256,13 @@ def _seg_cache_config_hash(
     default ("mask2former") so cache files written before the backbone knob
     existed still match. Any other backbone (e.g. "eomt") is included and
     therefore gets its own isolated cache partition.
+
+    `gpt5_tagger_hash` is the GPT5Tagger.config_hash when per-frame VLM
+    tagging is in use. Including it means swapping the GPT model, schema,
+    or prompt-template version invalidates the downstream
+    (instance_mask, class_mask) cache automatically — otherwise we'd
+    serve stale masks generated against the old prompt set. Omitted from
+    the blob when None so non-VLM builds keep their existing cache hash.
     """
     import hashlib
 
@@ -236,6 +272,8 @@ def _seg_cache_config_hash(
     }
     if structural_backbone != "mask2former":
         blob_dict["backbone"] = structural_backbone
+    if gpt5_tagger_hash is not None:
+        blob_dict["gpt5_tagger"] = gpt5_tagger_hash
     blob = json.dumps(blob_dict, sort_keys=True).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:16]
 
@@ -548,13 +586,61 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
     print(f"[build_hge] {len(frames)} frames queued")
 
     # 3. Pre-compute prompt → S3DIS class lookup for SAM 3.
+    # When use_gpt5_tagger is on the per-frame prompt set is dynamic, so a
+    # fixed lookup is insufficient — we extend it lazily below per-frame.
     prompt_to_class = {p: ade20k_name_to_s3dis(p) for p in cfg.sam3_prompts}
+
+    # 3b. Optional: pre-fetch per-frame VLM tags. One async batch up front so
+    # the seg loop can swap SAM 3 prompts per frame without blocking on the
+    # API. Cache hits are O(1) reads — re-runs after the first build cost $0.
+    frame_tags: dict[int, "FrameTags"] = {}
+    gpt5_tagger_hash: Optional[str] = None
+    if cfg.use_gpt5_tagger:
+        from cnsg.segmentation.gpt5_tagger import GPT5Tagger
+
+        gpt5_cache_dir = cfg.gpt5_cache_dir
+        if gpt5_cache_dir is not None:
+            gpt5_cache_dir = Path(gpt5_cache_dir)
+        tagger = GPT5Tagger(
+            cache_dir=gpt5_cache_dir,
+            model=cfg.gpt5_model,
+            high_fidelity=cfg.gpt5_high_fidelity,
+        )
+        gpt5_tagger_hash = tagger.config_hash
+        items = [(f.frame_id, f.rgb_path) for f in frames]
+        print(
+            f"[build_hge] gpt5_tagger: {len(items)} frames, model={cfg.gpt5_model}, "
+            f"high_fidelity={cfg.gpt5_high_fidelity}, "
+            f"max_concurrency={cfg.gpt5_max_concurrency}, "
+            f"cache={gpt5_cache_dir}"
+        )
+        t0 = time.time()
+        import asyncio
+
+        frame_tags = asyncio.run(
+            tagger.tag_frames_async(items, max_concurrency=cfg.gpt5_max_concurrency)
+        )
+        # Loud [WARN] when frames got dropped (API failure on every retry).
+        # The seg loop falls back to cfg.sam3_prompts for those frames.
+        n_dropped = len(items) - len(frame_tags)
+        if n_dropped > 0:
+            print(
+                f"[WARN] gpt5_tagger: expected={len(items)} tags, "
+                f"got={len(frame_tags)} (dropped {n_dropped}), "
+                f"fallback=use-sam3_prompts-only-for-dropped-frames",
+                flush=True,
+            )
+        print(
+            f"[build_hge] gpt5_tagger done: {len(frame_tags)} frames tagged "
+            f"({time.time() - t0:.1f}s)"
+        )
 
     # 4. Set up per-frame segmentation cache if requested; defer heavy model
     #    loads until we know we actually need them (pure cache hits skip both).
     cache_dir = cfg.seg_cache_dir
     cache_hash = _seg_cache_config_hash(
-        cfg.sam3_prompts, cfg.sam3_confidence, cfg.structural_backbone
+        cfg.sam3_prompts, cfg.sam3_confidence, cfg.structural_backbone,
+        gpt5_tagger_hash=gpt5_tagger_hash,
     )
     if cache_dir is not None:
         cache_dir = Path(cache_dir)
@@ -609,6 +695,32 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         _ensure_models_loaded()
         rgb = Image.open(f.rgb_path).convert("RGB")
         m2f_out = m2f.segment(rgb)
+
+        # When the GPT-5.5 tagger is on, swap SAM 3's prompt set to
+        # (per-frame VLM phrases) ∪ (curated cfg.sam3_prompts). Using a
+        # union rather than a replacement guarantees the curated heritage
+        # baseline survives even if the VLM call dropped for this frame
+        # (tag_frames_async drops failures with a loud [WARN]).
+        if cfg.use_gpt5_tagger:
+            tags = frame_tags.get(f.frame_id)
+            if tags is not None:
+                vlm_phrases = tags.sam3_prompts(
+                    landmarks_only=cfg.gpt5_landmarks_only
+                )
+            else:
+                vlm_phrases = []
+            if cfg.gpt5_merge_with_curated:
+                merged = list(dict.fromkeys(vlm_phrases + list(cfg.sam3_prompts)))
+            else:
+                merged = vlm_phrases or list(cfg.sam3_prompts)
+            sam3.set_prompts(merged)
+            # Extend the prompt → S3DIS class lookup lazily so new VLM phrases
+            # also get a downstream class (falls through to "clutter" via
+            # ade20k_name_to_s3dis when they don't match a known term).
+            for p in merged:
+                if p not in prompt_to_class:
+                    prompt_to_class[p] = ade20k_name_to_s3dis(p)
+
         sam3_out = sam3.segment(rgb)
         sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
         instance_mask, class_mask = _combine_per_frame(
@@ -808,6 +920,45 @@ def _main() -> None:
              "the stage here instead of the palette fallback — mr_viewer "
              "renders a real building.",
     )
+    p.add_argument(
+        "--use-gpt5-tagger", action="store_true",
+        help="Pre-tag every frame with OpenAI GPT-5.5 vision; SAM 3 then "
+             "uses the per-frame VLM phrases (∪ curated --sam3_prompts by "
+             "default) as text prompts. Requires OPENAI_API_KEY in env or "
+             ".env. ~$96 once for 2,408 frames at high fidelity, $0 on "
+             "re-runs (content-addressed cache).",
+    )
+    p.add_argument(
+        "--gpt5-cache-dir", type=Path, default=None,
+        help="Directory for GPT-5.5 per-frame tag cache. Default suggestion: "
+             "data/maps/hge/gpt5_cache.",
+    )
+    p.add_argument(
+        "--gpt5-model", default="gpt-5.5",
+        help="OpenAI model id (e.g. gpt-5.5 or pinned snapshot "
+             "gpt-5.5-2026-04-23). Pinning reproduces exactly across reruns.",
+    )
+    p.add_argument(
+        "--gpt5-low-fidelity", action="store_true",
+        help="Use low-fidelity image tokens for the GPT call (~$0.001/frame "
+             "vs ~$0.04 high). Quality drops noticeably; smoke-only.",
+    )
+    p.add_argument(
+        "--gpt5-include-clutter", action="store_true",
+        help="Include landmark=False phrases (incidental clutter) in the "
+             "SAM 3 prompt set. Default: landmarks-only.",
+    )
+    p.add_argument(
+        "--gpt5-no-merge-curated", action="store_true",
+        help="Use ONLY the GPT-5.5 phrases as SAM 3 prompts (not merged "
+             "with cfg.sam3_prompts). Default: merge so curated heritage "
+             "phrases survive even if the VLM call dropped.",
+    )
+    p.add_argument(
+        "--gpt5-max-concurrency", type=int, default=16,
+        help="Parallel GPT-5.5 calls. Tier-5 caps at 15k RPM / 40M TPM; "
+             "default 16 is safe for any tier.",
+    )
     args = p.parse_args()
 
     cfg = HgeBuildConfig(
@@ -822,6 +973,13 @@ def _main() -> None:
         seg_cache_dir=args.seg_cache_dir,
         external_stage_glb=args.external_stage_glb,
         structural_backbone=args.structural_backbone,
+        use_gpt5_tagger=args.use_gpt5_tagger,
+        gpt5_cache_dir=args.gpt5_cache_dir,
+        gpt5_model=args.gpt5_model,
+        gpt5_high_fidelity=not args.gpt5_low_fidelity,
+        gpt5_landmarks_only=not args.gpt5_include_clutter,
+        gpt5_merge_with_curated=not args.gpt5_no_merge_curated,
+        gpt5_max_concurrency=args.gpt5_max_concurrency,
     )
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     build_hge_semantics(cfg)
