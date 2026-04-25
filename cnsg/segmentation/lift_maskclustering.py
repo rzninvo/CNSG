@@ -56,6 +56,7 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -200,6 +201,356 @@ def _build_args_namespace(
     )
 
 
+def split_oversized_clusters_3d(
+    object_dict: dict,
+    scene_points: np.ndarray,
+    mask_point_clouds: dict,
+    *,
+    max_extent_m: float = 5.0,
+    eps_m: float = 1.0,
+    dbscan_min_points: int = 4,
+    min_cc_verts: int = 8,
+    min_masks_per_subcluster: int = 2,
+    mask_intersection_fraction: float = 0.2,
+) -> tuple[dict, dict]:
+    """Re-split clusters whose bbox spans more than `max_extent_m`.
+
+    Why: SAM 3's open-vocab prompts can produce a single mask covering a row
+    of similar instances (e.g. all 5 columns down a hallway), which MC's
+    view-consensus then merges into one global cluster spanning the row.
+    Upstream's 0.1m DBSCAN inside `post_process` doesn't always split these
+    because back-projected scatter bridges the column gaps. We re-split at
+    `eps_m` (default 0.5m) so single columns stay intact while landmark-
+    scale ambiguities split apart.
+
+    For each over-sized cluster:
+      1. Open3D DBSCAN(eps=eps_m, min_points=dbscan_min_points) on its vert
+         positions. `dbscan_min_points` defaults to 4 (matches upstream's
+         own DBSCAN call inside `post_process`); `min_cc_verts` is the
+         POST-clustering size filter and is a separate, larger threshold.
+         The MC vert distribution per cluster is sparse — back-projection
+         only stamps mesh verts along depth rays, so requiring 20 neighbours
+         within 0.5 m starves nearly every cluster (we observed 95/97
+         oversized clusters returning 0 sub-clusters with min_points=20,
+         eps=0.5m). Loose core + tight post-filter handles both cases.
+      2. Build vert→sub_label map; for every supporting `(frame_id, mask_id)`,
+         compute intersection with each sub-cluster. The mask "supports" a
+         sub-cluster if `intersection / |mask_verts| >= mask_intersection_fraction`
+         — a single SAM 3 over-mask covering BOTH physical columns is
+         evidence for both sub-clusters and must count for both, otherwise
+         every winner-takes-all dispatch starves the smaller sub-cluster.
+      3. Drop sub-clusters whose mask_list shrinks below
+         `min_masks_per_subcluster` (matches upstream's < 2 filter).
+
+    Args:
+        object_dict: cluster dict as written by upstream `post_process` —
+            `{cid: {"point_ids": iterable[int], "mask_list": list[(frame_id,
+            mask_id, coverage)], "repre_mask_list": ...}}`. Mutation safe
+            (returns a fresh dict).
+        scene_points: (V, 3) mesh vertex positions.
+        mask_point_clouds: in-memory `{f"{frame_id}_{mask_id}": set[int]}`
+            from `mask_graph_construction`'s second return.
+        max_extent_m: trigger threshold; clusters with bbox dim > this get
+            re-split.
+        eps_m: DBSCAN neighborhood for the re-split. 0.5m breaks columns
+            (~3-5m apart) without splitting a single column (~1m wide).
+        min_cc_verts: drop sub-clusters smaller than this.
+        min_masks_per_subcluster: drop sub-clusters with fewer supporting
+            masks than this.
+
+    Returns:
+        `(new_object_dict, stats)` — stats has keys `n_input`, `n_output`,
+        `n_split`, `n_dropped_small`, `extent_before_max`, `extent_after_max`.
+    """
+    import open3d as o3d
+
+    new_dict: dict = {}
+    next_id = 0
+    n_split = 0
+    n_dropped_small = 0
+    extent_before_max = 0.0
+    extent_after_max = 0.0
+
+    for c in object_dict.values():
+        point_ids_arr = np.asarray(list(c["point_ids"]), dtype=np.int64)
+        if len(point_ids_arr) == 0:
+            continue
+        pts = scene_points[point_ids_arr]
+        extent = pts.max(0) - pts.min(0)
+        ext_max = float(extent.max())
+        extent_before_max = max(extent_before_max, ext_max)
+
+        if ext_max <= max_extent_m:
+            new_dict[next_id] = {
+                "point_ids": point_ids_arr,
+                "mask_list": list(c["mask_list"]),
+                "repre_mask_list": list(c.get("repre_mask_list", c["mask_list"][:5])),
+            }
+            extent_after_max = max(extent_after_max, ext_max)
+            next_id += 1
+            continue
+
+        # Re-split. Use open3d DBSCAN to match upstream tooling. Loose
+        # core-point criterion (min_points=dbscan_min_points, default 4)
+        # plus tight post-filter (min_cc_verts) keeps sparse-but-real
+        # landmark sub-clusters and drops noise.
+        pcld = o3d.geometry.PointCloud()
+        pcld.points = o3d.utility.Vector3dVector(pts)
+        labels = np.asarray(
+            pcld.cluster_dbscan(eps=eps_m, min_points=dbscan_min_points),
+            dtype=np.int64,
+        )
+        unique_labels = sorted(int(l) for l in np.unique(labels) if l >= 0)
+
+        if len(unique_labels) <= 1:
+            # Either DBSCAN found one big component (the whole over-sized
+            # cluster IS connected at 0.5 m) or only noise. Keep as-is —
+            # we'd rather over-merge than drop clusters silently.
+            new_dict[next_id] = {
+                "point_ids": point_ids_arr,
+                "mask_list": list(c["mask_list"]),
+                "repre_mask_list": list(c.get("repre_mask_list", c["mask_list"][:5])),
+            }
+            extent_after_max = max(extent_after_max, ext_max)
+            next_id += 1
+            print(
+                f"[WARN] split_oversized: cluster extent {ext_max:.1f}m exceeds "
+                f"max_extent_m={max_extent_m}m but DBSCAN(eps={eps_m}m) found "
+                f"{len(unique_labels)} sub-cluster(s); kept as-is. "
+                f"fallback=keep-original",
+                flush=True,
+            )
+            continue
+
+        n_split += 1
+
+        # vert_id → sub_label, used to reassign each mask.
+        vert_to_label = {int(v): int(l) for v, l in zip(point_ids_arr, labels) if l >= 0}
+
+        # For each (frame_id, mask_id, coverage) in the parent mask_list,
+        # count its verts per sub-cluster and dispatch to every sub-cluster
+        # where the intersection ≥ mask_intersection_fraction of the mask's
+        # in-cluster verts. A genuine over-mask (one SAM 3 mask covering
+        # both physical columns) lands in BOTH sub-clusters; a mask with a
+        # tiny tail in another sub-cluster only lands in the dominant one.
+        sub_masks: dict[int, list] = {l: [] for l in unique_labels}
+        for entry in c["mask_list"]:
+            frame_id, mask_id = int(entry[0]), int(entry[1])
+            key = f"{frame_id}_{mask_id}"
+            mask_verts = mask_point_clouds.get(key)
+            if mask_verts is None:
+                continue
+            counts: Counter = Counter()
+            n_in_parent = 0
+            for v in mask_verts:
+                lbl = vert_to_label.get(int(v))
+                if lbl is not None:
+                    counts[lbl] += 1
+                    n_in_parent += 1
+            if not counts:
+                continue
+            threshold = max(1, int(mask_intersection_fraction * n_in_parent))
+            dispatched = False
+            for lbl, n in counts.items():
+                if n >= threshold:
+                    sub_masks[lbl].append(entry)
+                    dispatched = True
+            if not dispatched:
+                # Mask had verts in this cluster but each sub-cluster's share
+                # was below the threshold — fall back to dominant assignment
+                # so we never silently drop evidence.
+                sub_masks[counts.most_common(1)[0][0]].append(entry)
+
+        for lbl in unique_labels:
+            sub_idx = np.where(labels == lbl)[0]
+            if len(sub_idx) < min_cc_verts:
+                n_dropped_small += 1
+                continue
+            sub_mask_list = sub_masks[lbl]
+            if len(sub_mask_list) < min_masks_per_subcluster:
+                n_dropped_small += 1
+                continue
+            sub_point_ids = point_ids_arr[sub_idx]
+            sub_pts = scene_points[sub_point_ids]
+            sub_ext_max = float((sub_pts.max(0) - sub_pts.min(0)).max())
+            extent_after_max = max(extent_after_max, sub_ext_max)
+            sub_mask_list_sorted = sorted(
+                sub_mask_list,
+                key=lambda x: x[2] if len(x) > 2 else 0.0,
+                reverse=True,
+            )
+            new_dict[next_id] = {
+                "point_ids": sub_point_ids,
+                "mask_list": sub_mask_list,
+                "repre_mask_list": sub_mask_list_sorted[:5],
+            }
+            next_id += 1
+
+    stats = {
+        "n_input": len(object_dict),
+        "n_output": len(new_dict),
+        "n_split": n_split,
+        "n_dropped_small": n_dropped_small,
+        "extent_before_max_m": round(extent_before_max, 2),
+        "extent_after_max_m": round(extent_after_max, 2),
+        "max_extent_m": max_extent_m,
+        "eps_m": eps_m,
+        "dbscan_min_points": dbscan_min_points,
+    }
+    return new_dict, stats
+
+
+def majority_class_per_cluster(
+    object_dict: dict,
+    dataset: HgeMaskClusteringDataset,
+    *,
+    background_class: int = 0,
+) -> dict[int, int]:
+    """Per cluster, majority-vote an S3DIS class from supporting-mask pixels.
+
+    MaskClustering is class-agnostic; for Habitat to render meaningful
+    semantics, every cluster needs ONE class label. For each
+    `(frame_id, mask_id, ...)` in `cluster.mask_list`, look at the cached
+    structural class_mask (from the M2F/EoMT pass) restricted to the
+    instance-mask region. Aggregate counts across all supporting masks;
+    the cluster's class is the most-frequent non-zero label.
+
+    Args:
+        object_dict: post-split cluster dict.
+        dataset: adapter exposing `get_segmentation` (instance_only mask)
+            and `get_structural_class_map` (cached S3DIS pixel labels).
+        background_class: ignore this label when voting (S3DIS 0 = unknown).
+
+    Returns:
+        `{cluster_id: class_id}`. Clusters with no labeled votes get
+        `background_class`.
+    """
+    # Frame-level cache so we don't reload the same npz multiple times when
+    # several clusters share supporting frames (the common case).
+    frame_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _get(frame_id: int) -> tuple[np.ndarray, np.ndarray]:
+        cached = frame_cache.get(frame_id)
+        if cached is not None:
+            return cached
+        inst = dataset.get_segmentation(frame_id, align_with_depth=False)
+        cls = dataset.get_structural_class_map(frame_id, align_with_depth=False)
+        frame_cache[frame_id] = (inst, cls)
+        return inst, cls
+
+    cluster_classes: dict[int, int] = {}
+    for cid, c in object_dict.items():
+        votes: Counter = Counter()
+        for entry in c["mask_list"]:
+            frame_id, mask_id = int(entry[0]), int(entry[1])
+            inst, cls = _get(frame_id)
+            mask_pixels = inst == mask_id
+            if not mask_pixels.any():
+                continue
+            ids, counts = np.unique(cls[mask_pixels], return_counts=True)
+            for c_id, n in zip(ids.tolist(), counts.tolist()):
+                if c_id == background_class:
+                    continue
+                votes[int(c_id)] += int(n)
+        cluster_classes[cid] = int(votes.most_common(1)[0][0]) if votes else background_class
+    return cluster_classes
+
+
+def export_clusters_to_habitat(
+    object_dict: dict,
+    cluster_classes: dict[int, int],
+    mesh_path: Path,
+    out_dir: Path,
+    stem: str,
+    *,
+    external_stage_glb: Optional[Path] = None,
+    min_verts_per_instance: int = 20,
+) -> dict:
+    """Bake MC clusters into HM3D-compatible files via `export_habitat`.
+
+    Each cluster becomes one Habitat semantic instance. We achieve this
+    one-instance-per-cluster mapping by passing
+    `region_id = cluster_id + 1` (region 0 is reserved for "unknown"),
+    `class_id = voted S3DIS class`, with `group_per_class_region=True`. The
+    exporter then makes one (class, region) → instance pair per cluster.
+
+    The cost: `room_id_to_name_map.json` ends up with one entry per cluster
+    rather than per physical room. mr_viewer's floor-height heuristic still
+    works (it picks the median of region centroids), but the per-room name
+    map is now a per-cluster name map. That's intentional — for a
+    landmark-navigation pipeline the per-cluster identity is what matters.
+
+    Args:
+        object_dict: post-split cluster dict.
+        cluster_classes: `{cluster_id: s3dis_class_id}` from
+            `majority_class_per_cluster`.
+        mesh_path: path to the SAME mesh whose vert indices the cluster
+            point_ids reference.
+        out_dir: destination for the exported bundle.
+        stem: shared basename for the emitted files.
+        external_stage_glb: optional photorealistic stage GLB
+            (e.g. `HGE.basis.glb`). Same semantics as `export_habitat`.
+        min_verts_per_instance: drop clusters smaller than this; matches
+            our existing `build_hge` setting and keeps Habitat's CC-bbox
+            pass within memory budget.
+
+    Returns:
+        Summary dict — counts and the manifest.
+    """
+    import trimesh
+    from cnsg.segmentation.export_habitat import export_habitat
+    from cnsg.segmentation.taxonomy import S3DIS_CLASSES
+
+    mesh = trimesh.load(mesh_path, force="mesh")
+    n_verts = len(mesh.vertices)
+
+    per_vertex_class = np.zeros(n_verts, dtype=np.int64)
+    per_vertex_region = np.zeros(n_verts, dtype=np.int64)
+    n_emitted = 0
+
+    for cid, c in object_dict.items():
+        cls_id = int(cluster_classes.get(cid, 0))
+        if cls_id == 0:
+            continue
+        point_ids = np.asarray(list(c["point_ids"]), dtype=np.int64)
+        if len(point_ids) < min_verts_per_instance:
+            continue
+        valid = (point_ids >= 0) & (point_ids < n_verts)
+        if not valid.any():
+            continue
+        pids = point_ids[valid]
+        per_vertex_class[pids] = cls_id
+        per_vertex_region[pids] = cid + 1  # region 0 reserved for "unknown"
+        n_emitted += 1
+
+    class_name_lookup = {c.id: c.name for c in S3DIS_CLASSES}
+    region_name_map = {
+        cid + 1: f"cluster_{cid:04d}_{class_name_lookup.get(int(cluster_classes.get(cid, 0)), 'unknown')}"
+        for cid in object_dict
+    }
+
+    manifest = export_habitat(
+        mesh=mesh,
+        per_vertex_class_id=per_vertex_class,
+        per_vertex_region_id=per_vertex_region,
+        class_id_to_name=class_name_lookup,
+        out_dir=out_dir,
+        stem=stem,
+        region_id_to_name=region_name_map,
+        group_per_class_region=True,
+        min_verts_per_instance=min_verts_per_instance,
+        external_stage_glb=external_stage_glb,
+    )
+    return {
+        "num_clusters_in": len(object_dict),
+        "num_clusters_emitted": n_emitted,
+        "num_instances": int(manifest.num_instances),
+        "num_regions": int(manifest.num_regions),
+        "stem": stem,
+        "out_dir": str(out_dir),
+    }
+
+
 def run(
     session_dir: Path,
     mesh_path: Path,
@@ -211,6 +562,10 @@ def run(
     clone_dir: Path = MASKCLUSTERING_DEFAULT,
     max_frames: Optional[int] = None,
     debug: bool = False,
+    split_max_extent_m: float = 5.0,
+    split_eps_m: float = 0.5,
+    export_habitat_stem: Optional[str] = None,
+    external_stage_glb: Optional[Path] = None,
 ) -> dict:
     """End-to-end: build dataset adapter, run MaskClustering graph + cluster
     + post-process, write outputs, return a summary dict.
@@ -273,16 +628,101 @@ def run(
         t_post = time.time() - t0
         print(f"[maskclust] post-process: ({t_post:.1f}s)")
 
+    # ---- spatial-extent post-filter -----------------------------------------
+    # Upstream's `post_process` writes object_dict.npy at
+    # `{object_dict_dir}/{config}/object_dict.npy`. We re-load it, split any
+    # over-sized clusters in 3D, and overwrite in place. See
+    # `split_oversized_clusters_3d` for the why.
+    object_dict_path = (
+        Path(dataset.object_dict_dir) / args_ns.config / "object_dict.npy"
+    )
+    if not object_dict_path.exists():
+        raise RuntimeError(
+            f"[FATAL] post_process didn't write object_dict to {object_dict_path}; "
+            f"can't run extent-split."
+        )
+
+    t0 = time.time()
+    object_dict_pre = np.load(object_dict_path, allow_pickle=True).item()
+    object_dict, split_stats = split_oversized_clusters_3d(
+        object_dict_pre,
+        scene_points,
+        mask_point_clouds,
+        max_extent_m=split_max_extent_m,
+        eps_m=split_eps_m,
+    )
+    np.save(object_dict_path, object_dict, allow_pickle=True)
+    t_split = time.time() - t0
+    print(
+        f"[maskclust] extent-split: {split_stats['n_input']} → "
+        f"{split_stats['n_output']} clusters "
+        f"(split {split_stats['n_split']}, dropped-small {split_stats['n_dropped_small']}; "
+        f"max-extent {split_stats['extent_before_max_m']}m → "
+        f"{split_stats['extent_after_max_m']}m); "
+        f"({t_split:.1f}s)"
+    )
+
+    # ---- per-cluster majority class vote + Habitat export -------------------
+    # Optional: if `export_habitat_stem` is provided, vote a class per
+    # cluster and write the HM3D bundle so SemanticSensor / mr_viewer can
+    # consume MC's clusters in place of the union-find ones.
+    habitat_export_stats: Optional[dict] = None
+    class_vote_stats: Optional[dict] = None
+    t_vote = 0.0
+    t_export = 0.0
+    if export_habitat_stem is not None:
+        t0 = time.time()
+        cluster_classes = majority_class_per_cluster(object_dict, dataset)
+        t_vote = time.time() - t0
+        class_hist: Counter = Counter(cluster_classes.values())
+        class_vote_stats = {
+            "num_clusters": len(cluster_classes),
+            "num_unlabeled": int(class_hist.get(0, 0)),
+            "class_histogram": {int(k): int(v) for k, v in class_hist.items()},
+        }
+        print(
+            f"[maskclust] class-vote: {class_vote_stats['num_clusters']} clusters, "
+            f"{class_vote_stats['num_unlabeled']} unlabeled "
+            f"({t_vote:.1f}s)"
+        )
+
+        t0 = time.time()
+        habitat_export_stats = export_clusters_to_habitat(
+            object_dict=object_dict,
+            cluster_classes=cluster_classes,
+            mesh_path=mesh_path,
+            out_dir=out_dir,
+            stem=export_habitat_stem,
+            external_stage_glb=external_stage_glb,
+        )
+        t_export = time.time() - t0
+        print(
+            f"[maskclust] habitat-export: "
+            f"{habitat_export_stats['num_clusters_emitted']}/"
+            f"{habitat_export_stats['num_clusters_in']} clusters → "
+            f"{habitat_export_stats['num_instances']} instances "
+            f"({t_export:.1f}s)"
+        )
+
     summary = {
         "num_frames": len(frame_list),
         "stride": stride,
         "view_consensus_threshold": view_consensus_threshold,
         "num_nodes": len(nodes),
         "num_objects": len(object_list),
+        "num_clusters_post_split": split_stats["n_output"],
+        "split_stats": split_stats,
+        "class_vote_stats": class_vote_stats,
+        "habitat_export_stats": habitat_export_stats,
         "time_graph_s": round(t_graph, 2),
         "time_cluster_s": round(t_cluster, 2),
         "time_post_s": round(t_post, 2),
-        "total_time_s": round(t_graph + t_cluster + t_post, 2),
+        "time_split_s": round(t_split, 2),
+        "time_vote_s": round(t_vote, 2),
+        "time_export_s": round(t_export, 2),
+        "total_time_s": round(
+            t_graph + t_cluster + t_post + t_split + t_vote + t_export, 2
+        ),
         "out_dir": str(dataset.out_dir),
         "object_dict_dir": dataset.object_dict_dir,
     }
@@ -290,7 +730,9 @@ def run(
     print(
         f"[maskclust] summary → {out_dir / 'maskclustering_summary.json'}\n"
         f"  total: {summary['total_time_s']:.1f}s; "
-        f"{summary['num_objects']} objects from {summary['num_frames']} frames"
+        f"{summary['num_objects']} raw → "
+        f"{summary['num_clusters_post_split']} after extent-split, "
+        f"from {summary['num_frames']} frames"
     )
     return summary
 
@@ -309,6 +751,22 @@ def _main() -> None:
         help="where MaskClustering's source is checked out",
     )
     p.add_argument("--debug", action="store_true")
+    p.add_argument(
+        "--split-max-extent-m", type=float, default=5.0,
+        help="re-split clusters whose 3D bbox dim exceeds this (metres)",
+    )
+    p.add_argument(
+        "--split-eps-m", type=float, default=0.5,
+        help="DBSCAN eps (metres) for the extent-split re-cluster pass",
+    )
+    p.add_argument(
+        "--export-habitat-stem", type=str, default=None,
+        help="if set, write a Habitat .semantic.glb bundle under out_dir/<stem>.*",
+    )
+    p.add_argument(
+        "--external-stage-glb", type=Path, default=None,
+        help="optional photorealistic stage GLB referenced by the exported config",
+    )
     args = p.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -322,6 +780,10 @@ def _main() -> None:
         clone_dir=args.clone_dir,
         max_frames=args.max_frames,
         debug=args.debug,
+        split_max_extent_m=args.split_max_extent_m,
+        split_eps_m=args.split_eps_m,
+        export_habitat_stem=args.export_habitat_stem,
+        external_stage_glb=args.external_stage_glb,
     )
 
 
