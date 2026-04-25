@@ -106,12 +106,29 @@ class HgeMaskClusteringDataset:
         *,
         out_dir: Optional[Path] = None,
         max_frames: Optional[int] = None,
+        instance_only: bool = True,
     ):
+        """
+        Args:
+            instance_only: when True (default), `get_segmentation` returns
+                ONLY the SAM 3 per-frame instance IDs and zeroes out the
+                structural-offset entries (`instance_mask >= _STRUCTURAL_ID_OFFSET`,
+                i.e. ≥ 1000) that our combiner uses to tag wall/floor/ceiling
+                pixels. MaskClustering was published against per-instance
+                inputs (CropFormer); feeding it our combined stream causes
+                walls to merge across the whole building because every wall
+                pixel has the same `_STRUCTURAL_ID_OFFSET + class_id` ID in
+                every frame. With `instance_only=True` the only IDs MC sees
+                are SAM 3 instances (1..K, frame-local), which matches what
+                view-consensus clustering was designed for. Set False to
+                feed the combined stream (compatibility / debugging only).
+        """
         self.session_dir = Path(session_dir)
         self.mesh_path = Path(mesh_path)
         self.seg_cache_dir = Path(seg_cache_dir)
         self.out_dir = Path(out_dir) if out_dir is not None else self.seg_cache_dir / "maskclustering"
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.instance_only = bool(instance_only)
 
         # Eager frame-table build so `get_frame_list` / `get_*` are O(1).
         self._frames: dict[int, _HgeFrame] = self._load_frames(max_frames=max_frames)
@@ -182,13 +199,16 @@ class HgeMaskClusteringDataset:
     def get_segmentation(
         self, frame_id: int, align_with_depth: bool = False
     ) -> np.ndarray:
-        """Return the combined (SAM 3 + structural-offset) mask image for
-        the frame. Integer IDs; 0 = background.
+        """Return per-frame mask image, integer IDs, 0 = background.
+
+        Defaults to **SAM 3 instance IDs only** (`self.instance_only=True`)
+        with structural-offset entries (>= `_STRUCTURAL_ID_OFFSET`, i.e.
+        ≥ 1000) zeroed out. See `__init__` docstring for why.
 
         `align_with_depth=True` resizes the mask to depth resolution with
-        nearest-neighbor interpolation (matches what MaskClustering's
-        scannet dataset does when their CropFormer output is at RGB
-        resolution and depth is downsampled).
+        nearest-neighbor interpolation (matches the path that
+        MaskClustering's ScanNet dataset takes when CropFormer output and
+        depth disagree on resolution).
         """
         path = self.seg_cache_dir / f"frame_{frame_id:06d}.npz"
         if not path.exists():
@@ -198,11 +218,40 @@ class HgeMaskClusteringDataset:
             )
         with np.load(path, allow_pickle=False) as z:
             mask = z["instance_mask"].astype(np.int32)
+        if self.instance_only:
+            # `_STRUCTURAL_ID_OFFSET = 1000` in cnsg.segmentation.build_hge.
+            # Pixels tagged structural (wall/floor/ceiling/etc.) are the
+            # ones with ID ≥ 1000; we zero them so MaskClustering's
+            # view-consensus only sees per-frame SAM 3 instance IDs.
+            mask = np.where(mask >= 1000, 0, mask)
         if align_with_depth and (mask.shape[1], mask.shape[0]) != self.image_size:
             mask = cv2.resize(
                 mask, self.image_size, interpolation=cv2.INTER_NEAREST
             )
         return mask
+
+    def get_structural_class_map(
+        self, frame_id: int, align_with_depth: bool = False
+    ) -> np.ndarray:
+        """Return per-pixel S3DIS class IDs (int16), independent of SAM 3.
+
+        Used by the per-cluster majority-class vote that runs AFTER
+        MaskClustering (since MC is class-agnostic). Reads the
+        `class_mask` array our build pipeline already writes alongside
+        `instance_mask`.
+        """
+        path = self.seg_cache_dir / f"frame_{frame_id:06d}.npz"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"seg_cache miss for frame {frame_id}: {path}"
+            )
+        with np.load(path, allow_pickle=False) as z:
+            cls = z["class_mask"].astype(np.int16)
+        if align_with_depth and (cls.shape[1], cls.shape[0]) != self.image_size:
+            cls = cv2.resize(
+                cls, self.image_size, interpolation=cv2.INTER_NEAREST
+            )
+        return cls
 
     def get_frame_path(self, frame_id: int) -> tuple[str, str]:
         f = self._frames[frame_id]

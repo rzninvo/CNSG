@@ -147,14 +147,41 @@ def test_depth_loaded_as_metres_float32(tmp_path: Path) -> None:
     np.testing.assert_allclose(d, 2.0, atol=1e-3)
 
 
-def test_segmentation_matches_seg_cache_mask(tmp_path: Path) -> None:
+def test_segmentation_filters_structural_offset_by_default(tmp_path: Path) -> None:
+    """Default (`instance_only=True`) zeroes out IDs ≥ 1000 (structural-class
+    offset our combiner uses) so MaskClustering only sees SAM 3 instance IDs.
+    """
     session, mesh, cache = _make_synthetic_session(tmp_path)
     ds = HgeMaskClusteringDataset(session, mesh, cache)
     m = ds.get_segmentation(0, align_with_depth=False)
     assert m.dtype == np.int32
     assert m.shape == (480, 640)
-    assert 1001 in np.unique(m)  # structural wall offset
-    assert 7 in np.unique(m)     # SAM 3 chair id
+    assert 1001 not in np.unique(m), "structural offset must be filtered by default"
+    assert 7 in np.unique(m), "SAM 3 instance ids must be preserved"
+    assert 0 in np.unique(m), "structural pixels must become background"
+
+
+def test_segmentation_keeps_structural_when_instance_only_false(tmp_path: Path) -> None:
+    """Explicit `instance_only=False` keeps the original combined stream
+    for compatibility / debugging."""
+    session, mesh, cache = _make_synthetic_session(tmp_path)
+    ds = HgeMaskClusteringDataset(session, mesh, cache, instance_only=False)
+    m = ds.get_segmentation(0)
+    assert 1001 in np.unique(m)
+    assert 7 in np.unique(m)
+
+
+def test_structural_class_map_returned_separately(tmp_path: Path) -> None:
+    """`get_structural_class_map` exposes the class_mask the build wrote
+    next to instance_mask; class IDs are S3DIS, independent of SAM 3."""
+    session, mesh, cache = _make_synthetic_session(tmp_path)
+    ds = HgeMaskClusteringDataset(session, mesh, cache)
+    cls = ds.get_structural_class_map(0)
+    assert cls.dtype == np.int16
+    assert cls.shape == (480, 640)
+    # The fixture writes wall (S3DIS class 1) and chair (S3DIS class 7).
+    assert 1 in np.unique(cls)
+    assert 7 in np.unique(cls)
 
 
 def test_segmentation_resizes_to_depth_when_requested(tmp_path: Path) -> None:
