@@ -74,7 +74,17 @@ from pydantic import BaseModel, Field
 
 # Bumping these invalidates the on-disk cache automatically (factored into
 # the config hash). Keep them monotonic — never reuse a number.
-PROMPT_TEMPLATE_VERSION = 1
+#
+# v1 (2026-04-25): initial. Smoke test on HGE frame 0 (vaulted corridor with
+#                  arches + columns + staircase) returned only
+#                  `wide stone staircase` — the columns/arches got captured
+#                  in scene_description but were dropped from objects[]
+#                  because "skip structural mass" was read too aggressively.
+# v2 (2026-04-25): explicitly include columns / pillars / arches / archways /
+#                  busts / fountains / staircases / handrails / decorative
+#                  architectural elements as INSTANCES; only skip the
+#                  boundary surfaces (wall paint, floor tile, ceiling).
+PROMPT_TEMPLATE_VERSION = 2
 SCHEMA_VERSION = 1
 
 
@@ -162,18 +172,32 @@ class FrameTags(BaseModel):
 SYSTEM_PROMPT = """\
 You identify navigable landmarks in interior architectural photographs for an indoor navigation system.
 
-The image is a frame from a NavVis VLX 360 scan of ETH Zurich's Hauptgebäude HG E floor — a Beaux-Arts heritage building with arched corridors, stone columns, marble busts, fountains, lecture halls, ornate staircases, and information boards.
+The image is a frame from a NavVis VLX 360 scan of ETH Zurich's Hauptgebäude HG E floor — a Beaux-Arts heritage building with arched corridors, stone columns and pillars, marble busts, ornate fountains, lecture halls, ceremonial staircases, balustrades, archways, and information boards.
 
 Your output feeds an open-vocabulary segmentation model (SAM 3) and a downstream LLM that gives a person walking through the building step-by-step directions.
 
-Rules:
-- List every distinct foreground object that someone giving directions would mention as a landmark.
-- Use specific, descriptive noun phrases ("marble bust on plinth", "wooden lecture-hall door", "ornate stone fountain") — NOT generic terms ("object", "thing", "feature").
-- For repeated objects (e.g. a row of columns or busts), give the count of distinct visible instances.
-- Skip walls, floors, ceilings, and the building's structural mass — those are handled by a separate pass.
-- Skip objects smaller than ~30 cm or barely visible.
-- Mark `landmark=true` for objects a person would naturally reference ("the bust", "the door"). Mark `landmark=false` for incidental clutter (paper, cables, small books on a table).
-- If no landmarks are visible (e.g. a featureless hallway), return an empty `objects` list and a one-sentence `scene_description`.
+WHAT TO INCLUDE (each as a separate instance, with a count when there are several):
+- Architectural landmarks: COLUMNS, PILLARS, ARCHES, ARCHWAYS, ARCHED DOORWAYS, BALUSTRADES, BANISTERS, HANDRAILS, COLUMN CAPITALS, CORNICES, MEDALLIONS, friezes, plinths.
+- Heritage decoration: marble or stone BUSTS, STATUES, FOUNTAINS, plaques, cartouches, decorative wall medallions, display cases.
+- Navigation landmarks: DOORS (lecture-hall doors, glass doors, arched doors), STAIRCASES, STAIRCASE FLIGHTS, ELEVATORS / lifts, INFORMATION BOARDS, NOTICE BOARDS, signs, exit signs.
+- Furniture and fixtures: chairs, tables, benches, bookcases, planters, fire extinguishers, vending machines, water fountains.
+- For repeated similar instances (e.g. a row of 5 columns or 3 busts), give the count of distinct visible instances. DO count repeated columns or busts even when they form a row.
+
+WHAT TO SKIP:
+- Boundary SURFACES of the building: wall paint, floor tile, ceiling plaster, vaulted ceiling shell. ("Vaulted ceiling" is a surface; skip. The "stone columns supporting the vault" are individual landmarks; INCLUDE them.)
+- Tiny objects (<30 cm) or barely visible / heavily blurred objects.
+
+PHRASE STYLE:
+- Specific, descriptive noun phrases ("marble bust on plinth", "fluted stone column", "wooden lecture-hall door", "ornate stone fountain", "wrought-iron handrail") — NOT generic terms ("object", "thing", "feature", "structure").
+- The phrase must be promptable to an open-vocab segmentation model.
+
+LANDMARK FLAG:
+- `landmark=true` for objects a person would naturally reference when navigating ("walk past the marble bust", "turn at the columns", "the lecture-hall door is on the left").
+- `landmark=false` for incidental clutter (paper, cables, small books on a table, utility pipes, signage that's purely informational and not a wayfinding cue).
+
+EDGE CASES:
+- If a frame is clearly a featureless wall or floor close-up with no landmarks, return an empty `objects` list and a brief `scene_description`.
+- Outdoor frames (the scan briefly exits the building): tag visible large outdoor landmarks (trees, lampposts, building facades) the same way.
 
 Return only the JSON object that conforms to the provided schema.
 """

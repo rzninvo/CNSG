@@ -298,5 +298,5 @@ def test_versions_pin_for_cache_invalidation() -> None:
     """If you bump PROMPT_TEMPLATE_VERSION or SCHEMA_VERSION you also need
     to update this assertion — the dance forces you to remember that
     every existing on-disk cache invalidates."""
-    assert PROMPT_TEMPLATE_VERSION == 1
+    assert PROMPT_TEMPLATE_VERSION == 2
     assert SCHEMA_VERSION == 1
