@@ -299,6 +299,15 @@ class GPT5Tagger:
 
     DEFAULT_MODEL = "gpt-5.5"
 
+    # Retry budget on the OpenAI client itself (for 429/5xx). The SDK
+    # honours the `Retry-After` header and uses jittered exp backoff;
+    # see `openai._base_client.SyncHttpxClientWrapper`. Setting this
+    # higher than the default (2) protects long offline builds against
+    # transient bursts past the rate limit. Our own per-frame retry
+    # layer (`max_retries` in __init__) stacks on top.
+    SDK_MAX_RETRIES = 8
+    SDK_TIMEOUT_S = 120.0  # cap per-call wait so a hung connection doesn't stall the batch
+
     def __init__(
         self,
         *,
@@ -449,7 +458,15 @@ class GPT5Tagger:
                 "Set it in a .env file at the project root or export it "
                 "before running."
             )
-        self._client = OpenAI(api_key=api_key)
+        # SDK_MAX_RETRIES wraps 429 (rate-limit) + 5xx with jittered exp
+        # backoff that respects the `Retry-After` header. Doubles up on top
+        # of our own `max_retries` loop so a tier-1 burst across several
+        # in-flight calls doesn't poison the batch.
+        self._client = OpenAI(
+            api_key=api_key,
+            max_retries=self.SDK_MAX_RETRIES,
+            timeout=self.SDK_TIMEOUT_S,
+        )
         return self._client
 
     def _ensure_async_client(self):
@@ -468,7 +485,12 @@ class GPT5Tagger:
             raise RuntimeError(
                 "[FATAL] gpt5_tagger: no OPENAI_API_KEY in env."
             )
-        self._async_client = AsyncOpenAI(api_key=api_key)
+        # See SDK_MAX_RETRIES note on the sync client — same defenses.
+        self._async_client = AsyncOpenAI(
+            api_key=api_key,
+            max_retries=self.SDK_MAX_RETRIES,
+            timeout=self.SDK_TIMEOUT_S,
+        )
         return self._async_client
 
     def _build_input(self, image_path: Path) -> list[dict]:
