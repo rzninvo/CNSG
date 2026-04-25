@@ -26,7 +26,9 @@ import trimesh
 
 from cnsg.segmentation.lift_maskclustering import (
     export_clusters_to_habitat,
+    export_clusters_to_habitat_open_vocab,
     majority_class_per_cluster,
+    majority_phrase_per_cluster,
     split_oversized_clusters_3d,
 )
 
@@ -188,17 +190,26 @@ class _StubDataset:
     """Minimal HgeMaskClusteringDataset stand-in for the class-voter test.
 
     Stores per-frame instance + structural masks, exposes them through the
-    same API the voter calls.
+    same API the voter calls. Also supports the new
+    `get_instance_phrases` open-vocab sidecar API.
     """
 
-    def __init__(self, frame_masks: dict[int, tuple[np.ndarray, np.ndarray]]):
+    def __init__(
+        self,
+        frame_masks: dict[int, tuple[np.ndarray, np.ndarray]],
+        frame_phrases: dict[int, dict[int, str]] | None = None,
+    ):
         self.frame_masks = frame_masks
+        self.frame_phrases = frame_phrases or {}
 
     def get_segmentation(self, frame_id: int, align_with_depth: bool = False):
         return self.frame_masks[frame_id][0]
 
     def get_structural_class_map(self, frame_id: int, align_with_depth: bool = False):
         return self.frame_masks[frame_id][1]
+
+    def get_instance_phrases(self, frame_id: int):
+        return self.frame_phrases.get(frame_id)
 
 
 def _stub_frame(mask_id: int, class_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -337,6 +348,158 @@ def test_export_writes_one_instance_per_cluster(tmp_path: Path) -> None:
     # Row format: "<idx>,<hex>,\"<class_name>\",<region>"
     assert any('"column"' in r for r in rows)
     assert any('"chair"' in r for r in rows)
+
+
+def test_majority_phrase_picks_dominant_phrase_with_coverage_weights() -> None:
+    """The open-vocab voter should weight by coverage when (frame_id, mask_id,
+    coverage) tuples are provided; the highest total weight wins."""
+    dataset = _StubDataset(
+        frame_masks={},
+        frame_phrases={
+            100: {7: "marble bust on plinth"},
+            101: {7: "marble bust on plinth"},
+            102: {7: "stone pillar"},  # one frame disagrees but with low coverage
+        },
+    )
+    object_dict = {
+        0: {
+            "point_ids": [0, 1, 2],
+            "mask_list": [
+                (100, 7, 0.95),
+                (101, 7, 0.90),
+                (102, 7, 0.10),
+            ],
+            "repre_mask_list": [],
+        }
+    }
+    phrases = majority_phrase_per_cluster(object_dict, dataset)
+    assert phrases[0] == "marble bust on plinth"
+
+
+def test_majority_phrase_falls_back_when_sidecar_missing() -> None:
+    """Cluster whose supporting frames have no phrase sidecar must get the
+    fallback phrase rather than crash."""
+    dataset = _StubDataset(frame_masks={}, frame_phrases={})  # no sidecars at all
+    object_dict = {
+        0: {
+            "point_ids": [0],
+            "mask_list": [(100, 7, 1.0)],
+            "repre_mask_list": [],
+        }
+    }
+    phrases = majority_phrase_per_cluster(object_dict, dataset, fallback_phrase="clutter")
+    assert phrases[0] == "clutter"
+
+
+def test_majority_phrase_handles_partial_sidecars() -> None:
+    """Mix: some supporting frames have a sidecar, some don't. The voter
+    should ignore the missing ones and still pick the majority phrase
+    among the present ones."""
+    dataset = _StubDataset(
+        frame_masks={},
+        frame_phrases={
+            100: {3: "wooden lecture-hall door"},
+            # 101 deliberately absent — represents an old-cache frame.
+        },
+    )
+    object_dict = {
+        0: {
+            "point_ids": [0, 1],
+            "mask_list": [(100, 3, 0.9), (101, 3, 0.85)],
+            "repre_mask_list": [],
+        }
+    }
+    phrases = majority_phrase_per_cluster(object_dict, dataset, fallback_phrase="clutter")
+    assert phrases[0] == "wooden lecture-hall door"
+
+
+def test_majority_phrase_caches_sidecar_reads_per_frame() -> None:
+    """Multiple clusters that share a frame must trigger only one
+    `get_instance_phrases` call for that frame."""
+    load_log: list[int] = []
+
+    class _LoggingDataset(_StubDataset):
+        def get_instance_phrases(self, frame_id: int):
+            load_log.append(frame_id)
+            return super().get_instance_phrases(frame_id)
+
+    dataset = _LoggingDataset(
+        frame_masks={},
+        frame_phrases={
+            100: {1: "stone column", 2: "marble bust"},
+            101: {2: "marble bust"},
+        },
+    )
+    object_dict = {
+        0: {"point_ids": [0], "mask_list": [(100, 1, 1.0)], "repre_mask_list": []},
+        1: {"point_ids": [1], "mask_list": [(100, 2, 1.0), (101, 2, 1.0)], "repre_mask_list": []},
+    }
+    majority_phrase_per_cluster(object_dict, dataset)
+    assert load_log.count(100) == 1
+
+
+def test_export_open_vocab_emits_one_class_per_distinct_phrase(tmp_path: Path) -> None:
+    """The open-vocab exporter must synthesise a class-id per distinct
+    phrase across all clusters, NOT collapse them to S3DIS-13."""
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    mesh_path = tmp_path / "mesh.glb"
+    mesh.export(str(mesh_path))
+
+    object_dict = {
+        0: {"point_ids": list(range(0, 30)), "mask_list": [(0, 1, 1.0)], "repre_mask_list": []},
+        1: {"point_ids": list(range(30, 60)), "mask_list": [(0, 2, 1.0)], "repre_mask_list": []},
+        2: {"point_ids": list(range(60, 90)), "mask_list": [(0, 3, 1.0)], "repre_mask_list": []},
+    }
+    cluster_phrases = {
+        0: "marble bust on plinth",
+        1: "stone fountain",
+        2: "marble bust on plinth",  # repeats — should share class-id with cluster 0
+    }
+    stats = export_clusters_to_habitat_open_vocab(
+        object_dict=object_dict,
+        cluster_phrases=cluster_phrases,
+        mesh_path=mesh_path,
+        out_dir=tmp_path,
+        stem="OPEN",
+        min_verts_per_instance=20,
+    )
+    # 3 clusters → 3 emitted; only 2 distinct phrases though.
+    assert stats["num_clusters_emitted"] == 3
+    assert stats["num_distinct_phrases"] == 2
+    semantic_txt = (tmp_path / "OPEN.semantic.txt").read_text()
+    rows = [r for r in semantic_txt.splitlines() if r and not r.startswith("HM3D")]
+    # Per-(class, region) instance grouping ⇒ 3 rows even though only 2 classes.
+    assert len(rows) == 3
+    # Phrases land in the .semantic.txt names verbatim.
+    assert any('"marble bust on plinth"' in r for r in rows)
+    assert any('"stone fountain"' in r for r in rows)
+
+
+def test_export_open_vocab_drop_phrases(tmp_path: Path) -> None:
+    """`drop_phrases` lets the caller skip a noisy fallback phrase like
+    'clutter' so it never lands in the Habitat bundle."""
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    mesh_path = tmp_path / "mesh.glb"
+    mesh.export(str(mesh_path))
+
+    object_dict = {
+        0: {"point_ids": list(range(0, 30)), "mask_list": [(0, 1, 1.0)], "repre_mask_list": []},
+        1: {"point_ids": list(range(30, 60)), "mask_list": [(0, 2, 1.0)], "repre_mask_list": []},
+    }
+    cluster_phrases = {0: "stone column", 1: "clutter"}
+    stats = export_clusters_to_habitat_open_vocab(
+        object_dict=object_dict,
+        cluster_phrases=cluster_phrases,
+        mesh_path=mesh_path,
+        out_dir=tmp_path,
+        stem="DROP",
+        min_verts_per_instance=20,
+        drop_phrases=("clutter",),
+    )
+    assert stats["num_clusters_emitted"] == 1
+    semantic_txt = (tmp_path / "DROP.semantic.txt").read_text()
+    assert "clutter" not in semantic_txt
+    assert "stone column" in semantic_txt
 
 
 def test_export_skips_unlabeled_clusters(tmp_path: Path) -> None:

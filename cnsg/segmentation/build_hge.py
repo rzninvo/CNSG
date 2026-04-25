@@ -331,7 +331,23 @@ def _seg_cache_save(
     config_hash: str,
     instance_mask: np.ndarray,
     class_mask: np.ndarray,
+    *,
+    instance_phrases: Optional[dict[int, str]] = None,
 ) -> None:
+    """Atomically write a frame's segmentation cache entry.
+
+    `instance_phrases` (optional) is the per-frame map
+    `{sam3_instance_id: prompt_phrase}` — i.e. the open-vocab text prompt
+    that *generated* each foreground instance. We keep it in a sibling
+    `.phrases.json` file rather than stuffing it into the .npz so the
+    binary masks stay numpy-only (zero-cost reads) and the downstream
+    open-vocab class voter can load just the JSON when it doesn't need
+    the masks.
+
+    Older caches without phrases sidecar fall back to S3DIS-13 voting in
+    the lifter (loud [WARN] from the voter); new caches enable open-vocab
+    cluster labels in the Habitat bundle.
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"frame_{frame_id:06d}.npz"
     # np.savez_compressed auto-appends `.npz` if the given filename does not
@@ -346,6 +362,17 @@ def _seg_cache_save(
     )
     import os
     os.replace(tmp, path)
+
+    if instance_phrases is not None:
+        phrases_path = cache_dir / f"frame_{frame_id:06d}.phrases.json"
+        phrases_tmp = cache_dir / f"frame_{frame_id:06d}.phrases.tmp.json"
+        # Stringify the int keys so the JSON round-trips cleanly.
+        payload = {
+            "config_hash": config_hash,
+            "phrases": {str(int(k)): v for k, v in instance_phrases.items()},
+        }
+        phrases_tmp.write_text(json.dumps(payload, ensure_ascii=False))
+        os.replace(phrases_tmp, phrases_path)
 
 
 def _print_seg_progress(
@@ -403,6 +430,15 @@ def _combine_per_frame(
         class_mask[mask] = sam3_class_lut.get(int(sid), 13)  # 13 = clutter
 
     return instance_mask, class_mask
+
+
+def _sam3_instance_phrase_lut(sam3_output) -> dict[int, str]:
+    """Map each per-frame SAM 3 instance id (1..K) to the prompt phrase
+    that generated it. Persisted to the cache so the downstream open-vocab
+    class voter can label clusters with the actual heritage phrases (e.g.
+    "marble bust on plinth") rather than the S3DIS-13 collapse.
+    """
+    return {i: prompt for i, prompt in enumerate(sam3_output.class_per_instance, start=1)}
 
 
 def _sam3_instance_class_lut(
@@ -723,6 +759,7 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
 
         sam3_out = sam3.segment(rgb)
         sam3_class_lut = _sam3_instance_class_lut(sam3_out, prompt_to_class)
+        sam3_phrase_lut = _sam3_instance_phrase_lut(sam3_out)
         instance_mask, class_mask = _combine_per_frame(
             sam3_mask=sam3_out.instance_mask,
             sam3_class_lut=sam3_class_lut,
@@ -731,12 +768,13 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         n_cache_misses += 1
         if cache_dir is not None:
             _seg_cache_save(
-                cache_dir, f.frame_id, cache_hash, instance_mask, class_mask
+                cache_dir, f.frame_id, cache_hash, instance_mask, class_mask,
+                instance_phrases=sam3_phrase_lut,
             )
         lift_frames_count += 1
         # Free large per-frame tensors before the next iteration so peak RSS
         # stays bounded by one frame's worth even when cache_dir is None.
-        del rgb, m2f_out, sam3_out, sam3_class_lut, instance_mask, class_mask
+        del rgb, m2f_out, sam3_out, sam3_class_lut, sam3_phrase_lut, instance_mask, class_mask
         if (i + 1) % 10 == 0 or i == 0:
             _print_seg_progress(i, len(frames), t0, t_seg)
     seg_elapsed_min = (time.time() - t_seg) / 60

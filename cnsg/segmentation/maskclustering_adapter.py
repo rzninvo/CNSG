@@ -253,6 +253,32 @@ class HgeMaskClusteringDataset:
             )
         return cls
 
+    def get_instance_phrases(self, frame_id: int) -> Optional[dict[int, str]]:
+        """Return `{sam3_instance_id: prompt_phrase}` for the frame, or None
+        if the sidecar doesn't exist (older caches without open-vocab support).
+
+        The sidecar is written by `build_hge._seg_cache_save` next to the
+        `.npz` and holds the open-vocab phrase that GENERATED each SAM 3
+        instance — exactly what the per-cluster open-vocab voter needs to
+        emit heritage-quality labels in the Habitat bundle.
+        """
+        import json
+        path = self.seg_cache_dir / f"frame_{frame_id:06d}.phrases.json"
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[WARN] HgeMaskClusteringDataset frame {frame_id}: "
+                f"expected=valid phrases JSON, got={type(e).__name__}: {e}, "
+                f"fallback=treat-as-missing-sidecar",
+                flush=True,
+            )
+            return None
+        # Coerce string keys back to int — JSON forces stringification.
+        return {int(k): str(v) for k, v in payload.get("phrases", {}).items()}
+
     def get_frame_path(self, frame_id: int) -> tuple[str, str]:
         f = self._frames[frame_id]
         return str(f.rgb_path), str(

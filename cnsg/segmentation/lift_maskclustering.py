@@ -400,6 +400,80 @@ def split_oversized_clusters_3d(
     return new_dict, stats
 
 
+def majority_phrase_per_cluster(
+    object_dict: dict,
+    dataset: HgeMaskClusteringDataset,
+    *,
+    fallback_phrase: str = "clutter",
+) -> dict[int, str]:
+    """Per cluster, majority-vote an open-vocab phrase from supporting masks.
+
+    Companion to `majority_class_per_cluster` but operates on the per-frame
+    SAM 3 phrase sidecar (written by `build_hge._seg_cache_save` when
+    `--use-gpt5-tagger` is on). Each `(frame_id, mask_id)` in the cluster's
+    `mask_list` resolves to the SAM 3 prompt phrase that GENERATED that
+    instance — which, with the GPT-5.5 tagger upstream, is a heritage-quality
+    description like "marble bust on plinth" rather than the S3DIS-13 label.
+    Vote = sum of mask coverage areas across all supporting frames.
+
+    Returns `fallback_phrase` for any cluster whose supporting masks have
+    no phrase sidecar at all (older cache without open-vocab support); a
+    [WARN] is emitted on the first such cluster so the regression is loud.
+
+    Args:
+        object_dict: post-split cluster dict.
+        dataset: adapter with `get_instance_phrases(frame_id)` returning
+            `{sam3_instance_id: prompt_phrase}` or None.
+        fallback_phrase: assigned when no sidecar exists for any supporting
+            frame of a cluster (S3DIS "clutter" by convention).
+
+    Returns:
+        `{cluster_id: phrase}`.
+    """
+    # Cache the phrase sidecar per frame so multiple clusters sharing a
+    # frame don't re-read the same JSON file.
+    phrase_cache: dict[int, Optional[dict[int, str]]] = {}
+
+    def _get(frame_id: int) -> Optional[dict[int, str]]:
+        cached = phrase_cache.get(frame_id, "MISS")
+        if cached != "MISS":
+            return cached  # type: ignore[return-value]
+        loaded = dataset.get_instance_phrases(frame_id)
+        phrase_cache[frame_id] = loaded
+        return loaded
+
+    cluster_phrases: dict[int, str] = {}
+    n_warned = 0
+    for cid, c in object_dict.items():
+        votes: Counter = Counter()
+        for entry in c["mask_list"]:
+            frame_id, mask_id = int(entry[0]), int(entry[1])
+            phrases = _get(frame_id)
+            if phrases is None:
+                continue
+            phrase = phrases.get(mask_id)
+            if not phrase:
+                continue
+            # Weight by coverage if the entry carries one (post_process emits
+            # tuples of (frame_id, mask_id, coverage)); otherwise unit-weight.
+            weight = float(entry[2]) if len(entry) > 2 else 1.0
+            votes[phrase] += weight
+        if votes:
+            cluster_phrases[cid] = votes.most_common(1)[0][0]
+        else:
+            cluster_phrases[cid] = fallback_phrase
+            n_warned += 1
+    if n_warned > 0:
+        print(
+            f"[WARN] majority_phrase_per_cluster: expected=phrases sidecar, "
+            f"got=missing for {n_warned}/{len(object_dict)} clusters, "
+            f"fallback={fallback_phrase!r}. Re-run build_hge with "
+            f"--use-gpt5-tagger to populate the sidecars.",
+            flush=True,
+        )
+    return cluster_phrases
+
+
 def majority_class_per_cluster(
     object_dict: dict,
     dataset: HgeMaskClusteringDataset,
@@ -454,6 +528,116 @@ def majority_class_per_cluster(
                 votes[int(c_id)] += int(n)
         cluster_classes[cid] = int(votes.most_common(1)[0][0]) if votes else background_class
     return cluster_classes
+
+
+def export_clusters_to_habitat_open_vocab(
+    object_dict: dict,
+    cluster_phrases: dict[int, str],
+    mesh_path: Path,
+    out_dir: Path,
+    stem: str,
+    *,
+    external_stage_glb: Optional[Path] = None,
+    min_verts_per_instance: int = 20,
+    drop_phrases: tuple[str, ...] = (),
+) -> dict:
+    """Write a Habitat HM3D bundle whose category names are the open-vocab
+    phrases (NOT S3DIS-13). The downstream LLM in `mr_viewer` reads these
+    names directly when generating navigation directions, so heritage-quality
+    phrases like "marble bust on plinth" land in user-facing instructions
+    instead of S3DIS's "clutter".
+
+    Each cluster becomes one Habitat semantic instance via
+    `region_id = cluster_id + 1`, identical layout to
+    `export_clusters_to_habitat` but with the class taxonomy expanded to
+    "every distinct phrase ever voted by any cluster" — synthesised on
+    the fly so we don't need to maintain a static heritage class list.
+
+    Args:
+        object_dict: post-split cluster dict.
+        cluster_phrases: `{cluster_id: phrase}` from
+            `majority_phrase_per_cluster`.
+        mesh_path: path to the SAME mesh whose vert indices the cluster
+            point_ids reference.
+        out_dir, stem, external_stage_glb, min_verts_per_instance:
+            identical to `export_clusters_to_habitat`.
+        drop_phrases: phrases to skip emitting (e.g. ("clutter",) when the
+            caller wants only meaningful-named clusters in the bundle).
+
+    Returns:
+        Summary dict — counts and the phrase histogram.
+    """
+    import trimesh
+    from cnsg.segmentation.export_habitat import export_habitat
+
+    mesh = trimesh.load(mesh_path, force="mesh")
+    n_verts = len(mesh.vertices)
+
+    # Build a synthetic class taxonomy from the phrase set: assign each
+    # distinct phrase a unique class_id starting at 1. Class 0 stays
+    # reserved for "unknown / drop" per export_habitat's contract.
+    drop_set = {p.strip().lower() for p in drop_phrases}
+    distinct_phrases: list[str] = []
+    phrase_to_class_id: dict[str, int] = {}
+    for cid in object_dict:
+        phrase = cluster_phrases.get(cid, "")
+        key = phrase.strip().lower()
+        if not key or key in drop_set:
+            continue
+        if phrase not in phrase_to_class_id:
+            phrase_to_class_id[phrase] = len(distinct_phrases) + 1
+            distinct_phrases.append(phrase)
+    class_id_to_name = {cid: name for name, cid in phrase_to_class_id.items()}
+
+    per_vertex_class = np.zeros(n_verts, dtype=np.int64)
+    per_vertex_region = np.zeros(n_verts, dtype=np.int64)
+    n_emitted = 0
+    phrase_histogram: Counter = Counter()
+
+    for cid, c in object_dict.items():
+        phrase = cluster_phrases.get(cid, "")
+        cls_id = phrase_to_class_id.get(phrase)
+        if cls_id is None:
+            continue
+        point_ids = np.asarray(list(c["point_ids"]), dtype=np.int64)
+        if len(point_ids) < min_verts_per_instance:
+            continue
+        valid = (point_ids >= 0) & (point_ids < n_verts)
+        if not valid.any():
+            continue
+        pids = point_ids[valid]
+        per_vertex_class[pids] = cls_id
+        per_vertex_region[pids] = cid + 1  # region 0 reserved for "unknown"
+        n_emitted += 1
+        phrase_histogram[phrase] += 1
+
+    region_name_map = {
+        cid + 1: f"cluster_{cid:04d}_{cluster_phrases.get(cid, 'unknown').replace(' ', '_')}"
+        for cid in object_dict
+    }
+
+    manifest = export_habitat(
+        mesh=mesh,
+        per_vertex_class_id=per_vertex_class,
+        per_vertex_region_id=per_vertex_region,
+        class_id_to_name=class_id_to_name,
+        out_dir=out_dir,
+        stem=stem,
+        region_id_to_name=region_name_map,
+        group_per_class_region=True,
+        min_verts_per_instance=min_verts_per_instance,
+        external_stage_glb=external_stage_glb,
+    )
+    return {
+        "num_clusters_in": len(object_dict),
+        "num_clusters_emitted": n_emitted,
+        "num_distinct_phrases": len(distinct_phrases),
+        "num_instances": int(manifest.num_instances),
+        "num_regions": int(manifest.num_regions),
+        "stem": stem,
+        "out_dir": str(out_dir),
+        "phrase_histogram_top10": dict(phrase_histogram.most_common(10)),
+    }
 
 
 def export_clusters_to_habitat(
@@ -566,6 +750,7 @@ def run(
     split_eps_m: float = 0.5,
     export_habitat_stem: Optional[str] = None,
     external_stage_glb: Optional[Path] = None,
+    open_vocab_labels: bool = False,
 ) -> dict:
     """End-to-end: build dataset adapter, run MaskClustering graph + cluster
     + post-process, write outputs, return a summary dict.
@@ -671,38 +856,76 @@ def run(
     t_vote = 0.0
     t_export = 0.0
     if export_habitat_stem is not None:
-        t0 = time.time()
-        cluster_classes = majority_class_per_cluster(object_dict, dataset)
-        t_vote = time.time() - t0
-        class_hist: Counter = Counter(cluster_classes.values())
-        class_vote_stats = {
-            "num_clusters": len(cluster_classes),
-            "num_unlabeled": int(class_hist.get(0, 0)),
-            "class_histogram": {int(k): int(v) for k, v in class_hist.items()},
-        }
-        print(
-            f"[maskclust] class-vote: {class_vote_stats['num_clusters']} clusters, "
-            f"{class_vote_stats['num_unlabeled']} unlabeled "
-            f"({t_vote:.1f}s)"
-        )
+        if open_vocab_labels:
+            t0 = time.time()
+            cluster_phrases = majority_phrase_per_cluster(object_dict, dataset)
+            t_vote = time.time() - t0
+            phrase_hist: Counter = Counter(cluster_phrases.values())
+            class_vote_stats = {
+                "mode": "open_vocab",
+                "num_clusters": len(cluster_phrases),
+                "num_distinct_phrases": len(phrase_hist),
+                "phrase_histogram_top10": dict(phrase_hist.most_common(10)),
+            }
+            print(
+                f"[maskclust] open-vocab phrase-vote: "
+                f"{class_vote_stats['num_clusters']} clusters, "
+                f"{class_vote_stats['num_distinct_phrases']} distinct phrases "
+                f"({t_vote:.1f}s)"
+            )
 
-        t0 = time.time()
-        habitat_export_stats = export_clusters_to_habitat(
-            object_dict=object_dict,
-            cluster_classes=cluster_classes,
-            mesh_path=mesh_path,
-            out_dir=out_dir,
-            stem=export_habitat_stem,
-            external_stage_glb=external_stage_glb,
-        )
-        t_export = time.time() - t0
-        print(
-            f"[maskclust] habitat-export: "
-            f"{habitat_export_stats['num_clusters_emitted']}/"
-            f"{habitat_export_stats['num_clusters_in']} clusters → "
-            f"{habitat_export_stats['num_instances']} instances "
-            f"({t_export:.1f}s)"
-        )
+            t0 = time.time()
+            habitat_export_stats = export_clusters_to_habitat_open_vocab(
+                object_dict=object_dict,
+                cluster_phrases=cluster_phrases,
+                mesh_path=mesh_path,
+                out_dir=out_dir,
+                stem=export_habitat_stem,
+                external_stage_glb=external_stage_glb,
+            )
+            t_export = time.time() - t0
+            print(
+                f"[maskclust] habitat-export (open-vocab): "
+                f"{habitat_export_stats['num_clusters_emitted']}/"
+                f"{habitat_export_stats['num_clusters_in']} clusters → "
+                f"{habitat_export_stats['num_instances']} instances, "
+                f"{habitat_export_stats['num_distinct_phrases']} classes "
+                f"({t_export:.1f}s)"
+            )
+        else:
+            t0 = time.time()
+            cluster_classes = majority_class_per_cluster(object_dict, dataset)
+            t_vote = time.time() - t0
+            class_hist: Counter = Counter(cluster_classes.values())
+            class_vote_stats = {
+                "mode": "s3dis_13",
+                "num_clusters": len(cluster_classes),
+                "num_unlabeled": int(class_hist.get(0, 0)),
+                "class_histogram": {int(k): int(v) for k, v in class_hist.items()},
+            }
+            print(
+                f"[maskclust] class-vote (S3DIS-13): {class_vote_stats['num_clusters']} clusters, "
+                f"{class_vote_stats['num_unlabeled']} unlabeled "
+                f"({t_vote:.1f}s)"
+            )
+
+            t0 = time.time()
+            habitat_export_stats = export_clusters_to_habitat(
+                object_dict=object_dict,
+                cluster_classes=cluster_classes,
+                mesh_path=mesh_path,
+                out_dir=out_dir,
+                stem=export_habitat_stem,
+                external_stage_glb=external_stage_glb,
+            )
+            t_export = time.time() - t0
+            print(
+                f"[maskclust] habitat-export (S3DIS-13): "
+                f"{habitat_export_stats['num_clusters_emitted']}/"
+                f"{habitat_export_stats['num_clusters_in']} clusters → "
+                f"{habitat_export_stats['num_instances']} instances "
+                f"({t_export:.1f}s)"
+            )
 
     summary = {
         "num_frames": len(frame_list),
@@ -767,6 +990,13 @@ def _main() -> None:
         "--external-stage-glb", type=Path, default=None,
         help="optional photorealistic stage GLB referenced by the exported config",
     )
+    p.add_argument(
+        "--open-vocab-labels", action="store_true",
+        help="Emit Habitat semantic.txt with open-vocab phrases voted from the "
+             "GPT-5.5 / SAM 3 prompt sidecars (e.g. 'marble bust on plinth') "
+             "instead of S3DIS-13 buckets. Requires seg_cache populated by "
+             "build_hge --use-gpt5-tagger so phrases.json sidecars exist.",
+    )
     args = p.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -784,6 +1014,7 @@ def _main() -> None:
         split_eps_m=args.split_eps_m,
         export_habitat_stem=args.export_habitat_stem,
         external_stage_glb=args.external_stage_glb,
+        open_vocab_labels=args.open_vocab_labels,
     )
 
 
