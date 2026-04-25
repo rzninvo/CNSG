@@ -70,29 +70,42 @@ def ball_query(
         empty_nn = torch.zeros((B, N, K, 3), device=p1.device, dtype=p1.dtype) if return_nn else None
         return empty_d, empty_idx, empty_nn
 
-    # Pairwise squared distance, (B, N, M).
-    # torch.cdist returns euclidean; square it to match pytorch3d's
-    # ball_query (which returns squared distance).
-    d = torch.cdist(p1, p2)
-    d2 = d * d
-
-    # Mask padding per batch.
-    if lengths2 is not None:
-        # lengths2: (B,) int
-        m_idx = torch.arange(M, device=p2.device)  # (M,)
-        # (B, 1, M) broadcast: True where col is valid
-        valid2 = (m_idx.unsqueeze(0) < lengths2.unsqueeze(1)).unsqueeze(1)
-        d2 = d2.masked_fill(~valid2, float("inf"))
-    if lengths1 is not None:
-        n_idx = torch.arange(N, device=p1.device)
-        valid1 = (n_idx.unsqueeze(0) < lengths1.unsqueeze(1)).unsqueeze(2)  # (B, N, 1)
-        # We don't mask rows; the caller knows not to trust padded rows.
-        # But prevent topk from picking nonsense: leave d2 unchanged.
-        del valid1
-
-    # topk smallest K, returning `(dists, idx)` in pytorch3d order.
+    # Memory-bounded ball-query. Naive `torch.cdist(p1, p2)` materialises a
+    # (B, N, M) tensor — for MaskClustering on NavVis (B≈50, N≈1k, M can hit
+    # 1M+ when a mask's bbox covers most of the floor) this OOM'd at 41 GB.
+    # We chunk the query dimension so peak memory is bounded by `chunk × M`.
+    radius2 = radius * radius
     k_eff = min(K, M)
-    top_d2, top_idx = torch.topk(d2, k_eff, dim=2, largest=False, sorted=True)
+
+    # Pre-compute the column-validity mask once (broadcast over chunks).
+    if lengths2 is not None:
+        m_idx = torch.arange(M, device=p2.device)
+        valid2_full = (m_idx.unsqueeze(0) < lengths2.unsqueeze(1))  # (B, M)
+    else:
+        valid2_full = None
+
+    # Output buffers (B, N, k_eff).
+    top_d2 = torch.zeros((B, N, k_eff), device=p1.device, dtype=p1.dtype)
+    top_idx = torch.full((B, N, k_eff), _INVALID_IDX, dtype=torch.long, device=p1.device)
+
+    # Chunk size in #queries. 1024 × 1M × 4 bytes ≈ 4 GB worst case — fits
+    # the 5090 even when M is at its largest.
+    QUERY_CHUNK = 1024
+
+    for n_start in range(0, N, QUERY_CHUNK):
+        n_end = min(n_start + QUERY_CHUNK, N)
+        chunk = p1[:, n_start:n_end]                       # (B, n_chunk, 3)
+        # Pairwise squared distance for this chunk: (B, n_chunk, M).
+        d = torch.cdist(chunk, p2)                         # euclidean
+        d2 = d * d
+        if valid2_full is not None:
+            d2 = d2.masked_fill(~valid2_full.unsqueeze(1), float("inf"))
+        chunk_d2, chunk_idx = torch.topk(d2, k_eff, dim=2, largest=False, sorted=True)
+        top_d2[:, n_start:n_end] = chunk_d2
+        top_idx[:, n_start:n_end] = chunk_idx
+        # Free the per-chunk distance matrix before the next iteration so
+        # peak memory really stays bounded.
+        del d, d2, chunk_d2, chunk_idx
 
     # Replace entries beyond radius with (-1, 0.0).
     radius2 = radius * radius
