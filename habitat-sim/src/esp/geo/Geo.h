@@ -206,10 +206,16 @@ std::vector<std::set<uint32_t>> buildAdjList(
     const std::vector<uint32_t>& indexBuffer);
 
 /**
- * @brief Build a connected component recursively on an unconnected graph
- * (i.e. mesh vertices), building from passed @p vIDX from adjecent verts
- * that match the passed @p clr value, which can be any per-vertex identifier
- * or tag.
+ * @brief Build a connected component on an unconnected graph (i.e. mesh
+ * vertices), iteratively, starting from passed @p vIDX and following adjacent
+ * verts that match the passed @p clr value.  @p clr can be any per-vertex
+ * identifier or tag.
+ *
+ * Implementation note: this used to recurse, which segfaulted on meshes with
+ * a single same-colored connected component above ~150k verts (the C++
+ * call-stack overflowed long before the heap was exhausted). The iterative
+ * stack-based form has identical traversal semantics and unbounded scale —
+ * a 4M-vert single-color CC walks the heap, not the call-stack.
  *
  * @tparam The type of the conditioning variable.
  * @param adjList A reference to the mesh's adjacency list.  IDX of list is
@@ -230,13 +236,31 @@ void conditionalDFS(const std::vector<std::set<uint32_t>>& adjList,
                     std::vector<bool>& visited,
                     const T& clr,
                     std::set<uint32_t>& setOfVerts) {
-  setOfVerts.insert(vIDX);
-  visited[vIDX] = true;
-  // for every adjacent vertex
-  for (auto it = adjList[vIDX].begin(); it != adjList[vIDX].end(); ++it) {
-    // make sure not visited and color matches
-    if ((!visited[*it]) && (clrVec[*it] == clr)) {
-      conditionalDFS(adjList, clrVec, *it, visited, clr, setOfVerts);
+  // Heap-backed explicit stack — no recursion depth limit. The visited[]
+  // vector is the caller's; we mark a vertex visited when we POP it (push-
+  // visited would double-mark when the same vert is pushed by multiple
+  // neighbours before its first pop, but that's still correct — guarding
+  // before push or after pop both yield the same CC, the latter just
+  // visits each vert exactly once on the stack).
+  std::vector<uint32_t> stack;
+  stack.push_back(vIDX);
+  while (!stack.empty()) {
+    const uint32_t cur = stack.back();
+    stack.pop_back();
+    if (visited[cur]) {
+      continue;
+    }
+    visited[cur] = true;
+    setOfVerts.insert(cur);
+    // for every adjacent vertex with matching color, push if unvisited.
+    // Pre-push guard avoids stack bloat by not enqueuing already-visited
+    // neighbours; the post-pop visited check above is the safety net for
+    // the duplicate-push case where a vert is pushed twice before either
+    // pop runs.
+    for (auto it = adjList[cur].begin(); it != adjList[cur].end(); ++it) {
+      if ((!visited[*it]) && (clrVec[*it] == clr)) {
+        stack.push_back(*it);
+      }
     }
   }
 }  // conditionalDFS
