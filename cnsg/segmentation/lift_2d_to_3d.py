@@ -78,6 +78,12 @@ class LiftResult:
     num_instances: int
     # Per-instance label: (instance_id -> class_id). Useful for emitters.
     instance_to_class: dict[int, int] = field(default_factory=dict)
+    # Per-instance supporting (frame_id, mask_id) pairs — the SAM 3 instances
+    # whose 2D masks union-find-merged into this 3D cluster. The open-vocab
+    # phrase voter consumes this to look up each supporting mask's
+    # generating prompt phrase (from the seg_cache `frame_*.phrases.json`
+    # sidecars) and majority-vote a heritage label per cluster.
+    instance_to_mask_list: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
 
 
 # --- union-find --------------------------------------------------------------
@@ -366,9 +372,23 @@ def lift_masks_to_3d(
         if r in root_to_instance
     }
 
+    # Build instance → supporting (frame_id, mask_id) pairs by inverting
+    # local_key_of and routing each key through the DSU root → instance map.
+    # Cheap (O(K) where K = number of unique (frame_id, mask_id) keys).
+    instance_to_mask_list: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for (fid, mid), key in local_key_of.items():
+        if key not in dsu.parent:  # key never observed any vertex; skip
+            continue
+        root = dsu.find(key)
+        iid = root_to_instance.get(root)
+        if iid is None:
+            continue
+        instance_to_mask_list[iid].append((fid, mid))
+
     return LiftResult(
         instance_ids=per_vertex_instance,
         class_ids=per_vertex_class,
         num_instances=len(root_to_instance),
         instance_to_class=instance_to_class,
+        instance_to_mask_list=dict(instance_to_mask_list),
     )

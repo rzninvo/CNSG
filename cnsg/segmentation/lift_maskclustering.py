@@ -540,6 +540,7 @@ def export_clusters_to_habitat_open_vocab(
     external_stage_glb: Optional[Path] = None,
     min_verts_per_instance: int = 20,
     drop_phrases: tuple[str, ...] = (),
+    merge_clusters_with_same_phrase: bool = True,
 ) -> dict:
     """Write a Habitat HM3D bundle whose category names are the open-vocab
     phrases (NOT S3DIS-13). The downstream LLM in `mr_viewer` reads these
@@ -607,14 +608,29 @@ def export_clusters_to_habitat_open_vocab(
             continue
         pids = point_ids[valid]
         per_vertex_class[pids] = cls_id
-        per_vertex_region[pids] = cid + 1  # region 0 reserved for "unknown"
+        # When merge_clusters_with_same_phrase is True (default for UF
+        # output where the same phrase like "pillar" gets voted by 192
+        # separate UF clusters), every cluster sharing a phrase lands in
+        # the same (cls, reg) bucket — producing ONE Habitat instance
+        # per phrase rather than 192. Otherwise, region_id = cluster_id+1
+        # so every UF root becomes its own Habitat instance (the original
+        # MC behaviour where view-consensus already enforces uniqueness).
+        per_vertex_region[pids] = cls_id if merge_clusters_with_same_phrase else (cid + 1)
         n_emitted += 1
         phrase_histogram[phrase] += 1
 
-    region_name_map = {
-        cid + 1: f"cluster_{cid:04d}_{cluster_phrases.get(cid, 'unknown').replace(' ', '_')}"
-        for cid in object_dict
-    }
+    if merge_clusters_with_same_phrase:
+        # One region per phrase; name = the phrase itself (region_id == cls_id).
+        region_name_map = {
+            cls_id: name
+            for name, cls_id in phrase_to_class_id.items()
+        }
+    else:
+        # One region per cluster; preserves the prior (per-MC-cluster) layout.
+        region_name_map = {
+            cid + 1: f"cluster_{cid:04d}_{cluster_phrases.get(cid, 'unknown').replace(' ', '_')}"
+            for cid in object_dict
+        }
 
     manifest = export_habitat(
         mesh=mesh,

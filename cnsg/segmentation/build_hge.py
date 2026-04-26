@@ -85,11 +85,16 @@ class HgeBuildConfig:
     # Per-frame budget — skips frames taking > this many seconds.
     frame_timeout_s: float = 30.0
 
-    # Mesh decimation target (face count). Habitat's semantic GLB loader
-    # CC-bbox pass crashes on a single CC above ~150k verts. Quadric
-    # decimation to 300k faces yields ~150k verts — safely under envelope.
-    # `None` = no decimation.
-    decimate_target_faces: Optional[int] = 300_000
+    # Mesh decimation target (face count). Historically capped at 300k
+    # faces (~150k verts) because habitat-sim's `conditionalDFS` in
+    # `Geo.h` was a recursive C++ traversal and segfaulted on a single
+    # CC above that threshold. We patched `conditionalDFS` to an
+    # iterative stack-based version (commit on `habitat-sim/src/esp/geo/Geo.h`)
+    # and rebuilt habitat-sim from source — the recursion-depth ceiling is
+    # gone. Default is now `None` (no decimation): label the full-resolution
+    # mesh you pass in. Set explicitly only if you want decimation for
+    # speed reasons, not safety.
+    decimate_target_faces: Optional[int] = None
 
     # Lift algorithm knobs.
     # Depth tolerance for the 2D→3D lift. 5 cm is the thorough-literature
@@ -879,12 +884,16 @@ def build_hge_semantics(cfg: HgeBuildConfig) -> dict:
         out_dir=cfg.out_dir,
         stem=cfg.stem,
         # Collapse multi-CC same-label regions into single instances. The
-        # Phase-2 per-CC export blows past Habitat's CC-bbox envelope at
-        # scan-scale (100+ instances × 250k+ verts → segfault). Per-pair
-        # grouping keeps instance count ≤ |classes| × |rooms|.
+        # original reason was that per-CC export tripped habitat-sim's
+        # recursion-depth segfault — fixed at the source (Geo.h
+        # iterative DFS) but per-pair grouping is still preferred at scan
+        # scale because it keeps the instance count bounded
+        # (≤ |classes| × |rooms|), which keeps the .semantic.txt readable
+        # and the SemanticSensor lookup table compact.
         group_per_class_region=True,
         # Drop instances with fewer than 20 verts — sparse lift coverage
-        # produces singletons that also crash Habitat's CC-bbox pass.
+        # produces noisy singletons; this is a quality filter, not a
+        # safety filter (the Geo.h patch eliminated the safety reason).
         min_verts_per_instance=20,
         external_stage_glb=cfg.external_stage_glb,
     )

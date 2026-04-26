@@ -438,9 +438,12 @@ def test_majority_phrase_caches_sidecar_reads_per_frame() -> None:
     assert load_log.count(100) == 1
 
 
-def test_export_open_vocab_emits_one_class_per_distinct_phrase(tmp_path: Path) -> None:
-    """The open-vocab exporter must synthesise a class-id per distinct
-    phrase across all clusters, NOT collapse them to S3DIS-13."""
+def test_export_open_vocab_merges_same_phrase_by_default(tmp_path: Path) -> None:
+    """Default merge mode (the UF-friendly one): clusters that voted the
+    SAME phrase collapse to a SINGLE Habitat instance, regardless of how
+    many UF clusters produced that phrase. Fixes the over-fragmentation
+    failure where 192 UF clusters all called "pillar" each got their own
+    rainbow-stripe Habitat instance."""
     mesh = trimesh.creation.icosphere(subdivisions=3)
     mesh_path = tmp_path / "mesh.glb"
     mesh.export(str(mesh_path))
@@ -453,7 +456,7 @@ def test_export_open_vocab_emits_one_class_per_distinct_phrase(tmp_path: Path) -
     cluster_phrases = {
         0: "marble bust on plinth",
         1: "stone fountain",
-        2: "marble bust on plinth",  # repeats — should share class-id with cluster 0
+        2: "marble bust on plinth",  # same phrase as cluster 0 — should merge
     }
     stats = export_clusters_to_habitat_open_vocab(
         object_dict=object_dict,
@@ -462,17 +465,52 @@ def test_export_open_vocab_emits_one_class_per_distinct_phrase(tmp_path: Path) -
         out_dir=tmp_path,
         stem="OPEN",
         min_verts_per_instance=20,
+        # default merge_clusters_with_same_phrase=True
     )
-    # 3 clusters → 3 emitted; only 2 distinct phrases though.
-    assert stats["num_clusters_emitted"] == 3
+    # 3 clusters all emit verts but cluster 0 + cluster 2 both vote "bust"
+    # → ONE Habitat instance for "bust", ONE for "fountain". Total 2.
+    assert stats["num_clusters_emitted"] == 3   # all 3 contributed verts
     assert stats["num_distinct_phrases"] == 2
+    assert stats["num_instances"] == 2          # not 3 — the two bust clusters merged
     semantic_txt = (tmp_path / "OPEN.semantic.txt").read_text()
     rows = [r for r in semantic_txt.splitlines() if r and not r.startswith("HM3D")]
-    # Per-(class, region) instance grouping ⇒ 3 rows even though only 2 classes.
-    assert len(rows) == 3
-    # Phrases land in the .semantic.txt names verbatim.
+    assert len(rows) == 2
     assert any('"marble bust on plinth"' in r for r in rows)
     assert any('"stone fountain"' in r for r in rows)
+
+
+def test_export_open_vocab_no_merge_mode_keeps_per_cluster_instances(tmp_path: Path) -> None:
+    """Opt-out: merge_clusters_with_same_phrase=False preserves the legacy
+    behaviour where every cluster gets its own Habitat instance even when
+    they share a phrase. This is what the MC pipeline historically expected
+    (because MC's view-consensus already enforced cluster uniqueness)."""
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    mesh_path = tmp_path / "mesh.glb"
+    mesh.export(str(mesh_path))
+
+    object_dict = {
+        0: {"point_ids": list(range(0, 30)), "mask_list": [(0, 1, 1.0)], "repre_mask_list": []},
+        1: {"point_ids": list(range(30, 60)), "mask_list": [(0, 2, 1.0)], "repre_mask_list": []},
+        2: {"point_ids": list(range(60, 90)), "mask_list": [(0, 3, 1.0)], "repre_mask_list": []},
+    }
+    cluster_phrases = {
+        0: "marble bust on plinth",
+        1: "stone fountain",
+        2: "marble bust on plinth",
+    }
+    stats = export_clusters_to_habitat_open_vocab(
+        object_dict=object_dict,
+        cluster_phrases=cluster_phrases,
+        mesh_path=mesh_path,
+        out_dir=tmp_path,
+        stem="OPEN_NO_MERGE",
+        min_verts_per_instance=20,
+        merge_clusters_with_same_phrase=False,
+    )
+    assert stats["num_clusters_emitted"] == 3
+    assert stats["num_distinct_phrases"] == 2
+    # 3 separate (class, region) pairs ⇒ 3 Habitat instances.
+    assert stats["num_instances"] == 3
 
 
 def test_export_open_vocab_drop_phrases(tmp_path: Path) -> None:
