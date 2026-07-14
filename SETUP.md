@@ -77,6 +77,58 @@ echo "OPENAI_API_KEY=your_api_key_here" > .env
 python examples/mr_viewer.py --backend=openai
 ```
 
+## Web Demo — Conversational Navigation Assistant
+
+Instead of the desktop viewer window, you can run the whole experience as a **web app**: the Habitat-Sim scene is streamed to your browser, you move with the same keys, and the LLM chat sits next to it. Everything (web app + live video + chat) is served by a **single command on one port**.
+
+The prerequisites (Node.js, `xvfb`, `flask-sock`) are already installed by `scripts/install_hm3d.sh`. For public sharing you also need `cloudflared` (see below).
+
+Run it from the repo root (the first run builds the web app automatically):
+
+```bash
+conda activate habitat-default
+cd CNSG
+```
+
+**1. Default (works everywhere) — headless, no local window, software rendering:**
+```bash
+./run_demo.sh
+```
+
+**2. GPU-accelerated, still no local window (WSL / NVIDIA):**
+```bash
+./run_demo.sh --gpu
+```
+
+**3. GPU + public URL to share with any device (any network):**
+```bash
+./run_demo.sh --gpu --public
+```
+
+When it finishes loading it prints a **READY** banner with the URL(s) to open, e.g.:
+
+```
+      Local:   http://localhost:5001/assistant
+      Public:  https://<random>.trycloudflare.com/assistant
+```
+
+Open the printed URL (ending in **/assistant**). In the browser:
+- **Hover the viewer** and use **W/A/S/D** to move, **arrow keys** to look, **Z/X** for up/down, and other viewer shortcuts like **B** (bounding boxes).
+- **Drag** inside the viewer with the mouse to look around.
+- Type in the **chat panel** on the right to ask for directions (or use the mic / speaker buttons).
+
+Useful options: `--port <n>`, `--width <w> --height <h>`, `--base-model` (non‑finetuned LLM), `--no-xvfb` (GPU with a visible window).
+
+**Public sharing prerequisite (`--public`):** install `cloudflared` once (no account needed):
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared
+chmod +x ~/.local/bin/cloudflared
+```
+On WSL2 the local `172.x` address is **not** reachable from other devices — always share the `https://…trycloudflare.com/assistant` URL from the READY banner.
+
+> **Note (native Linux, no WSL):** `--gpu` uses WSL's Mesa `d3d12` driver and falls back to software elsewhere. On a native Linux box with a display, use `./run_demo.sh --no-xvfb` for GPU rendering; on a headless GPU server you need a GPU-backed X server (or the default software mode `./run_demo.sh`).
+
 > **Important:** The `habitat-default` environment uses Habitat-Sim from conda-forge and is specifically for HM3D datasets. Do not use this environment with the ETH HG E floor scene.
 
 ---

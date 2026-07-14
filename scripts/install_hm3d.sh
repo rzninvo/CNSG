@@ -117,6 +117,62 @@ log_info "Installing torch/torchvision/torchaudio from PyTorch cu128 index..."
 pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 log_success "PyTorch (cu128) installed"
 
+# Install Conversational Navigation Assistant (web demo) prerequisites
+echo -e "\n${YELLOW}▶▶▶ Step 6c: Conversational Navigation Assistant Prerequisites ◀◀◀${NC}"
+# Default: install them (Node.js to build the webapp, xvfb for headless render).
+# Disable with: INSTALL_CNA_PREREQS=false ./scripts/install_hm3d.sh
+INSTALL_CNA_PREREQS="${INSTALL_CNA_PREREQS:-true}"
+if [[ "$INSTALL_CNA_PREREQS" == "true" ]]; then    # Python web deps for the demo backend (low-latency WebSocket channel).
+    log_info "Installing web backend Python deps (flask-sock)..."
+    pip install flask-sock
+    # Node.js / npm — required to build the React webapp served by run_demo.sh
+    if command -v node &> /dev/null; then
+        log_success "Node.js already available ($(node -v))"
+    else
+        log_info "Installing Node.js (for building the webapp) via conda-forge..."
+        conda install -c conda-forge nodejs -y
+        log_success "Node.js installed"
+    fi
+
+    # xvfb — required to run the demo headless (no local window) via run_demo.sh
+    if command -v xvfb-run &> /dev/null; then
+        log_success "xvfb already installed"
+    else
+        log_info "Installing xvfb (headless rendering for the web demo)..."
+        if command -v apt-get &> /dev/null; then
+            if sudo -n true 2>/dev/null; then
+                if sudo apt-get update && sudo apt-get install -y xvfb; then
+                    log_success "xvfb installed"
+                else
+                    log_warning "xvfb install failed. Run manually: sudo apt-get install -y xvfb"
+                fi
+            else
+                log_warning "xvfb not installed (requires sudo). After this script finishes, run manually:"
+                echo -e "    ${YELLOW}sudo apt-get install -y xvfb${NC}"
+            fi
+        else
+            log_warning "apt-get not found; please install xvfb with your package manager."
+        fi
+    fi
+
+    # cloudflared — enables the public URL (run_demo.sh --public). User-local, no sudo.
+    if command -v cloudflared &> /dev/null; then
+        log_success "cloudflared already available"
+    else
+        log_info "Installing cloudflared (for the public demo URL) into ~/.local/bin..."
+        mkdir -p "$HOME/.local/bin"
+        CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+        if curl -fsSL "$CF_URL" -o "$HOME/.local/bin/cloudflared"; then
+            chmod +x "$HOME/.local/bin/cloudflared"
+            log_success "cloudflared installed to ~/.local/bin (used by run_demo.sh --public)"
+        else
+            log_warning "cloudflared download failed; --public will not work until it is installed."
+        fi
+    fi
+else
+    log_info "Skipping CNA demo prerequisites (INSTALL_CNA_PREREQS=false)."
+fi
+
 # Download LoRA adapter weights
 echo -e "\n${YELLOW}▶▶▶ Step 7: Setting up LoRA Adapter Weights ◀◀◀${NC}"
 cd "$ROOT_DIR"
@@ -165,6 +221,29 @@ else
     echo -e "${YELLOW}python -m habitat_sim.utils.datasets_download --username <api-token-id> --password <api-token-secret> --uids hm3d_minival_v0.2${NC}"
 fi
 
+# Link the downloaded scene datasets into habitat-sim/data
+# The dataset is downloaded to $ROOT_DIR/data, but the viewer runs from
+# habitat-sim/ and resolves scene paths relative to habitat-sim/data.
+# Without this symlink habitat-sim can't find the HM3D scenes and fails with
+# "No Stage Attributes exists for requested scene ...".
+echo -e "\n${YELLOW}▶▶▶ Step 8b: Linking Scene Datasets into habitat-sim ◀◀◀${NC}"
+SRC_SCENE_DATASETS="$ROOT_DIR/data/scene_datasets"
+DST_SCENE_DATASETS="$ROOT_DIR/habitat-sim/data/scene_datasets"
+
+if [[ -d "$SRC_SCENE_DATASETS" ]]; then
+    if [[ -L "$DST_SCENE_DATASETS" ]]; then
+        log_info "Scene datasets symlink already exists. Skipping."
+    elif [[ -e "$DST_SCENE_DATASETS" ]]; then
+        log_warning "habitat-sim/data/scene_datasets already exists and is not a symlink. Leaving it untouched."
+    else
+        mkdir -p "$ROOT_DIR/habitat-sim/data"
+        ln -s ../../data/scene_datasets "$DST_SCENE_DATASETS"
+        log_success "Linked habitat-sim/data/scene_datasets -> ../../data/scene_datasets"
+    fi
+else
+    log_warning "No scene datasets found at $SRC_SCENE_DATASETS. Skipping symlink (download HM3D first)."
+fi
+
 # Deactivate conda env
 conda deactivate
 
@@ -178,6 +257,14 @@ echo -e "To run the HM3D house environment with the finetuned model:"
 echo -e "  1. Activate habitat-default environment: ${YELLOW}conda activate habitat-default${NC}"
 echo -e "  2. Navigate to habitat-sim: ${YELLOW}cd habitat-sim${NC}"
 echo -e "  3. Run the viewer: ${YELLOW}python examples/mr_viewer.py --backend=local --finetuned-model=True${NC}"
+echo ""
+echo -e "To run the Conversational Navigation Assistant web demo (one command):"
+echo -e "  1. Activate habitat-default environment: ${YELLOW}conda activate habitat-default${NC}"
+echo -e "  2. From the repo root:"
+echo -e "       ${YELLOW}./run_demo.sh${NC}              # headless, no window (works everywhere)"
+echo -e "       ${YELLOW}./run_demo.sh --gpu${NC}        # GPU-accelerated, still no window (WSL/NVIDIA)"
+echo -e "       ${YELLOW}./run_demo.sh --gpu --public${NC}  # GPU + public https URL to share"
+echo -e "  3. Wait for the READY banner, then open the printed URL ending in ${YELLOW}/assistant${NC}"
 echo ""
 echo -e "${BLUE}Note:${NC} The base model will be downloaded automatically from Hugging Face on first run."
 echo ""

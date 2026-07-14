@@ -69,6 +69,22 @@ class HabitatSimInteractiveViewer(Application):
         configuration = self.Configuration()
         configuration.title = "Habitat Sim Interactive Viewer"
         configuration.size = window_size
+        # Optionally create the window hidden. Used for GPU-headless rendering:
+        # a real display (e.g. WSLg :0) provides GPU acceleration while the
+        # window stays invisible.
+        if self.sim_settings.get("hidden_window", False):
+            cfg_cls = self.Configuration
+            hidden_flag = None
+            for _enum_name in ("WindowFlags", "WindowFlag"):
+                _enum = getattr(cfg_cls, _enum_name, None)
+                if _enum is not None and hasattr(_enum, "HIDDEN"):
+                    hidden_flag = _enum.HIDDEN
+                    break
+            if hidden_flag is not None:
+                try:
+                    configuration.window_flags = hidden_flag
+                except Exception as _e:
+                    print(f"[viewer] could not set hidden window flag: {_e}")
         Application.__init__(self, configuration)
         self.fps: float = 60.0
 

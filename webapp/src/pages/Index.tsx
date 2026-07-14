@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { NavigatorHeader } from "@/components/NavigatorHeader";
 import { CameraView } from "@/components/CameraView";
 import { DestinationInput } from "@/components/DestinationInput";
@@ -196,6 +197,16 @@ const Index = () => {
             {/* Feedback section - appears after result */}
             {result && !feedbackSubmitted && (
               <FeedbackSection onSubmit={handleFeedbackSubmit} />
+            )}
+
+            {/* Link to the interactive assistant */}
+            {!result && (
+              <Link
+                to="/assistant"
+                className="block glass rounded-2xl px-4 py-3 text-center text-sm font-medium text-primary hover:bg-card/90 transition-colors"
+              >
+                Open the Conversational Navigation Assistant →
+              </Link>
             )}
           </div>
         </main>

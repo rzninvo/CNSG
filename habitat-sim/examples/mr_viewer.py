@@ -139,6 +139,9 @@ class NewViewer(BaseViewer):
         self.clusters = self.cluster_objs(distance_thresh=0.5)
         self.rooms = self.get_rooms_from_sim()
 
+        # Periodic logging of the agent's current room and position (every 3s).
+        self._last_room_print_time = 0.0
+
     def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
         semantic_info = {}
         with open(file_path, "r") as f:
@@ -1376,6 +1379,27 @@ class NewViewer(BaseViewer):
         if self.q_app:
             self.q_app.processEvents()
 
+        # Every 3 seconds, print the room the agent is currently in and its pose.
+        now = time.time()
+        if now - self._last_room_print_time >= 3.0:
+            self._last_room_print_time = now
+            try:
+                agent_state = self.sim.get_agent(self.agent_id).get_state()
+                pos = agent_state.position
+                room = self.get_room_from_position(pos)
+                if room is not None:
+                    room_id = room.get("region_id", "?")
+                    room_name = room.get("name", "unknown_room")
+                else:
+                    room_id, room_name = None, "unknown_room"
+                print(
+                    f"[ROOM] agent position: "
+                    f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) | "
+                    f"room_id: {room_id} | room: {room_name}"
+                )
+            except Exception as err:
+                print(f"[ROOM] could not determine current room: {err}")
+
         agent_acts_per_sec = self.fps
 
         mn.gl.default_framebuffer.clear(mn.gl.FramebufferClear.COLOR | mn.gl.FramebufferClear.DEPTH)
@@ -1526,28 +1550,30 @@ class NewViewer(BaseViewer):
     def _draw_object_bboxes(self, debug_line_render: Any, clusters_to_draw: list = None) -> None:
     
         """
-        Draw axis-aligned bounding boxes for every semantic object.
+        Draw one bounding box per object, coloured by cluster (one colour per
+        cluster). Only the clusters selected by the latest navigation request
+        (``clusters_to_draw``) are drawn; when none are selected nothing is
+        rendered.
         """
         scene = self.sim.semantic_scene
         if scene is None:
             return
 
-        objs_to_draw = []
-
-        clusters_to_draw = None
-
-        if clusters_to_draw is not None:
-            for cluster_str_id, obj_str_ids in clusters_to_draw.items():
-                for obj_str_id in obj_str_ids: 
-                    sim_obj = self.objects[obj_str_id]["sim_obj"]
-                    objs_to_draw.append((sim_obj, cluster_str_id))
-        else:
-            for sim_obj in scene.objects:
-                objs_to_draw.append((sim_obj, sim_obj.id))     
-
         self._bbox_label_screen_positions.clear()
+
+        # Nothing to show until a request has selected some clusters.
+        if not clusters_to_draw:
+            return
+
+        objs_to_draw = []
+        for cluster_str_id, obj_str_ids in clusters_to_draw.items():
+            for obj_str_id in obj_str_ids:
+                obj_entry = self.objects.get(obj_str_id)
+                if obj_entry is None:
+                    continue
+                objs_to_draw.append((obj_entry["sim_obj"], cluster_str_id))
+
         debug_line_render.set_line_width(2.5)
-        target_labels = []
         max_boxes = 1000
         candidates = []
         
@@ -1558,9 +1584,6 @@ class NewViewer(BaseViewer):
             label = ""
             if sim_obj.category is not None and hasattr(sim_obj.category, "name"):
                 label = sim_obj.category.name()
-            label_norm = label.strip().lower()
-            if clusters_to_draw is None and label_norm not in target_labels:
-                continue
 
             if not label:
                 label = f"object_{sim_obj.id}"

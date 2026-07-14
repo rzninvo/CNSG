@@ -817,9 +817,19 @@ def generate_path_description(
     if draw_all_clusters:
         clusters_to_draw_final = clusters_to_draw
     else:
+        # Highlight every cluster the model actually mentions. The finetuned
+        # model is supposed to echo the exact `cluster_str_id` (e.g.
+        # "fireplace_12"), but it often paraphrases or drops the `_id` suffix,
+        # which silently dropped those clusters. We therefore keep a cluster if
+        # EITHER its id appears in the raw output OR its object name (the id
+        # without the trailing "_<n>") appears in the cleaned description.
+        cleaned_desc = clean_text_from_ids(description).lower()
         clusters_to_draw_final = {}
         for cluster_str_id in clusters_to_draw:
-            if cluster_str_id in description:
+            label = re.sub(r"_\d+$", "", cluster_str_id).replace("_", " ").strip().lower()
+            mentioned_by_id = cluster_str_id in description
+            mentioned_by_name = bool(label) and label in cleaned_desc
+            if mentioned_by_id or mentioned_by_name:
                 clusters_to_draw_final[cluster_str_id] = clusters_to_draw[cluster_str_id]
     
     description = " ".join(description.split())
