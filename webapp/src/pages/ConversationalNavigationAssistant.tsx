@@ -10,6 +10,8 @@ import {
   VolumeX,
   Keyboard,
   Loader2,
+  SlidersHorizontal,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -21,6 +23,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -55,12 +66,18 @@ const isControlKey = (k: string) =>
 
 const uid = () => Math.random().toString(36).slice(2);
 
+const INTRO_MESSAGE: ChatMessage = {
+  id: "intro",
+  role: "assistant",
+  text: "Hi! I'm your navigation assistant. Move with WASD, look by dragging inside the view (or with the arrow keys), and ask me how to reach any room or object.",
+};
+
 const ConversationalNavigationAssistant = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "intro",
       role: "assistant",
-      text: "Hi! I'm your navigation assistant. Move with WASD, look by left-dragging inside the view (or with the arrow keys), and ask me how to reach any room or object.",
+      text: "Hi! I'm your navigation assistant. Move with WASD, look by dragging inside the view (or with the arrow keys), and ask me how to reach any room or object.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -105,24 +122,36 @@ const ConversationalNavigationAssistant = () => {
     let alive = true;
     getScenes().then((data) => {
       if (!alive || !data) return;
-      // For now only expose the 00800 and 00808 houses.
+      // Expose the 00800/00808 HM3D houses plus any MP3D example scenes.
       const allowed = data.scenes.filter(
-        (s) => s.label.includes("00800") || s.label.includes("00808"),
+        (s) =>
+          s.label.includes("00800") ||
+          s.label.includes("00808") ||
+          s.label.startsWith("MP3D"),
       );
       setScenes(allowed);
-      setCurrentScene(data.current || "");
     });
     return () => {
       alive = false;
     };
   }, []);
 
+  // Keep the dropdown in sync with the scene actually loaded by the server
+  // (status.scene_path), so it can never show the wrong house.
+  useEffect(() => {
+    const sp = status?.scene_path;
+    if (sp && !switching) {
+      setCurrentScene(sp);
+    }
+  }, [status, switching]);
+
   const handleSceneChange = useCallback(
     async (scene: string) => {
       if (!scene || scene === currentScene || switching) return;
       setSwitching(true);
       try {
-        await setScene(scene);
+        const dataset = scenes.find((s) => s.scene === scene)?.dataset;
+        await setScene(scene, dataset);
         setCurrentScene(scene);
         toast.success("Scene switched");
       } catch (err) {
@@ -133,7 +162,7 @@ const ConversationalNavigationAssistant = () => {
         setSwitching(false);
       }
     },
-    [currentScene, switching],
+    [currentScene, switching, scenes],
   );
 
   // The backend applies the change and reverts on failure; the UI reflects the
@@ -273,6 +302,31 @@ const ConversationalNavigationAssistant = () => {
       void releaseAllKeys();
     }
   }, []);
+
+  // Tap a viewer shortcut key (toggles like B/G/R/P) from the Tools menu.
+  const tapKey = useCallback(
+    (k: string) => {
+      forwardKey(k, true);
+      window.setTimeout(() => forwardKey(k, false), 60);
+    },
+    [forwardKey],
+  );
+  const clearChat = useCallback(() => {
+    setMessages([INTRO_MESSAGE]);
+  }, []);
+
+  // Toggle a viewer overlay/capture, then re-read status so the menu checkbox
+  // reflects the backend's real state (also keeps it in sync with keyboard keys).
+  const toggleTool = useCallback(
+    (k: string) => {
+      tapKey(k);
+      window.setTimeout(async () => {
+        const s = await getStatus();
+        setStatus(s);
+      }, 300);
+    },
+    [tapKey],
+  );
 
   useEffect(() => {
     if (!assistantConfigured) return;
@@ -483,6 +537,10 @@ const ConversationalNavigationAssistant = () => {
   const connected = status !== null;
   const backend = status?.backend ?? "local";
   const finetuned = status?.finetuned ?? false;
+  const bboxOn = status?.overlays?.bboxes ?? false;
+  const allBboxOn = status?.overlays?.all_bboxes ?? false;
+  const roomsOn = status?.overlays?.rooms ?? false;
+  const saveOn = status?.overlays?.save_frames ?? false;
 
   return (
     <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden">
@@ -517,6 +575,54 @@ const ConversationalNavigationAssistant = () => {
           </div>
 
           <div className="ml-auto flex items-center gap-2 flex-wrap">
+            {status && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    Tools
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <DropdownMenuLabel>Overlays</DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={bboxOn}
+                    onCheckedChange={() => toggleTool("b")}
+                  >
+                    Target bounding boxes (B)
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={allBboxOn}
+                    onCheckedChange={() => toggleTool("g")}
+                  >
+                    All object boxes (G)
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={roomsOn}
+                    onCheckedChange={() => toggleTool("r")}
+                  >
+                    Room boxes (R)
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Capture</DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={saveOn}
+                    onCheckedChange={() => toggleTool("p")}
+                  >
+                    Save color + semantic frames (P)
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={clearChat}>
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    Clear conversation
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             {scenes.length > 0 && (
               <Select
                 value={currentScene}
@@ -682,7 +788,7 @@ const ConversationalNavigationAssistant = () => {
 
             {/* Hint */}
             <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-card/70 backdrop-blur-md border border-border/50 text-[11px] text-muted-foreground pointer-events-none whitespace-nowrap">
-              Hover the view · drag to look · WASD move · ZX up/down · G all boxes · R rooms
+              Hover the view · drag to look · WASD move · G all boxes · R rooms · P save frames
             </div>
 
             {/* Scene switch overlay */}

@@ -105,6 +105,10 @@ class NewViewer(BaseViewer):
         self.show_object_bboxes = False
         self.show_all_object_bboxes = False
         self.show_room_bboxes = False
+        # * Save color + semantic frames used during navigation (toggle with P)
+        self.save_frames = False
+        # True -> one combined PNG per frame; False -> two separate PNGs
+        self.save_frames_combined = True
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
 
@@ -145,6 +149,10 @@ class NewViewer(BaseViewer):
 
     def get_semantic_info(self, file_path, map_room_id_to_name, ignore_categories=[]):
         semantic_info = {}
+        # Datasets other than HM3D (e.g. MP3D) have no ``*.semantic.txt`` sidecar;
+        # in that case return empty and let the caller build it from the sim.
+        if not file_path or not os.path.exists(file_path):
+            return semantic_info
         with open(file_path, "r") as f:
             for line in f:
                 line_parts = line.strip().split(",")
@@ -169,6 +177,24 @@ class NewViewer(BaseViewer):
                         semantic_info[room_id][category_id] += 1
 
         return semantic_info
+
+    def build_room_objects_from_objects(self, ignore_categories=[]):
+        """Build the room -> {object_label: count} map from the sim objects.
+
+        Fallback used when a scene has no ``*.semantic.txt`` (e.g. MP3D), so the
+        object-in-room sanity check still works.
+        """
+        info = {}
+        for obj in self.objects.values():
+            room = obj.get("room", "unknown_room")
+            if not room or "unknown" in str(room).lower():
+                continue
+            label = str(obj.get("label", "")).strip()
+            if not label or label in ignore_categories:
+                continue
+            info.setdefault(room, {})
+            info[room][label] = info[room].get(label, 0) + 1
+        return info
 
     def print_scene_semantic_info(self) -> None:
         scene = self.sim.semantic_scene
@@ -286,6 +312,68 @@ class NewViewer(BaseViewer):
                 
         return objects
     
+    def _native_region_bbox(self, region):
+        """Axis-aligned world bbox from the dataset's own region annotation.
+
+        Returns ``[[minx,miny,minz],[maxx,maxy,maxz]]`` or ``None`` when the
+        region has no usable (non-degenerate) native box. MP3D provides accurate
+        native region boxes; HM3D usually does not, hence the object fallback.
+        """
+        aabb = getattr(region, "aabb", None)
+        if aabb is None:
+            return None
+        try:
+            mn_ = aabb.min
+            mn_ = mn_() if callable(mn_) else mn_
+            mx_ = aabb.max
+            mx_ = mx_() if callable(mx_) else mx_
+            lo = [float(mn_[0]), float(mn_[1]), float(mn_[2])]
+            hi = [float(mx_[0]), float(mx_[1]), float(mx_[2])]
+        except Exception:
+            return None
+        if (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]) <= 0:
+            return None
+        return [lo, hi]
+
+    def _object_derived_region_bbox(self, region, ignore_categories):
+        """Room bbox built from the union of the region's object bboxes.
+
+        Fallback used when the dataset has no native region box (e.g. HM3D).
+        """
+        room_bbox = None
+        for obj in region.objects:
+            obj_str_id = obj.id
+            skip = False
+            for cat in ignore_categories:
+                if cat in obj_str_id.lower():
+                    skip = True
+                    break
+            if skip:
+                continue
+            if obj_str_id not in self.objects:
+                continue
+            obj_data = self.objects[obj_str_id]
+            if "bbox_world" not in obj_data:
+                continue
+            obj_bbox = obj_data["bbox_world"]
+
+            diff_x = obj_bbox[1][0] - obj_bbox[0][0]
+            diff_y = obj_bbox[1][1] - obj_bbox[0][1]
+            diff_z = obj_bbox[1][2] - obj_bbox[0][2]
+            if diff_x * diff_y * diff_z == 0:
+                continue
+            if room_bbox is None:
+                # copy so we never mutate the object's stored bbox
+                room_bbox = [list(obj_bbox[0]), list(obj_bbox[1])]
+            else:
+                room_bbox[0][0] = min(room_bbox[0][0], obj_bbox[0][0])
+                room_bbox[0][1] = min(room_bbox[0][1], obj_bbox[0][1])
+                room_bbox[0][2] = min(room_bbox[0][2], obj_bbox[0][2])
+                room_bbox[1][0] = max(room_bbox[1][0], obj_bbox[1][0])
+                room_bbox[1][1] = max(room_bbox[1][1], obj_bbox[1][1])
+                room_bbox[1][2] = max(room_bbox[1][2], obj_bbox[1][2])
+        return room_bbox
+
     def get_rooms_from_sim(self):
         rooms = {}
         ignore_categories = ["ceiling", "floor", "wall", "handle", "window", "frame", "unknown", "stair"]
@@ -301,47 +389,15 @@ class NewViewer(BaseViewer):
             rooms[region_id] = {}
             room_height = self.map_room_id_to_name.get(region_id, {})["position"][1]
             rooms_heights.append(room_height)
-      
 
-            # build the bbox of the room from its objects
-            for obj in region.objects:
-                obj_str_id = obj.id
-                for cat in ignore_categories:
-                    if cat in obj_str_id.lower():
-                        obj_str_id = None
-                        break
-                if obj_str_id is None:
-                    continue
-                if obj_str_id not in self.objects:
-                    continue
-
-                obj_data = self.objects[obj_str_id]
-                if "bbox_world" not in obj_data:
-                    continue
-                obj_bbox = obj_data["bbox_world"]
-
-                diff_x = obj_bbox[1][0] - obj_bbox[0][0]
-                diff_y = obj_bbox[1][1] - obj_bbox[0][1]
-                diff_z = obj_bbox[1][2] - obj_bbox[0][2]
-                volume = diff_x * diff_y * diff_z
-                if volume == 0:
-                    continue
-                if "bbox_world" not in rooms.get(region_id, {}):
-                    rooms[region_id] = {
-                        "bbox_world": obj_bbox
-                    }
-                else:
-                    
-                    room_bbox = rooms[region_id]["bbox_world"]
-
-                    # update room bbox to include obj bbox
-                    room_bbox[0][0] = min(room_bbox[0][0], obj_bbox[0][0])
-                    room_bbox[0][1] = min(room_bbox[0][1], obj_bbox[0][1])
-                    room_bbox[0][2] = min(room_bbox[0][2], obj_bbox[0][2])
-                    room_bbox[1][0] = max(room_bbox[1][0], obj_bbox[1][0])
-                    room_bbox[1][1] = max(room_bbox[1][1], obj_bbox[1][1])
-                    room_bbox[1][2] = max(room_bbox[1][2], obj_bbox[1][2])
-                    rooms[region_id]["bbox_world"] = room_bbox
+            # Prefer the dataset's NATIVE region bounding box (accurate and always
+            # present for MP3D). Fall back to deriving the box from the room's
+            # objects only when the native one is missing/degenerate (e.g. HM3D).
+            room_bbox = self._native_region_bbox(region)
+            if room_bbox is None:
+                room_bbox = self._object_derived_region_bbox(region, ignore_categories)
+            if room_bbox is not None:
+                rooms[region_id]["bbox_world"] = room_bbox
 
             # Initialize room entry if it doesn't exist (in case region has no valid objects)
             if region_id not in rooms:
@@ -607,6 +663,38 @@ class NewViewer(BaseViewer):
         return closest_positions
         
 
+    def _floor_heights(self) -> List[float]:
+        """Sorted list of floor heights (index == floor number)."""
+        heights = sorted({
+            round(float(meta["position"][1]), 2)
+            for meta in self.map_room_id_to_name.values()
+            if meta.get("position")
+            and "unknown" not in str(meta.get("name", "")).lower()
+        })
+        return heights
+
+    def _frame_floor_from_height(self, position, current_room, stair_thresh: float = 0.9):
+        """Floor of a frame based on the agent's real height.
+
+        When the agent is clearly between two floor levels (on the stairs), the
+        floor is reported as ``"unknown_floor"`` so the frame isn't wrongly
+        attributed to the room's floor (e.g. a stairs frame tagged as the living
+        room). Otherwise the room's floor number is returned.
+        """
+        room_floor = current_room.get("floor_number") if current_room else None
+        if room_floor is None:
+            return "unknown_floor"
+        heights = self._floor_heights()
+        if not isinstance(room_floor, int) or room_floor < 0 or room_floor >= len(heights):
+            return room_floor
+        try:
+            y = float(position[1])
+        except (TypeError, ValueError, IndexError):
+            return room_floor
+        if abs(y - heights[room_floor]) > stair_thresh:
+            return "unknown_floor"
+        return room_floor
+
     def get_floor_from_room(self, room_name: str) -> int:
         for room in self.rooms.values():
             if room.get("name") == room_name:
@@ -651,7 +739,8 @@ class NewViewer(BaseViewer):
             path.requested_end = goal
             found_path = sim.pathfinder.find_path(path)
             path_points = path.points
-            save_images = False
+            save_images = getattr(self, "save_frames", False)
+            query_dir = None  # allocated lazily on the first saved frame
 
             output_dir = "output"
             if os.path.exists(output_dir):
@@ -736,11 +825,13 @@ class NewViewer(BaseViewer):
 
                             if rgb is not None:
                                 if save_images:
-                                    # Save RGB/semantic preview as before
-                                    if semantic is not None:
-                                        self.display_sample(rgb_obs=rgb, semantic_obs=semantic)
-                                    else:
-                                        self.display_sample(rgb_obs=rgb)
+                                    if query_dir is None:
+                                        query_dir = self._new_query_dir(
+                                            self.sim_settings.get("scene", "")
+                                        )
+                                    self.save_frame_images(
+                                        rgb, semantic, i, out_dir=query_dir
+                                    )
 
                                 # Extract visible objects + relations
                                 visible_objs = self.extract_visible_objs(sim, observations)
@@ -759,11 +850,18 @@ class NewViewer(BaseViewer):
 
                                     # add a field in frame data with the room name where the agent is located in that frame
                                     current_room = self.get_room_from_position(agent_state.position)
+                                    # Floor from the agent's actual height: if it's
+                                    # between floors (on the stairs), mark unknown so
+                                    # the frame isn't wrongly attributed to a floor.
+                                    frame_floor = self._frame_floor_from_height(
+                                        agent_state.position, current_room
+                                    )
                                     frame_data = {
                                         "scene_index": sim.curr_scene_name,
                                         "image_index": f"frame-{i:06d}",
                                         "scene_pose": np.array(T_world_sensor).tolist(),
                                         "current_room": current_room,
+                                        "current_floor": frame_floor,
                                         "objects": processed_visible_clusters,  # NOTE we use "objects" even if they are clusters
                                         "spatial_relations": self.compute_spatial_relations(processed_visible_clusters, sim.get_agent(self.agent_id).get_state()),
                                         "timestamp": datetime.datetime.now().isoformat(),
@@ -912,7 +1010,73 @@ class NewViewer(BaseViewer):
 
         plt.savefig(filename, bbox_inches="tight")
         plt.close()
-    
+
+    def _new_query_dir(self, scene_path, out_root="saved_captures"):
+        """Create and return the next ``saved_captures/<house>/query_<n>`` folder.
+
+        <house> is the HM3D number prefix (e.g. ``00800``); each navigation query
+        gets its own incrementing ``query_<n>`` folder so frames are never lost.
+        """
+        scene = scene_path or ""
+        folder = os.path.basename(os.path.dirname(scene))  # e.g. 00800-TEEsavR23oF
+        house = folder.split("-")[0] if folder else ""
+        if not house:
+            house = os.path.splitext(os.path.basename(scene))[0].split(".")[0] or "scene"
+        house_dir = os.path.join(out_root, house)
+        os.makedirs(house_dir, exist_ok=True)
+        nums = []
+        for d in os.listdir(house_dir):
+            if d.startswith("query_") and os.path.isdir(os.path.join(house_dir, d)):
+                suffix = d[len("query_"):]
+                if suffix.isdigit():
+                    nums.append(int(suffix))
+        next_n = (max(nums) + 1) if nums else 0
+        query_dir = os.path.join(house_dir, f"query_{next_n}")
+        os.makedirs(query_dir, exist_ok=True)
+        return query_dir
+
+    def save_frame_images(self, rgb, semantic, index, out_dir, combined=None):
+        """Save a processed frame's color and semantic images.
+
+        By default (``combined=True``) color and semantic are written side by side
+        in a single ``frame_<i>.png``. When ``combined=False`` they are written as
+        two files ``frame_<i>_color.png`` and ``frame_<i>_semantic.png``.
+        """
+        if combined is None:
+            combined = getattr(self, "save_frames_combined", True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+
+            rgb_arr = np.asarray(rgb)
+            mode = "RGBA" if rgb_arr.ndim == 3 and rgb_arr.shape[-1] == 4 else "RGB"
+            color_img = Image.fromarray(rgb_arr, mode=mode).convert("RGB")
+
+            sem_img = None
+            if semantic is not None:
+                sem = np.asarray(semantic)
+                if sem.size > 0:
+                    s = Image.new("P", (sem.shape[1], sem.shape[0]))
+                    s.putpalette(d3_40_colors_rgb.flatten())
+                    s.putdata((sem.flatten() % 40).astype(np.uint8))
+                    sem_img = s.convert("RGB")
+
+            if combined and sem_img is not None:
+                w = color_img.width + sem_img.width
+                h = max(color_img.height, sem_img.height)
+                canvas = Image.new("RGB", (w, h), (0, 0, 0))
+                canvas.paste(color_img, (0, 0))
+                canvas.paste(sem_img, (color_img.width, 0))
+                canvas.save(os.path.join(out_dir, f"frame_{index:04d}.png"))
+            else:
+                color_img.save(os.path.join(out_dir, f"frame_{index:04d}_color.png"))
+                if sem_img is not None:
+                    sem_img.save(
+                        os.path.join(out_dir, f"frame_{index:04d}_semantic.png")
+                    )
+            print(f"[SAVE] frame {index:04d} -> {out_dir}")
+        except Exception as err:
+            print(f"[SAVE] failed to save frame {index}: {err}")
+
     def extract_visible_objs(self, sim, observations) -> Optional[Dict[str, Any]]:
         """
         Given current sim and observations (must include semantic sensor),
@@ -1841,6 +2005,11 @@ class NewViewer(BaseViewer):
             self.show_room_bboxes = not self.show_room_bboxes
             state = "enabled" if self.show_room_bboxes else "disabled"
             logger.info(f"Room bounding boxes {state}.")
+        elif key == pressed.P:
+            self.save_frames = not self.save_frames
+            state = "enabled" if self.save_frames else "disabled"
+            logger.info(f"Saving color/semantic frames {state}.")
+            print(f"[SAVE] Frame saving {state} (color + semantic -> saved_captures/)")
 
         super().key_press_event(event)
 

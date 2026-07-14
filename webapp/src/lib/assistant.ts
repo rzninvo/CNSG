@@ -14,10 +14,16 @@ export type AssistantStatus = {
   scene: string;
   scene_path?: string;
   current_room: string | null;
+  overlays?: {
+    bboxes?: boolean;
+    all_bboxes?: boolean;
+    rooms?: boolean;
+    save_frames?: boolean;
+  };
   controls: Record<string, string>;
 };
 
-export type SceneEntry = { label: string; scene: string };
+export type SceneEntry = { label: string; scene: string; dataset?: string };
 
 /** List scenes available for switching from the webapp. */
 export async function getScenes(): Promise<{
@@ -35,7 +41,11 @@ export async function getScenes(): Promise<{
 }
 
 /** Switch the active scene at runtime (backend reloads it, LLM stays loaded). */
-export async function setScene(scene: string, timeoutMs = 180000): Promise<void> {
+export async function setScene(
+  scene: string,
+  dataset?: string,
+  timeoutMs = 180000,
+): Promise<void> {
   if (!base) throw new Error("Assistant backend URL is not configured.");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -43,7 +53,7 @@ export async function setScene(scene: string, timeoutMs = 180000): Promise<void>
     const res = await fetch(`${base}/scene`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scene }),
+      body: JSON.stringify({ scene, dataset }),
       signal: controller.signal,
     });
     const data = await res.json().catch(() => ({}));

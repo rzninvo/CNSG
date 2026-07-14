@@ -36,6 +36,21 @@ import time
 load_dotenv()
 
 COLLECT_DATA = False
+# Set to False to silence the readable LLM-input / clusters debug print.
+DEBUG_PROMPT = True
+
+
+def _strip_room_number(name):
+    """Remove a trailing ' <number>' from a room name.
+
+    e.g. 'lower bedroom 1' -> 'lower bedroom'. Keeps names without a number
+    unchanged. Used so the generated instructions never show the disambiguation
+    index.
+    """
+    import re as _re
+    if not name:
+        return name
+    return _re.sub(r"\s+\d+$", "", str(name)).strip()
 
 # Structural labels do not help with navigation cues.
 IGNORED_LABELS = {
@@ -197,7 +212,8 @@ class FrameSummary:
         if "unknown" in (self.current_room_name or "").lower() or "unknown" in (str(self.current_floor) or "").lower():
             description = f"{direction_part} In {self.name}, you see {object_part}."
         else:
-            description = f"{direction_part} In {self.name} you are in {self.current_room_name} on floor {self.current_floor}. You see {object_part}."
+            room_name = _strip_room_number(self.current_room_name)
+            description = f"{direction_part} In {self.name} you are in {room_name} on floor {self.current_floor}. You see {object_part}."
     
         return description
     
@@ -315,7 +331,7 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     room = cluster.get("room", "").strip()
     floor_number = cluster.get("floor_number")
     if room and floor_number is not None:
-        position += f", (room: {room})"
+        position += f", (room: {_strip_room_number(room)})"
 
     return f"{cluster_str_id} [{position}]"
 
@@ -444,7 +460,10 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
                     clusters=phrases,
                     turn_direction=turn_direction,
                     current_room_name=current_room.get("name", "unknown_room"),
-                    current_floor=current_room.get("floor_number", "unknown_floor"),
+                    current_floor=frame.get(
+                        "current_floor",
+                        current_room.get("floor_number", "unknown_floor"),
+                    ),
                     relations=[],
                 )
             ) 
@@ -492,14 +511,59 @@ def clean_text_from_ids(text: str) -> str:
 
 def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visited, num_clusters_per_frame: int = 2) -> str:
     
-    observation_lines = "\n".join(summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame) for summary in summaries)
+    def _to_int(x):
+        try:
+            return int(x)
+        except (TypeError, ValueError):
+            return None
+
+    # Build observations, inserting an explicit "take the stairs up/down" marker
+    # at every floor transition. Frames on the stairs have an UNKNOWN floor, so a
+    # change is detected between the last KNOWN floor and the next KNOWN floor,
+    # and the marker is placed right AFTER the last frame on the old floor (i.e.
+    # BEFORE the stairs/unknown frames), not after them.
+    floors = [_to_int(getattr(s, "current_floor", None)) for s in summaries]
+    stair_markers = {}  # insert-before frame index -> marker line
+    last_known_idx = None
+    last_known_floor = None
+    for idx, f in enumerate(floors):
+        if f is None:
+            continue
+        if last_known_floor is not None and f != last_known_floor:
+            direction = "up" if f > last_known_floor else "down"
+            stair_markers[last_known_idx + 1] = (
+                f"Then take the stairs {direction} to floor {f}."
+            )
+        last_known_idx = idx
+        last_known_floor = f
+
+    obs_lines = []
+    for idx, summary in enumerate(summaries):
+        if idx in stair_markers:
+            obs_lines.append(stair_markers[idx])
+        obs_lines.append(
+            summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame)
+        )
+    observation_lines = "\n".join(obs_lines)
 
     visited_room_strings = []
     for room in rooms_visited:
         if not isinstance(room, dict):
             continue
-        visited_room_strings.append(f"{room.get('name')} (floor: {room.get('floor_number')})")
-    
+        visited_room_strings.append(f"{_strip_room_number(room.get('name'))} (floor: {room.get('floor_number')})")
+
+    start_floor = _to_int(rooms_visited[0].get("floor_number")) if rooms_visited else None
+    target_floor = _to_int(rooms_visited[-1].get("floor_number")) if rooms_visited else None
+    floor_directive = ""
+    if start_floor is not None and target_floor is not None and start_floor != target_floor:
+        direction = "up" if target_floor > start_floor else "down"
+        target_room_name = _strip_room_number(rooms_visited[-1].get("name"))
+        floor_directive = (
+            f"\n        The path changes floor: naturally include taking the stairs "
+            f"{direction} to reach the {target_room_name}, phrased simply like "
+            f"\"go {direction} the stairs to the {target_room_name}\"."
+        )
+
     user_prompt = f"""
         User question: {user_input}
 
@@ -507,7 +571,7 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
         {observation_lines}
 
         Rooms visited in order: \n{', '.join(visited_room_strings)}
-        The user is in {rooms_visited[0].get("name")} (floor: {rooms_visited[0].get("floor_number")}) and the target is in {rooms_visited[-1].get("name")} (floor: {rooms_visited[-1].get("floor_number")}).
+        The user is in {_strip_room_number(rooms_visited[0].get("name"))} (floor: {rooms_visited[0].get("floor_number")}) and the target is in {_strip_room_number(rooms_visited[-1].get("name"))} (floor: {rooms_visited[-1].get("floor_number")}).{floor_directive}
         """
     return user_prompt
 
@@ -775,6 +839,42 @@ def generate_description(user_prompt: str, model = None, tokenizer = None) -> st
         return response
 
 # * Used as API
+def _format_clusters_debug(clusters_to_draw) -> str:
+    """Human-readable listing of the clusters that will be highlighted."""
+    if not clusters_to_draw:
+        return "  (none)"
+    lines = []
+    for cid, obj_ids in clusters_to_draw.items():
+        label = re.sub(r"_\d+$", "", str(cid)).replace("_", " ").strip() or str(cid)
+        if isinstance(obj_ids, (list, tuple, set)):
+            ids = sorted(str(o) for o in obj_ids)
+            ids_str = ", ".join(ids)
+            n = len(ids)
+        else:
+            ids_str = str(obj_ids)
+            n = 1
+        lines.append(f"  • {str(cid):<24} label={label!r:<20} ({n}) [{ids_str}]")
+    return "\n".join(lines)
+
+
+def debug_print_llm_input(prompt: str, clusters_to_draw) -> None:
+    """Pretty-print the exact prompt fed to the LLM plus the selected clusters."""
+    if not DEBUG_PROMPT:
+        return
+    bar = "=" * 80
+    body = "\n".join(line.strip() for line in prompt.strip().splitlines())
+    print("\n" + bar)
+    print("  LLM INPUT  —  user prompt fed to the model (a fixed system prompt")
+    print("              with the navigation rules + few-shot examples is prepended)")
+    print(bar)
+    print(body)
+    print("-" * 80)
+    print("  CLUSTERS TO HIGHLIGHT  (cluster_id → object ids)")
+    print("-" * 80)
+    print(_format_clusters_debug(clusters_to_draw))
+    print(bar + "\n", flush=True)
+
+
 def generate_path_description(
     frames: List[Dict[str, Any]],
     user_input: str,
@@ -804,7 +904,7 @@ def generate_path_description(
 
     #! NOTE generate description begins
     _time_start_generation = time.time()
-    print("\n\n[generate_path_description] - Cluster to draw:", clusters_to_draw)
+    debug_print_llm_input(prompt, clusters_to_draw)
     if dry_run: 
         return None, clusters_to_draw
 
@@ -839,6 +939,20 @@ def generate_path_description(
             f.write(json.dumps({"role": "assistant", "content": description}) + "\n")
 
     description = clean_text_from_ids(description)
+
+    # Safety net: drop room-name disambiguation numbers the model may still emit
+    # (e.g. "lower bedroom 1" -> "lower bedroom"), only after known room names so
+    # other numbers are left untouched.
+    room_bases = {
+        _strip_room_number(r.get("name") or "").lower()
+        for r in rooms_visited
+        if isinstance(r, dict) and r.get("name")
+    }
+    for base in room_bases:
+        if base:
+            description = re.sub(
+                rf"\b({re.escape(base)})\s+\d+\b", r"\1", description, flags=re.IGNORECASE
+            )
 
     #! NOTE generate description ends
     _time_generation = time.time() - _time_start_generation

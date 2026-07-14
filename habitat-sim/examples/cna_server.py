@@ -356,13 +356,22 @@ class WebViewer(NewViewer):
         agent.act(action_name)
 
     # ------------------------------------------------------------ scene switch
-    def reconfigure_scene(self, scene_path: str, done: "queue.Queue | None" = None) -> None:
+    def reconfigure_scene(
+        self,
+        scene_path: str,
+        done: "queue.Queue | None" = None,
+        dataset: str | None = None,
+    ) -> None:
         """Reload a different scene at runtime (keeps the LLM loaded).
 
         Must run on the render thread (queued via action_queue).
         """
         try:
             self.sim_settings["scene"] = scene_path
+            # Different datasets (HM3D vs MP3D) need their own scene_dataset
+            # config, otherwise the scene fails to load.
+            if dataset:
+                self.sim_settings["scene_dataset_config_file"] = dataset
             # Recreate the simulator from scratch. An in-place reconfigure leaves
             # the semantic mesh unmatched -> all object OBBs become zero-sized ->
             # room bounding boxes degenerate and rooms/objects are not detected.
@@ -397,6 +406,12 @@ class WebViewer(NewViewer):
                 ignore_categories=IGNORE_CATEGORIES,
             )
             self.objects = self.get_objs_from_sim()
+            # Scenes without a *.semantic.txt (e.g. MP3D): build the room->objects
+            # map from the sim so the object-in-room sanity check still works.
+            if not self.room_objects_occurences:
+                self.room_objects_occurences = self.build_room_objects_from_objects(
+                    IGNORE_CATEGORIES
+                )
             self.cluster_cnt = 0
             self.clusters = self.cluster_objs(distance_thresh=0.5)
             self.rooms = self.get_rooms_from_sim()
@@ -466,6 +481,7 @@ class ConversationalNavigationServer:
         webapp_dist: str | None = None,
         scenes_dir: str | None = None,
         current_scene: str | None = None,
+        dataset: str | None = None,
         finetuned: bool = False,
     ) -> None:
         self.viewer = viewer
@@ -479,6 +495,14 @@ class ConversationalNavigationServer:
         self.webapp_dist = webapp_dist
         self.scenes_dir = scenes_dir
         self.current_scene = os.path.normpath(current_scene) if current_scene else ""
+        self.dataset = os.path.normpath(dataset) if dataset else ""
+        # Scene sources = (directory to scan, dataset_config for those scenes).
+        # The launch (HM3D) source, plus any auto-detected extra datasets (MP3D).
+        self.scene_sources: list[tuple[str, str]] = []
+        if scenes_dir:
+            self.scene_sources.append((scenes_dir, self.dataset))
+        for extra_dir, extra_cfg in self._discover_extra_scene_sources(scenes_dir):
+            self.scene_sources.append((extra_dir, extra_cfg))
         self._chat_lock = threading.Lock()
         self._scene_lock = threading.Lock()
         self._llm_lock = threading.Lock()
@@ -544,6 +568,12 @@ class ConversationalNavigationServer:
                 "scene": os.path.basename(self.current_scene),
                 "scene_path": self.current_scene,
                 "current_room": self.viewer.current_room_name(),
+                "overlays": {
+                    "bboxes": bool(getattr(self.viewer, "show_object_bboxes", False)),
+                    "all_bboxes": bool(getattr(self.viewer, "show_all_object_bboxes", False)),
+                    "rooms": bool(getattr(self.viewer, "show_room_bboxes", False)),
+                    "save_frames": bool(getattr(self.viewer, "save_frames", False)),
+                },
                 "controls": WEB_KEY_TO_ACTION,
             }
         )
@@ -638,23 +668,86 @@ class ConversationalNavigationServer:
             {"status": "ok", "backend": self.backend, "finetuned": self.finetuned}
         )
 
+    @staticmethod
+    def _discover_extra_scene_sources(scenes_dir: str | None):
+        """Auto-detect extra scene datasets (e.g. the MP3D example) that live
+
+        outside the launch HM3D directory. Returns a list of
+        ``(scan_dir, dataset_config)`` tuples for any that are present on disk.
+        """
+        sources: list[tuple[str, str]] = []
+        if not scenes_dir:
+            return sources
+        try:
+            # scenes_dir = <data>/scene_datasets/hm3d/minival -> data root
+            data_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(scenes_dir)))
+            )
+        except Exception:
+            return sources
+        mp3d_dir = os.path.join(data_root, "scene_datasets", "mp3d_example")
+        mp3d_cfg = os.path.join(mp3d_dir, "mp3d.scene_dataset_config.json")
+        if os.path.isdir(mp3d_dir) and os.path.isfile(mp3d_cfg):
+            sources.append((mp3d_dir, os.path.normpath(mp3d_cfg)))
+        # Full MP3D dataset (90 houses) if it has been downloaded + configured.
+        mp3d_full_dir = os.path.join(data_root, "scene_datasets", "mp3d")
+        mp3d_full_cfg = os.path.join(mp3d_full_dir, "mp3d.scene_dataset_config.json")
+        if os.path.isdir(mp3d_full_dir) and os.path.isfile(mp3d_full_cfg):
+            sources.append((mp3d_full_dir, os.path.normpath(mp3d_full_cfg)))
+        return sources
+
+    def _scene_dataset_for(self, scene_path: str) -> str:
+        """Return the dataset config that owns ``scene_path`` (empty if launch)."""
+        norm = os.path.normpath(os.path.abspath(scene_path))
+        for src_dir, src_cfg in self.scene_sources:
+            if not src_cfg:
+                continue
+            src_abs = os.path.normpath(os.path.abspath(src_dir))
+            if norm.startswith(src_abs + os.sep):
+                return src_cfg
+        return ""
+
     def scenes(self):
         """List scenes available for switching (folders with a glb + room map)."""
         result = []
-        base = self.scenes_dir
-        if base and os.path.isdir(base):
+        seen = set()
+        seen_labels = set()
+        for base, dataset_cfg in self.scene_sources:
+            if not base or not os.path.isdir(base):
+                continue
+            is_mp3d = "mp3d" in os.path.basename(os.path.normpath(base)).lower()
+            dataset_rel = (
+                os.path.normpath(os.path.relpath(dataset_cfg, os.getcwd()))
+                if dataset_cfg
+                else ""
+            )
             for name in sorted(os.listdir(base)):
                 folder = os.path.join(base, name)
                 if not os.path.isdir(folder):
                     continue
                 if not os.path.isfile(os.path.join(folder, "room_id_to_name_map.json")):
                     continue
-                glbs = sorted(g for g in os.listdir(folder) if g.endswith(".basis.glb"))
-                if not glbs:
+                # Prefer a *.basis.glb (HM3D); otherwise any non-semantic .glb (MP3D).
+                cands = [
+                    g for g in os.listdir(folder)
+                    if g.endswith(".glb") and ".semantic" not in g
+                ]
+                if not cands:
                     continue
-                scene_abs = os.path.join(folder, glbs[0])
+                basis = sorted(g for g in cands if g.endswith(".basis.glb"))
+                glb = basis[0] if basis else sorted(cands)[0]
+                scene_abs = os.path.join(folder, glb)
                 scene_rel = os.path.normpath(os.path.relpath(scene_abs, os.getcwd()))
-                result.append({"label": name, "scene": scene_rel})
+                if scene_rel in seen:
+                    continue
+                seen.add(scene_rel)
+                label = f"MP3D · {name}" if is_mp3d else name
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                result.append(
+                    {"label": label, "scene": scene_rel, "dataset": dataset_rel}
+                )
         return jsonify({"scenes": result, "current": self.current_scene})
 
     def set_scene(self):
@@ -665,11 +758,15 @@ class ConversationalNavigationServer:
             return jsonify({"error": "no scene provided"}), 400
         if not os.path.isfile(scene):
             return jsonify({"error": f"scene not found: {scene}"}), 404
+        dataset = (data.get("dataset") or "").strip()
+        dataset = os.path.normpath(dataset) if dataset else self._scene_dataset_for(scene)
+        if dataset and not os.path.isfile(dataset):
+            dataset = ""
         # Only one switch at a time.
         with self._scene_lock:
             done: queue.Queue = queue.Queue()
             self.viewer.action_queue.put(
-                (self.viewer.reconfigure_scene, (scene, done), {})
+                (self.viewer.reconfigure_scene, (scene, done), {"dataset": dataset or None})
             )
             try:
                 err = done.get(timeout=180)
@@ -959,6 +1056,7 @@ def main() -> None:
         webapp_dist=args.webapp_dist,
         scenes_dir=os.path.dirname(os.path.dirname(os.path.abspath(args.scene))),
         current_scene=args.scene,
+        dataset=args.dataset,
         finetuned=args.finetuned_model,
     )
     server_thread = threading.Thread(
