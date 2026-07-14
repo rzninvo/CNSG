@@ -103,6 +103,7 @@ class NewViewer(BaseViewer):
 
         # * Draw object bounding boxes when enabled
         self.show_object_bboxes = False
+        self.show_all_object_bboxes = False
         self.show_room_bboxes = False
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
@@ -485,9 +486,9 @@ class NewViewer(BaseViewer):
             output_q.put("Could not find the specified object or room. Please provide more details.")
             return
         
-        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q)
+        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q, user_pose=user_pose)
 
-    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None):
+    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None, user_pose=None):
         #! NOTE Estract goal pose begins
         _time_start_extract_goal = time.time()
         if len(candidate_goals) == 0:
@@ -1379,9 +1380,9 @@ class NewViewer(BaseViewer):
         if self.q_app:
             self.q_app.processEvents()
 
-        # Every 3 seconds, print the room the agent is currently in and its pose.
+        # Print the current room only when it CHANGES (checked every ~1s).
         now = time.time()
-        if now - self._last_room_print_time >= 3.0:
+        if now - self._last_room_print_time >= 1.0:
             self._last_room_print_time = now
             try:
                 agent_state = self.sim.get_agent(self.agent_id).get_state()
@@ -1392,11 +1393,13 @@ class NewViewer(BaseViewer):
                     room_name = room.get("name", "unknown_room")
                 else:
                     room_id, room_name = None, "unknown_room"
-                print(
-                    f"[ROOM] agent position: "
-                    f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) | "
-                    f"room_id: {room_id} | room: {room_name}"
-                )
+                if room_name != getattr(self, "_last_room_name", None):
+                    self._last_room_name = room_name
+                    print(
+                        f"[ROOM] entered "
+                        f"({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) | "
+                        f"room_id: {room_id} | room: {room_name}"
+                    )
             except Exception as err:
                 print(f"[ROOM] could not determine current room: {err}")
 
@@ -1463,7 +1466,14 @@ class NewViewer(BaseViewer):
         Additional draw commands to be called during draw_event.
         """
         super().debug_draw()
-        if self.show_object_bboxes:
+        if self.show_all_object_bboxes:
+            # Draw every known object, grouped/coloured by cluster.
+            all_clusters = {
+                cid: cluster.get("obj_str_ids", [])
+                for cid, cluster in self.clusters.items()
+            }
+            self._draw_object_bboxes(self.debug_line_render, all_clusters)
+        elif self.show_object_bboxes:
             self._draw_object_bboxes(self.debug_line_render, self.clusters_to_draw)
         else:
             self._bbox_label_screen_positions.clear()
@@ -1823,6 +1833,14 @@ class NewViewer(BaseViewer):
             self.show_object_bboxes = not self.show_object_bboxes
             state = "enabled" if self.show_object_bboxes else "disabled"
             logger.info(f"Object bounding boxes {state}.")
+        elif key == pressed.G:
+            self.show_all_object_bboxes = not self.show_all_object_bboxes
+            state = "enabled" if self.show_all_object_bboxes else "disabled"
+            logger.info(f"ALL object bounding boxes {state}.")
+        elif key == pressed.R:
+            self.show_room_bboxes = not self.show_room_bboxes
+            state = "enabled" if self.show_room_bboxes else "disabled"
+            logger.info(f"Room bounding boxes {state}.")
 
         super().key_press_event(event)
 
@@ -2046,11 +2064,21 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
                 continue
 
             local_llm_input = model is not None and tokenizer is not None and model_intent is not None
+            # Allow the active model to be swapped at runtime (see cna_server.py):
+            # read the current refs from the viewer if present.
+            cur_model = getattr(viewer, "model", model)
+            cur_tokenizer = getattr(viewer, "tokenizer", tokenizer)
+            cur_model_intent = getattr(viewer, "model_intent", model_intent)
+            local_llm_input = (
+                cur_model is not None
+                and cur_tokenizer is not None
+                and cur_model_intent is not None
+            )
             # output_q.put("Processing your request...")
             if local_llm_input:
                 # use the local model to parse the user input 
                 # if the user input is a navigation query, the output of the llm should be "navigation", otherwise the llm should return a friendly response
-                viewer.action_queue.put((viewer.start_local_llm_navigation, (user_input, tokenizer, model_intent, output_q), {}))
+                viewer.action_queue.put((viewer.start_local_llm_navigation, (user_input, cur_tokenizer, cur_model_intent, output_q), {}))
             else: 
                 try:  
                     #! NOTE user_classification begins

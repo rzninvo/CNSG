@@ -14,17 +14,28 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   assistantConfigured,
+  getScenes,
   getStatus,
   releaseAllKeys,
   sendChat,
   sendKey,
+  setLlm,
+  setScene,
   videoStreamUrl,
   wsUrl,
   type AssistantStatus,
+  type SceneEntry,
 } from "@/lib/assistant";
 
 type ChatMessage = {
@@ -60,6 +71,10 @@ const ConversationalNavigationAssistant = () => {
   const [viewerHovered, setViewerHovered] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [ttsOn, setTtsOn] = useState(false);
+  const [scenes, setScenes] = useState<SceneEntry[]>([]);
+  const [currentScene, setCurrentScene] = useState<string>("");
+  const [switching, setSwitching] = useState(false);
+  const [llmBusy, setLlmBusy] = useState(false);
 
   const pressedRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -83,6 +98,66 @@ const ConversationalNavigationAssistant = () => {
       clearInterval(t);
     };
   }, []);
+
+  // ------------------------------------------------------------ scene list
+  useEffect(() => {
+    if (!assistantConfigured) return;
+    let alive = true;
+    getScenes().then((data) => {
+      if (!alive || !data) return;
+      // For now only expose the 00800 and 00808 houses.
+      const allowed = data.scenes.filter(
+        (s) => s.label.includes("00800") || s.label.includes("00808"),
+      );
+      setScenes(allowed);
+      setCurrentScene(data.current || "");
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handleSceneChange = useCallback(
+    async (scene: string) => {
+      if (!scene || scene === currentScene || switching) return;
+      setSwitching(true);
+      try {
+        await setScene(scene);
+        setCurrentScene(scene);
+        toast.success("Scene switched");
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Failed to switch scene",
+        );
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [currentScene, switching],
+  );
+
+  // The backend applies the change and reverts on failure; the UI reflects the
+  // server's status (re-fetched after each attempt), so a failed switch snaps
+  // back to the previous model automatically.
+  const applyLlm = useCallback(
+    async (next: { backend: string; finetuned: boolean }) => {
+      if (llmBusy) return;
+      setLlmBusy(true);
+      try {
+        await setLlm(next);
+        toast.success("Model updated");
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Failed to switch model",
+        );
+      } finally {
+        const s = await getStatus();
+        setStatus(s);
+        setLlmBusy(false);
+      }
+    },
+    [llmBusy],
+  );
 
   // ---------------------------------- low-latency WebSocket (video + input)
   useEffect(() => {
@@ -406,6 +481,8 @@ const ConversationalNavigationAssistant = () => {
 
   const llmReady = status?.llm_loaded ?? false;
   const connected = status !== null;
+  const backend = status?.backend ?? "local";
+  const finetuned = status?.finetuned ?? false;
 
   return (
     <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden">
@@ -440,6 +517,64 @@ const ConversationalNavigationAssistant = () => {
           </div>
 
           <div className="ml-auto flex items-center gap-2 flex-wrap">
+            {scenes.length > 0 && (
+              <Select
+                value={currentScene}
+                onValueChange={handleSceneChange}
+                disabled={switching}
+              >
+                <SelectTrigger className="h-8 w-[160px] text-xs bg-background/60">
+                  <SelectValue placeholder="Scene" />
+                </SelectTrigger>
+                <SelectContent>
+                  {scenes.map((s) => (
+                    <SelectItem key={s.scene} value={s.scene} className="text-xs">
+                      {s.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {status && (
+              <Select
+                value={backend}
+                onValueChange={(v) => applyLlm({ backend: v, finetuned })}
+                disabled={llmBusy || switching}
+              >
+                <SelectTrigger className="h-8 w-[104px] text-xs bg-background/60">
+                  <SelectValue placeholder="Backend" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="local" className="text-xs">
+                    Local
+                  </SelectItem>
+                  <SelectItem value="openai" className="text-xs">
+                    OpenAI
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            )}
+            {status && backend === "local" && (
+              <Select
+                value={finetuned ? "finetuned" : "base"}
+                onValueChange={(v) =>
+                  applyLlm({ backend, finetuned: v === "finetuned" })
+                }
+                disabled={llmBusy || switching}
+              >
+                <SelectTrigger className="h-8 w-[116px] text-xs bg-background/60">
+                  <SelectValue placeholder="Model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="finetuned" className="text-xs">
+                    Finetuned
+                  </SelectItem>
+                  <SelectItem value="base" className="text-xs">
+                    Base
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            )}
             <StatusBadge
               ok={connected}
               label={connected ? "Connected" : "Offline"}
@@ -547,8 +682,18 @@ const ConversationalNavigationAssistant = () => {
 
             {/* Hint */}
             <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-card/70 backdrop-blur-md border border-border/50 text-[11px] text-muted-foreground pointer-events-none whitespace-nowrap">
-              Hover the view · drag to look · WASD move · ZX up/down · B boxes
+              Hover the view · drag to look · WASD move · ZX up/down · G all boxes · R rooms
             </div>
+
+            {/* Scene switch overlay */}
+            {(switching || llmBusy) && (
+              <div className="absolute inset-0 z-10 bg-background/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
+                <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                <p className="text-sm text-muted-foreground">
+                  {switching ? "Switching scene…" : "Switching model…"}
+                </p>
+              </div>
+            )}
           </div>
         </section>
 

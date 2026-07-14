@@ -10,10 +10,70 @@ const base =
 export type AssistantStatus = {
   llm_loaded: boolean;
   backend: string;
+  finetuned?: boolean;
   scene: string;
+  scene_path?: string;
   current_room: string | null;
   controls: Record<string, string>;
 };
+
+export type SceneEntry = { label: string; scene: string };
+
+/** List scenes available for switching from the webapp. */
+export async function getScenes(): Promise<{
+  scenes: SceneEntry[];
+  current: string;
+} | null> {
+  if (!base) return null;
+  try {
+    const res = await fetch(`${base}/scenes`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Switch the active scene at runtime (backend reloads it, LLM stays loaded). */
+export async function setScene(scene: string, timeoutMs = 180000): Promise<void> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/scene`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error || `Server error (${res.status})`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Switch LLM backend (local/openai) and finetuned/base at runtime. */
+export async function setLlm(
+  cfg: { backend: string; finetuned: boolean },
+  timeoutMs = 300000,
+): Promise<void> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/llm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error || `Server error (${res.status})`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** URL of the live MJPEG stream (bind directly to an <img src>). */
 export function videoStreamUrl(): string {

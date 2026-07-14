@@ -26,6 +26,8 @@ POST /chat     -> {"message": "..."}          converse / navigate, returns text
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
 import queue
 import sys
@@ -98,6 +100,12 @@ WEB_KEY_TO_ACTION = {
 # Keys that must NOT be forwarded from the web (would freeze or kill the server):
 #   escape -> exits the app, tab -> heavy scene reconfigure, t -> blocking input()
 DENY_KEYS = {"escape", "esc", "tab", "enter", "return", "t"}
+
+# Categories ignored when rebuilding per-scene semantic metadata (same as mr_viewer).
+IGNORE_CATEGORIES = [
+    "ceiling", "floor", "wall", "handle", "window frame", "door frame",
+    "frame", "unknown", "stairs", "staircase", "stair", "stairway",
+]
 
 
 class _FakeKeyEvent:
@@ -347,6 +355,90 @@ class WebViewer(NewViewer):
         agent = self.sim.agents[self.agent_id]
         agent.act(action_name)
 
+    # ------------------------------------------------------------ scene switch
+    def reconfigure_scene(self, scene_path: str, done: "queue.Queue | None" = None) -> None:
+        """Reload a different scene at runtime (keeps the LLM loaded).
+
+        Must run on the render thread (queued via action_queue).
+        """
+        try:
+            self.sim_settings["scene"] = scene_path
+            # Recreate the simulator from scratch. An in-place reconfigure leaves
+            # the semantic mesh unmatched -> all object OBBs become zero-sized ->
+            # room bounding boxes degenerate and rooms/objects are not detected.
+            # A fresh Simulator reloads the semantics correctly, like at startup.
+            try:
+                if self.sim is not None:
+                    self.sim.close(destroy=True)
+            except Exception as close_err:
+                print(f"[CNA] sim close warning: {close_err}")
+            self.sim = None
+            self.reconfigure_sim()
+            self.scene = self.sim.semantic_scene
+            self._color_sensor = None
+            self.clusters_to_draw = None
+            self.show_object_bboxes = False
+            self.show_all_object_bboxes = False
+            self._object_bbox_colors = {}
+            self.prev_objs_to_draw = None
+
+            base_path = os.path.dirname(scene_path)
+            scene_name = os.path.splitext(os.path.basename(scene_path))[0]
+            semantic_path = os.path.join(
+                base_path, f"{scene_name.split('.')[0]}.semantic.txt"
+            )
+            map_file_path = os.path.join(base_path, "room_id_to_name_map.json")
+            with open(map_file_path, "r", encoding="utf-8") as f:
+                self.map_room_id_to_name = json.load(f)
+
+            self.room_objects_occurences = self.get_semantic_info(
+                semantic_path,
+                map_room_id_to_name=self.map_room_id_to_name,
+                ignore_categories=IGNORE_CATEGORIES,
+            )
+            self.objects = self.get_objs_from_sim()
+            self.cluster_cnt = 0
+            self.clusters = self.cluster_objs(distance_thresh=0.5)
+            self.rooms = self.get_rooms_from_sim()
+
+            # --- Diagnostics: verify semantic metadata actually reloaded ---
+            try:
+                regions = list(self.scene.regions) if self.scene else []
+                sample_ids = [getattr(r, "id", "?") for r in regions[:6]]
+                print(
+                    f"[CNA][scene] {scene_path}\n"
+                    f"[CNA][scene]   regions={len(regions)} "
+                    f"sample_region_ids={sample_ids}\n"
+                    f"[CNA][scene]   map_keys={list(self.map_room_id_to_name.keys())}\n"
+                    f"[CNA][scene]   objects={len(self.objects)} "
+                    f"clusters={len(self.clusters)} "
+                    f"rooms={len(self.rooms)} "
+                    f"room_names={[r.get('name') for r in self.rooms.values()]}",
+                    flush=True,
+                )
+            except Exception as diag_err:
+                print(f"[CNA][scene] diagnostics failed: {diag_err}", flush=True)
+
+            # Deterministic "default" spawn for the house: seeding the pathfinder
+            # makes get_random_navigable_point return the same spot every time you
+            # load this scene (instead of a different random point each switch).
+            if self.sim.pathfinder.is_loaded:
+                self.sim.pathfinder.seed(1)
+                agent = self.sim.get_agent(self.agent_id)
+                state = agent.get_state()
+                state.position = self.sim.pathfinder.get_random_navigable_point()
+                agent.set_state(state)
+
+            print(f"[CNA] Scene switched to {scene_path}")
+            if done is not None:
+                done.put(None)
+        except Exception as err:  # pragma: no cover
+            import traceback
+
+            traceback.print_exc()
+            if done is not None:
+                done.put(str(err))
+
     # ------------------------------------------------------------------- state
     def current_room_name(self) -> str | None:
         try:
@@ -372,19 +464,29 @@ class ConversationalNavigationServer:
         stream_fps: int = 30,
         chat_timeout: float = 120.0,
         webapp_dist: str | None = None,
+        scenes_dir: str | None = None,
+        current_scene: str | None = None,
+        finetuned: bool = False,
     ) -> None:
         self.viewer = viewer
         self.input_q = input_q
         self.output_q = output_q
         self.model = model
         self.backend = backend
+        self.finetuned = bool(finetuned)
         self.stream_fps = max(1, stream_fps)
         self.chat_timeout = chat_timeout
         self.webapp_dist = webapp_dist
+        self.scenes_dir = scenes_dir
+        self.current_scene = os.path.normpath(current_scene) if current_scene else ""
         self._chat_lock = threading.Lock()
+        self._scene_lock = threading.Lock()
+        self._llm_lock = threading.Lock()
 
         self.app = Flask(__name__, static_folder=None)
         CORS(self.app, resources={r"/*": {"origins": "*"}})
+        # Quiet the dev server's per-request access log (e.g. the /status polls).
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
         self.app.route("/health", methods=["GET"])(self.health)
         self.app.route("/status", methods=["GET"])(self.status)
@@ -393,6 +495,9 @@ class ConversationalNavigationServer:
         self.app.route("/key", methods=["POST"])(self.key)
         self.app.route("/action", methods=["POST"])(self.action)
         self.app.route("/chat", methods=["POST"])(self.chat)
+        self.app.route("/scenes", methods=["GET"])(self.scenes)
+        self.app.route("/scene", methods=["POST"])(self.set_scene)
+        self.app.route("/llm", methods=["POST"])(self.set_llm)
 
         # Low-latency WebSocket channel: instant key input + backpressured video
         # (only the freshest frame is sent, and only once the client is ready,
@@ -433,12 +538,148 @@ class ConversationalNavigationServer:
     def status(self):
         return jsonify(
             {
-                "llm_loaded": self.model is not None,
+                "llm_loaded": self.viewer.model is not None or self.backend == "openai",
                 "backend": self.backend,
-                "scene": os.path.basename(self.viewer.sim_settings.get("scene", "")),
+                "finetuned": self.finetuned,
+                "scene": os.path.basename(self.current_scene),
+                "scene_path": self.current_scene,
                 "current_room": self.viewer.current_room_name(),
                 "controls": WEB_KEY_TO_ACTION,
             }
+        )
+
+    def apply_llm_config(self, backend: str, finetuned: bool) -> str | None:
+        """Switch backend (local/openai) and finetuned/base at runtime.
+
+        Frees the current model BEFORE loading the new one so the quantized
+        weights fit in VRAM (otherwise two copies coexist and OOM). On any
+        failure the previous configuration is reloaded.
+        """
+        with self._llm_lock:
+            prev_backend = self.backend
+            prev_finetuned = self.finetuned
+
+            def _free_local():
+                self.viewer.model = None
+                self.viewer.tokenizer = None
+                self.viewer.model_intent = None
+                self.model = None
+                mr_viewer._LOCAL_MODEL = None
+                mr_viewer._LOCAL_TOKENIZER = None
+                mr_viewer._LOCAL_MODEL_INTENT = None
+                import gc
+
+                gc.collect()
+                try:
+                    import torch
+
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+            def _load_local(ft: bool):
+                m, tok, mi = mr_viewer.load_local_model(fine_tuned_model=ft)
+                self.viewer.model = m
+                self.viewer.tokenizer = tok
+                self.viewer.model_intent = mi
+                self.model = m
+
+            try:
+                if backend == "openai":
+                    if getattr(mr_viewer, "client", None) is None:
+                        raise RuntimeError(
+                            "OpenAI backend requested but OPENAI_API_KEY is not "
+                            "configured (set it in the project .env)."
+                        )
+                    _free_local()  # OpenAI path needs no local model; free VRAM
+                else:
+                    # Free the current model FIRST, then load fresh -> no OOM.
+                    _free_local()
+                    _load_local(finetuned)
+                self.backend = backend
+                self.finetuned = bool(finetuned)
+                print(f"[CNA] LLM config -> backend={backend} finetuned={finetuned}")
+                return None
+            except Exception as err:
+                import traceback
+
+                traceback.print_exc()
+                # Best-effort revert: reload the previous configuration.
+                try:
+                    _free_local()
+                    if prev_backend == "local":
+                        _load_local(prev_finetuned)
+                except Exception:
+                    traceback.print_exc()
+                finally:
+                    self.backend = prev_backend
+                    self.finetuned = prev_finetuned
+                return str(err)
+
+    def set_llm(self):
+        data = request.get_json(force=True, silent=True) or {}
+        backend = (data.get("backend") or self.backend).lower()
+        finetuned = bool(data.get("finetuned", self.finetuned))
+        if backend not in ("local", "openai"):
+            return jsonify({"error": f"invalid backend: {backend}"}), 400
+        err = self.apply_llm_config(backend, finetuned)
+        if err:
+            return (
+                jsonify(
+                    {
+                        "error": err,
+                        "backend": self.backend,
+                        "finetuned": self.finetuned,
+                    }
+                ),
+                500,
+            )
+        return jsonify(
+            {"status": "ok", "backend": self.backend, "finetuned": self.finetuned}
+        )
+
+    def scenes(self):
+        """List scenes available for switching (folders with a glb + room map)."""
+        result = []
+        base = self.scenes_dir
+        if base and os.path.isdir(base):
+            for name in sorted(os.listdir(base)):
+                folder = os.path.join(base, name)
+                if not os.path.isdir(folder):
+                    continue
+                if not os.path.isfile(os.path.join(folder, "room_id_to_name_map.json")):
+                    continue
+                glbs = sorted(g for g in os.listdir(folder) if g.endswith(".basis.glb"))
+                if not glbs:
+                    continue
+                scene_abs = os.path.join(folder, glbs[0])
+                scene_rel = os.path.normpath(os.path.relpath(scene_abs, os.getcwd()))
+                result.append({"label": name, "scene": scene_rel})
+        return jsonify({"scenes": result, "current": self.current_scene})
+
+    def set_scene(self):
+        """Switch the active scene at runtime (no process restart)."""
+        data = request.get_json(force=True, silent=True) or {}
+        scene = os.path.normpath((data.get("scene") or "").strip())
+        if not scene or scene == ".":
+            return jsonify({"error": "no scene provided"}), 400
+        if not os.path.isfile(scene):
+            return jsonify({"error": f"scene not found: {scene}"}), 404
+        # Only one switch at a time.
+        with self._scene_lock:
+            done: queue.Queue = queue.Queue()
+            self.viewer.action_queue.put(
+                (self.viewer.reconfigure_scene, (scene, done), {})
+            )
+            try:
+                err = done.get(timeout=180)
+            except queue.Empty:
+                return jsonify({"error": "scene switch timeout"}), 504
+            if err:
+                return jsonify({"error": err}), 500
+            self.current_scene = scene
+        return jsonify(
+            {"status": "ok", "scene": os.path.basename(scene), "scene_path": scene}
         )
 
     def video(self):
@@ -694,6 +935,10 @@ def main() -> None:
         look_amount=args.look,
     )
     mr_viewer.viewer = viewer
+    # Runtime-swappable model refs read by user_input_logic_loop.
+    viewer.model = model
+    viewer.tokenizer = tokenizer
+    viewer.model_intent = model_intent
 
     # Conversation loop: identical to the desktop GUI, driven by the queues.
     logic_thread = threading.Thread(
@@ -712,6 +957,9 @@ def main() -> None:
         backend=args.backend.lower(),
         stream_fps=args.stream_fps,
         webapp_dist=args.webapp_dist,
+        scenes_dir=os.path.dirname(os.path.dirname(os.path.abspath(args.scene))),
+        current_scene=args.scene,
+        finetuned=args.finetuned_model,
     )
     server_thread = threading.Thread(
         target=server.run, args=(args.host, args.port), daemon=True
