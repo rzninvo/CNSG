@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import math
 import os
+import random
 import string
 import sys
 import time
@@ -110,6 +111,10 @@ class NewViewer(BaseViewer):
         # True -> one combined PNG per frame; False -> two separate PNGs
         self.save_frames_combined = True
         self._object_bbox_colors: Dict[int, mn.Color4] = {}
+        # Last navigation destination (room_name, target_name) so follow-up
+        # questions like "now where do I go?" recompute the path to the same
+        # target from the agent's current position.
+        self._last_nav_goal = None
         self._bbox_label_screen_positions: List[Tuple[str, mn.Vector2]] = []
 
         self.map_room_id_to_name = {}
@@ -519,32 +524,39 @@ class NewViewer(BaseViewer):
         try:
             response = classify_user_intent_local(user_input, model_intent, tokenizer)
             if "start" not in response.lower():
-                # remove everything within < >
-                response = re.sub(r'<.*?>', '', response)
-                # friendly response
-                output_q.put(response)
+                # Friendly / conversational reply.
+                output_q.put(re.sub(r'<.*?>', '', response))
                 return
         except Exception as e:
             print("Error classifying user intent with local LLM:", e)
             return
-        # else, perform navigation
 
         candidate_goals = viewer.get_rooms_objects(user_input)
-
-        checked_candidate_goals = []
-        for room_name, target_name in candidate_goals:
-            # perfrom sanity check
-            if not viewer.check_object_in_room(target_name, room_name):
-                continue
-            checked_candidate_goals.append((room_name, target_name))
-
-        if not checked_candidate_goals:
+        checked = [
+            (r, t) for (r, t) in candidate_goals
+            if viewer.check_object_in_room(t, r)
+        ]
+        if not checked:
             output_q.put("Could not find the specified object or room. Please provide more details.")
             return
-        
-        self.start_navigation(sim=self.sim, candidate_goals=checked_candidate_goals, user_input=user_input, output_q=output_q, user_pose=user_pose)
 
-    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None, user_pose=None):
+        self.start_navigation(sim=self.sim, candidate_goals=checked, user_input=user_input, output_q=output_q, user_pose=user_pose)
+
+    def recalculate_from_here(self, output_q, user_pose=None):
+        """Recompute the path to the LAST destination from the current position.
+
+        Triggered by the "From here" button in the webapp (no NLP involved).
+        """
+        if self._last_nav_goal is None:
+            output_q.put("I don't have a destination yet — ask me where to go first.")
+            return
+        room_name, target_name = self._last_nav_goal
+        if not viewer.check_object_in_room(target_name, room_name):
+            output_q.put("I can't recalculate that route here.")
+            return
+        self.start_navigation(sim=self.sim, candidate_goals=[(room_name, target_name)], user_input="From here, where should I go?", output_q=output_q, user_pose=user_pose, is_follow_up=True)
+
+    def start_navigation(self, sim, candidate_goals = [], user_input=None, output_q=None, profiling_times=None, user_pose=None, is_follow_up=False):
         #! NOTE Estract goal pose begins
         _time_start_extract_goal = time.time()
         if len(candidate_goals) == 0:
@@ -569,6 +581,10 @@ class NewViewer(BaseViewer):
             if closest_goal is None:
                 return
             room_name, target_name = closest_goal
+
+        # Remember the destination so a follow-up ("now where do I go?") can
+        # recompute the path to the same target from the current position.
+        self._last_nav_goal = (room_name, target_name)
 
         goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
 
@@ -615,8 +631,74 @@ class NewViewer(BaseViewer):
         model = _LOCAL_MODEL #! TODO set this in the generate_path_description call
         tokenizer = _LOCAL_TOKENIZER #! TODO set this in the generate_path_description call
 
-        instructions, clusters_to_draw, _time_landmarks, _time_generation = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number)
-        self.set_clusters_to_draw(clusters_to_draw)
+        # Natural prose for the base / OpenAI backends; the finetuned model keeps
+        # the structured format it was trained on. A user override (Tools menu)
+        # takes precedence over this auto choice.
+        if _NATURAL_OVERRIDE is not None:
+            use_natural = bool(_NATURAL_OVERRIDE)
+        else:
+            use_natural = (_LOCAL_MODEL is None) or (not _LOCAL_IS_FINETUNED)
+
+        geo_steps = getattr(self, "_last_geometric_instructions", None) or [
+            "You have arrived at your destination."
+        ]
+        geo_text = " ".join(geo_steps)
+
+        follow_connector = (
+            random.choice(_FOLLOW_UP_CONNECTORS) if is_follow_up else ""
+        )
+
+        def _with_prefix(txt):
+            # On a follow-up ("now where do I go?"), prepend a short, varied
+            # connector so the reply flows on from the previous turn. One
+            # connector is picked per turn (shared across both columns).
+            if not (is_follow_up and txt):
+                return txt
+            return follow_connector + txt[0].lower() + txt[1:]
+
+        _time_landmarks = 0.0
+        _time_generation = 0.0
+        try:
+            if _DIRECTIONS_MODE == "geometric":
+                # Landmark-free baseline only.
+                instructions = _with_prefix(geo_text)
+                self.set_clusters_to_draw({})
+                print(
+                    "\n" + "=" * 80
+                    + "\n  GEOMETRIC OUTPUT  —  instructions sent to the client\n"
+                    + "=" * 80 + "\n" + instructions + "\n" + "=" * 80 + "\n",
+                    flush=True,
+                )
+            elif _DIRECTIONS_MODE == "both":
+                # Landmark description AND geometric directions, side by side.
+                llm_text, clusters_to_draw, _time_landmarks, _time_generation = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number, natural=use_natural)
+                self.set_clusters_to_draw(clusters_to_draw)
+                instructions = {
+                    "llm": _with_prefix(llm_text),
+                    "geometric": _with_prefix(geo_text),
+                }
+                print(
+                    "\n" + "=" * 80
+                    + "\n  BOTH OUTPUTS  —  sent to the client\n"
+                    + "=" * 80 + "\n[LLM] " + instructions["llm"]
+                    + "\n[GEOMETRIC] " + instructions["geometric"] + "\n" + "=" * 80 + "\n",
+                    flush=True,
+                )
+            else:
+                instructions, clusters_to_draw, _time_landmarks, _time_generation = generate_path_description(frames, user_input=user_input, model=model, tokenizer=tokenizer, dry_run=False, target_name=target_name, room_name=room_name, floor_number=floor_number, natural=use_natural)
+                self.set_clusters_to_draw(clusters_to_draw)
+                instructions = _with_prefix(instructions)
+        except Exception as gen_err:
+            import traceback
+            traceback.print_exc()
+            print(f"[CNA] description generation failed: {gen_err}", flush=True)
+            self.set_clusters_to_draw({})
+            # Fall back to the deterministic geometric directions if we have them,
+            # otherwise a plain apology, so the client always gets a reply.
+            if geo_text and "arrived" not in geo_text.lower():
+                instructions = _with_prefix(geo_text)
+            else:
+                instructions = "Sorry, I couldn't generate the directions just now. Please try again."
         output_q.put(instructions)
         #! NOTE pipeline ends
         # -> PRINT PROFILING INFO
@@ -702,6 +784,76 @@ class NewViewer(BaseViewer):
         return -1
 
 
+    def _compute_geometric_instructions(self, path_points, initial_rotation):
+        """Turn-by-turn directions from raw path geometry (no landmarks / LLM).
+
+        Merges consecutive same-heading path segments into straight runs, emits a
+        left/right/around turn when the heading changes, and an up/down stairs
+        step on a vertical segment. Produces a landmark-free baseline for
+        comparison with the landmark-based descriptions.
+        """
+        if path_points is None or len(path_points) < 2:
+            return ["You are already at the destination."]
+
+        try:
+            m = utils.quat_to_magnum(initial_rotation).to_matrix()
+            fwd = mn.Vector3(m[2][0], 0.0, m[2][2])
+            prev_dir = fwd.normalized() if fwd.length() > 1e-6 else None
+        except Exception:
+            prev_dir = None
+
+        steps = []
+        run = 0.0
+
+        def flush():
+            nonlocal run
+            if run >= 0.5:
+                meters = int(round(run))
+                steps.append(
+                    f"Go straight for about {meters} meter{'s' if meters != 1 else ''}."
+                )
+            run = 0.0
+
+        for i in range(len(path_points) - 1):
+            a = path_points[i]
+            b = path_points[i + 1]
+            dx = float(b[0] - a[0])
+            dy = float(b[1] - a[1])
+            dz = float(b[2] - a[2])
+            horiz = math.sqrt(dx * dx + dz * dz)
+
+            # Vertical segment => stairs.
+            if abs(dy) > 0.4 and abs(dy) >= horiz * 0.4:
+                flush()
+                steps.append("Go up the stairs." if dy > 0 else "Go down the stairs.")
+                if horiz > 1e-3:
+                    prev_dir = mn.Vector3(dx, 0.0, dz).normalized()
+                continue
+
+            if horiz < 1e-3:
+                continue
+            seg_dir = mn.Vector3(dx, 0.0, dz).normalized()
+
+            if prev_dir is not None:
+                dot = max(-1.0, min(1.0, float(mn.math.dot(prev_dir, seg_dir))))
+                ang = math.degrees(math.acos(dot))
+                if ang > 30.0:
+                    flush()
+                    if ang >= 150.0:
+                        steps.append("Turn around.")
+                    else:
+                        cross = mn.math.cross(prev_dir, seg_dir)
+                        side = "left" if cross[1] > 0 else "right"
+                        sharp = "sharply " if ang > 110.0 else ""
+                        steps.append(f"Turn {sharp}{side}.")
+            run += horiz
+            prev_dir = seg_dir
+
+        flush()
+        steps.append("You have arrived at your destination.")
+        return steps
+
+
     def shortest_path(self, sim, goal: mn.Vector3, target_object: str = "", user_pose=None): 
         if not sim.pathfinder.is_loaded:
             print("Pathfinder not initialized, aborting.")
@@ -748,9 +900,13 @@ class NewViewer(BaseViewer):
             os.makedirs(output_dir, exist_ok=True)
 
             frames = []
+            self._last_geometric_instructions = []
 
             if found_path:
                 path_points = self.densify_path(path_points, step_size=3.0)
+                self._last_geometric_instructions = self._compute_geometric_instructions(
+                    path_points, initial_agent_state_rotation
+                )
                 if save_images:
                     meters_per_pixel = 0.025
                     height = sim.scene_aabb.y().min
@@ -1905,11 +2061,14 @@ class NewViewer(BaseViewer):
         try:
             while True:
                 action, args, kwargs = self.action_queue.get_nowait()
-                # try:
-                action(*args, **kwargs)
-                # except Exception as e:
-                #     print(f"Error executing queued action {action}: {e}")
-
+                # Never let a failing action (e.g. a CUDA error during LLM
+                # generation) crash the render loop / whole server.
+                try:
+                    action(*args, **kwargs)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"[CNA] queued action {getattr(action, '__name__', action)} failed: {e}")
                 self.action_queue.task_done()
 
         except queue.Empty:
@@ -2182,10 +2341,24 @@ def get_goal_from_response(response: str) -> object:
     else:
         raise ValueError(f"Unexpected rule number: {rule_number}")
 
+
+# Varied connectors so a follow-up reply doesn't always start the same way.
+_FOLLOW_UP_CONNECTORS = [
+    "From where you are now, ",
+    "From here, ",
+    "Alright, from here, ",
+    "Okay, from your current spot, ",
+    "Continuing from where you are, ",
+    "Now, from your current position, ",
+    "Good — from here, ",
+    "Sure, starting from where you are, ",
+]
+
+
 def classify_user_intent_local(user_input: str, model, tokenizer) -> str:
     """
     Uses a local LLM to classify if the user input is a navigation query or conversational.
-    Returns "navigation" if it's a navigation request, otherwise returns a friendly response.
+    Returns "start" if it's a navigation request, otherwise returns a friendly response.
     """
     system_prompt = """
     You are an assistant for a home navigation system.
@@ -2319,12 +2492,23 @@ def user_input_logic_loop(viewer: NewViewer, input_q: queue.Queue, output_q: que
 _LOCAL_MODEL = None
 _LOCAL_TOKENIZER = None
 _LOCAL_MODEL_INTENT = None
+# Whether the currently loaded local model is the finetuned LoRA (True) or the
+# plain base model (False). Used to pick the structured vs natural prompt.
+_LOCAL_IS_FINETUNED = False
+# User override for the natural-language prompt: None = auto (natural for
+# base/OpenAI, structured for finetuned), True/False = force on/off.
+_NATURAL_OVERRIDE = None
+# Directions mode: "llm" = landmark description only, "geometric" = landmark-free
+# turn-by-turn only, "both" = return both (shown side by side in the webapp).
+_DIRECTIONS_MODE = "llm"
 
 def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct", fine_tuned_model=True):
-    global _LOCAL_MODEL, _LOCAL_TOKENIZER, _LOCAL_MODEL_INTENT
+    global _LOCAL_MODEL, _LOCAL_TOKENIZER, _LOCAL_MODEL_INTENT, _LOCAL_IS_FINETUNED
     if _LOCAL_MODEL is not None:
         print("[LOCAL-LLM] Model already loaded, reusing the cached instance.")
         return _LOCAL_MODEL, _LOCAL_TOKENIZER, _LOCAL_MODEL_INTENT
+
+    _LOCAL_IS_FINETUNED = bool(fine_tuned_model)
 
     print("[INFO] Loading HF model (cached if present)...")
     print(f"[LOCAL-LLM] Loading model from HuggingFace repo: {repo_id}")
@@ -2337,8 +2521,9 @@ def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct", fine_tuned_mode
         load_in_4bit=fine_tuned_model,                   # <<< fondamentale
         device_map="auto",
         torch_dtype="auto",
-        )
-    
+        attn_implementation="eager",  # avoid the SDPA sliding-window mask path
+        )                             # that triggers CUDA launch failures on Phi-3
+
     if fine_tuned_model:
         print("[LOCAL-LLM] Step 2b/3: USING FINE-TUNED MODEL WEIGHTS...")
         _LOCAL_MODEL_ = AutoModelForCausalLM.from_pretrained(
@@ -2346,6 +2531,7 @@ def load_local_model(repo_id="microsoft/Phi-3-mini-4k-instruct", fine_tuned_mode
             load_in_4bit=True,                   # <<< fondamentale
             device_map="auto",
             torch_dtype="auto",
+            attn_implementation="eager",
             )
 
         _LOCAL_MODEL = PeftModel.from_pretrained(

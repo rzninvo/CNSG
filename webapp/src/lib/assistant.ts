@@ -14,11 +14,14 @@ export type AssistantStatus = {
   scene: string;
   scene_path?: string;
   current_room: string | null;
+  has_last_goal?: boolean;
   overlays?: {
     bboxes?: boolean;
     all_bboxes?: boolean;
     rooms?: boolean;
     save_frames?: boolean;
+    natural?: boolean;
+    directions_mode?: "llm" | "both" | "geometric";
   };
   controls: Record<string, string>;
 };
@@ -83,6 +86,32 @@ export async function setLlm(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Force the natural-language prompt on/off (null = automatic per backend). */
+export async function setNatural(enabled: boolean | null): Promise<void> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const res = await fetch(`${base}/natural`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Server error (${res.status})`);
+}
+
+/** Set the directions mode: landmark LLM only, geometric only, or both. */
+export async function setDirections(
+  mode: "llm" | "both" | "geometric",
+): Promise<void> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const res = await fetch(`${base}/directions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Server error (${res.status})`);
 }
 
 /** URL of the live MJPEG stream (bind directly to an <img src>). */
@@ -152,10 +181,13 @@ export async function sendAction(action: string): Promise<void> {
 }
 
 /** Send a conversation / navigation message and get the assistant's reply. */
+/** A navigation reply: a plain string, or both outputs when in "both" mode. */
+export type ChatReply = string | { llm: string; geometric: string };
+
 export async function sendChat(
   message: string,
   timeoutMs = 120000,
-): Promise<string> {
+): Promise<ChatReply> {
   if (!base) throw new Error("Assistant backend URL is not configured.");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -164,6 +196,29 @@ export async function sendChat(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Server error (${res.status})`);
+    }
+    return data.response ?? "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Recompute the route to the last destination from the current position. */
+export async function recalculateFromHere(
+  timeoutMs = 120000,
+): Promise<ChatReply> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/recalculate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       signal: controller.signal,
     });
     const data = await res.json().catch(() => ({}));

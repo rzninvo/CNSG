@@ -10,6 +10,7 @@ import {
   VolumeX,
   Keyboard,
   Loader2,
+  RotateCw,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
@@ -29,6 +30,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -42,7 +45,10 @@ import {
   sendChat,
   sendKey,
   setLlm,
+  setNatural,
+  setDirections,
   setScene,
+  recalculateFromHere,
   videoStreamUrl,
   wsUrl,
   type AssistantStatus,
@@ -53,6 +59,9 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  // When set, the assistant reply contains both a landmark description and
+  // geometric directions, shown side by side.
+  dual?: { llm: string; geometric: string };
 };
 
 // Keys we forward to the simulator when the viewer has keyboard focus:
@@ -328,6 +337,32 @@ const ConversationalNavigationAssistant = () => {
     [tapKey],
   );
 
+  // Force the natural-language prompt on/off, then refresh status.
+  const toggleNatural = useCallback(async (next: boolean) => {
+    try {
+      await setNatural(next);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update prompt mode",
+      );
+    }
+    const s = await getStatus();
+    setStatus(s);
+  }, []);
+
+  // Toggle geometric (landmark-free) directions, then refresh status.
+  const toggleGeometric = useCallback(async (mode: "llm" | "both" | "geometric") => {
+    try {
+      await setDirections(mode);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update directions mode",
+      );
+    }
+    const s = await getStatus();
+    setStatus(s);
+  }, []);
+
   useEffect(() => {
     if (!assistantConfigured) return;
 
@@ -483,9 +518,27 @@ const ConversationalNavigationAssistant = () => {
       setIsThinking(true);
       try {
         const response = await sendChat(message);
-        const reply = response || "(no response)";
-        setMessages((m) => [...m, { id: uid(), role: "assistant", text: reply }]);
-        speak(reply);
+        if (typeof response === "string") {
+          const reply = response || "(no response)";
+          setMessages((m) => [
+            ...m,
+            { id: uid(), role: "assistant", text: reply },
+          ]);
+          speak(reply);
+        } else {
+          const llm = response.llm || "(no response)";
+          const geometric = response.geometric || "(no directions)";
+          setMessages((m) => [
+            ...m,
+            {
+              id: uid(),
+              role: "assistant",
+              text: llm,
+              dual: { llm, geometric },
+            },
+          ]);
+          speak(llm);
+        }
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : "Failed to reach the assistant.";
@@ -500,6 +553,43 @@ const ConversationalNavigationAssistant = () => {
     },
     [isThinking, speak],
   );
+
+  // "From here" button: recompute the route to the last destination from the
+  // current position (no NLP; the backend reuses the stored target).
+  const handleRecalculate = useCallback(async () => {
+    if (isThinking) return;
+    setMessages((m) => [
+      ...m,
+      { id: uid(), role: "user", text: "From here, where should I go?" },
+    ]);
+    setIsThinking(true);
+    try {
+      const response = await recalculateFromHere();
+      if (typeof response === "string") {
+        const reply = response || "(no response)";
+        setMessages((m) => [...m, { id: uid(), role: "assistant", text: reply }]);
+        speak(reply);
+      } else {
+        const llm = response.llm || "(no response)";
+        const geometric = response.geometric || "(no directions)";
+        setMessages((m) => [
+          ...m,
+          { id: uid(), role: "assistant", text: llm, dual: { llm, geometric } },
+        ]);
+        speak(llm);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Failed to recalculate.";
+      setMessages((m) => [
+        ...m,
+        { id: uid(), role: "assistant", text: `⚠️ ${msg}` },
+      ]);
+      toast.error(msg);
+    } finally {
+      setIsThinking(false);
+    }
+  }, [isThinking, speak]);
 
   // ---------------------------------------------------------- speech recognition
   const toggleMic = useCallback(() => {
@@ -541,6 +631,9 @@ const ConversationalNavigationAssistant = () => {
   const allBboxOn = status?.overlays?.all_bboxes ?? false;
   const roomsOn = status?.overlays?.rooms ?? false;
   const saveOn = status?.overlays?.save_frames ?? false;
+  const naturalOn = status?.overlays?.natural ?? false;
+  const directionsMode = status?.overlays?.directions_mode ?? "llm";
+  const hasLastGoal = status?.has_last_goal ?? false;
 
   return (
     <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden">
@@ -615,6 +708,32 @@ const ConversationalNavigationAssistant = () => {
                   >
                     Save color + semantic frames (P)
                   </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Prompt</DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={naturalOn}
+                    onCheckedChange={(v) => toggleNatural(!!v)}
+                  >
+                    Natural language
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Directions</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={directionsMode}
+                    onValueChange={(v) =>
+                      toggleGeometric(v as "llm" | "both" | "geometric")
+                    }
+                  >
+                    <DropdownMenuRadioItem value="llm">
+                      LLM only
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="both">
+                      Both (LLM + geometric)
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="geometric">
+                      Geometric only (no LLM)
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={clearChat}>
                     <Trash2 className="w-4 h-4 mr-2" />
@@ -834,16 +953,33 @@ const ConversationalNavigationAssistant = () => {
                   m.role === "user" ? "justify-end" : "justify-start",
                 )}
               >
-                <div
-                  className={cn(
-                    "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap break-words",
-                    m.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-sm"
-                      : "bg-secondary text-secondary-foreground rounded-bl-sm",
-                  )}
-                >
-                  {m.text}
-                </div>
+                {m.dual ? (
+                  <div className="max-w-[95%] w-full grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="rounded-2xl rounded-bl-sm bg-secondary text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
+                      <div className="text-[10px] uppercase tracking-wide text-primary/80 font-semibold mb-1">
+                        Landmark (LLM)
+                      </div>
+                      {m.dual.llm}
+                    </div>
+                    <div className="rounded-2xl rounded-bl-sm bg-secondary/60 text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
+                      <div className="text-[10px] uppercase tracking-wide text-accent/80 font-semibold mb-1">
+                        Geometric
+                      </div>
+                      {m.dual.geometric}
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className={cn(
+                      "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap break-words",
+                      m.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-br-sm"
+                        : "bg-secondary text-secondary-foreground rounded-bl-sm",
+                    )}
+                  >
+                    {m.text}
+                  </div>
+                )}
               </div>
             ))}
             {isThinking && (
@@ -855,6 +991,22 @@ const ConversationalNavigationAssistant = () => {
               </div>
             )}
           </div>
+
+          {hasLastGoal && (
+            <div className="px-3 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isThinking}
+                onClick={() => void handleRecalculate()}
+                className="w-full h-8 gap-1.5 text-xs"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                From here, where should I go?
+              </Button>
+            </div>
+          )}
 
           <form
             className="p-3 border-t border-border/50 flex items-end gap-2"

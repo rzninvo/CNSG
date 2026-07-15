@@ -41,16 +41,62 @@ DEBUG_PROMPT = True
 
 
 def _strip_room_number(name):
-    """Remove a trailing ' <number>' from a room name.
+    """Clean a room name for display.
 
-    e.g. 'lower bedroom 1' -> 'lower bedroom'. Keeps names without a number
-    unchanged. Used so the generated instructions never show the disambiguation
-    index.
+    - Drops a trailing ' <number>' disambiguation index
+      (e.g. 'lower bedroom 1' -> 'lower bedroom').
+    - Collapses Matterport-style compound labels into a single natural name
+      (e.g. 'entryway/foyer/lobby' -> 'entryway', 'familyroom/lounge' ->
+      'family room') so the generated instructions read naturally.
     """
     import re as _re
     if not name:
         return name
-    return _re.sub(r"\s+\d+$", "", str(name)).strip()
+    s = str(name).strip()
+    # Matterport compound room categories -> a single, natural label.
+    alias = {
+        "entryway/foyer/lobby": "entryway",
+        "familyroom/lounge": "family room",
+        "laundryroom/mudroom": "laundry room",
+        "utilityroom/toolroom": "utility room",
+        "meetingroom/conferenceroom": "meeting room",
+        "rec/game": "recreation room",
+        "workout/gym/exercise": "gym",
+        "spa/sauna": "spa",
+        "bathroom/toilet": "bathroom",
+        # Single-word MP3D room categories that read badly on their own.
+        "tv": "TV room",
+        "junk": "storage room",
+        "other room": "room",
+    }
+    key = s.lower()
+    if key in alias:
+        s = alias[key]
+    elif "/" in s:
+        # Unknown compound: keep the first (most common) alias.
+        s = s.split("/")[0].strip()
+    return _re.sub(r"\s+\d+$", "", s).strip()
+
+
+_FLOOR_NAMES = {
+    0: "ground floor",
+    1: "first floor",
+    2: "second floor",
+    3: "third floor",
+    4: "fourth floor",
+    5: "fifth floor",
+    6: "sixth floor",
+}
+
+
+def _floor_name(n) -> str:
+    """Human floor name: 0 -> 'ground floor', 1 -> 'first floor', ..."""
+    try:
+        i = int(n)
+    except (TypeError, ValueError):
+        return "unknown floor"
+    return _FLOOR_NAMES.get(i, f"floor {i}")
+
 
 # Structural labels do not help with navigation cues.
 IGNORED_LABELS = {
@@ -61,6 +107,12 @@ IGNORED_LABELS = {
     "ceiling trim",
     "wall trim",
     "railing",
+    # Generic / non-descriptive MP3D clutter categories: useless as landmarks.
+    "objects",
+    "object",
+    "misc",
+    "unlabeled",
+    "unknown",
 }
 
 RELEVANCE_SCORES_OBJECTS = {
@@ -188,15 +240,34 @@ class FrameSummary:
     current_floor: str | None = None
     turn_direction: str | None = None
 
-    def to_prompt_line(self, num_clusters_per_frame = 2) -> str:
+    def to_prompt_line(self, num_clusters_per_frame = 2, natural: bool = False) -> str:
         if not self.clusters:
-            return f"{self.name}: Limited visibility in this frame."
+            return "Limited visibility here." if natural else f"{self.name}: Limited visibility in this frame."
 
 
         object_part = ", ".join(self.clusters[:num_clusters_per_frame])
 
-        direction_part = ""
         frame_number = int(self.name.split("-")[-1])
+
+        if natural:
+            # Natural, frame-index-free step: only the turn (if any) + room + landmarks.
+            turn = ""
+            if self.turn_direction == "forward":
+                turn = "Continue forward. "
+            elif self.turn_direction in ("left", "right"):
+                turn = f"Turn {self.turn_direction}. "
+            elif self.turn_direction == "behind" and frame_number == 0:
+                turn = "Turn around. "
+            room_unknown = (
+                "unknown" in (self.current_room_name or "").lower()
+                or "unknown" in (str(self.current_floor) or "").lower()
+            )
+            if room_unknown:
+                return f"{turn}You see {object_part}."
+            room_name = _strip_room_number(self.current_room_name)
+            return f"{turn}In the {room_name}, you see {object_part}."
+
+        direction_part = ""
         if frame_number == 0:
             connector = "Initially"
         else:
@@ -213,7 +284,7 @@ class FrameSummary:
             description = f"{direction_part} In {self.name}, you see {object_part}."
         else:
             room_name = _strip_room_number(self.current_room_name)
-            description = f"{direction_part} In {self.name} you are in {room_name} on floor {self.current_floor}. You see {object_part}."
+            description = f"{direction_part} In {self.name} you are in {room_name} on the {_floor_name(self.current_floor)}. You see {object_part}."
     
         return description
     
@@ -287,7 +358,30 @@ def distance_bucket(distance: float | None) -> str | None:
         return "slightly far"
     return "far"
 
-def format_object_entry(cluster: Dict[str, Any]) -> str | None:
+
+def _display_label(cluster_str_id: str) -> str:
+    """Human label from a cluster id: 'kitchen cabinet_208' -> 'kitchen cabinet'."""
+    import re as _re
+    s = _re.sub(r"_\d+$", "", str(cluster_str_id)).strip()
+    return s or str(cluster_str_id)
+
+
+def _natural_position(direction: str | None) -> str:
+    """Map an NDC direction like 'lower-right' to a natural phrase."""
+    if not direction or direction == "unknown":
+        return ""
+    if "left" in direction:
+        return "on your left"
+    if "right" in direction:
+        return "on your right"
+    return "ahead"
+
+
+def _article(word: str) -> str:
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def format_object_entry(cluster: Dict[str, Any], natural: bool = False, current_room: str | None = None) -> str | None:
     label = str(cluster.get("label", "")).strip()
     cluster_str_id = str(cluster['cluster_str_id']).strip()
 
@@ -330,6 +424,25 @@ def format_object_entry(cluster: Dict[str, Any]) -> str | None:
     # Add information about the room name and the floor number (always, regardless of NDC availability)
     room = cluster.get("room", "").strip()
     floor_number = cluster.get("floor_number")
+
+    if natural:
+        # Compact, human phrasing: no id/brackets; annotate the room only when
+        # the object is in a DIFFERENT room than the one the viewer is in.
+        disp = _display_label(cluster_str_id)
+        pos = _natural_position(direction)
+        room_disp = _strip_room_number(room) if room else ""
+        cur_disp = _strip_room_number((current_room or "").strip())
+        parts = [f"{_article(disp)} {disp}"]
+        if pos:
+            parts.append(pos)
+        if (
+            room_disp
+            and room_disp.lower() != cur_disp.lower()
+            and "unknown" not in room_disp.lower()
+        ):
+            parts.append(f"in the {room_disp}")
+        return " ".join(parts)
+
     if room and floor_number is not None:
         position += f", (room: {_strip_room_number(room)})"
 
@@ -357,7 +470,7 @@ def object_priority(obj: Dict[str, Any]) -> tuple[float, float, float, float]:
         )
 
 
-def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: str = "", target_room: str = "") -> List[str]:
+def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: str = "", target_room: str = "", natural: bool = False, current_room: str | None = None) -> List[str]:
     candidates: List[Dict[str, Any]] = []
     for cluster in clusters.values():
         label = str(cluster.get("label", "")).lower()
@@ -378,7 +491,7 @@ def select_n_clusters(clusters: Dict[str, Any], limit: int = 3, target_object: s
     
     results: List[str] = []
     for cluster in candidates[:limit]:
-        formatted = format_object_entry(cluster)
+        formatted = format_object_entry(cluster, natural=natural, current_room=current_room)
         if formatted:
             results.append(formatted)
     return results, candidates[:limit]
@@ -428,7 +541,7 @@ def extract_relations(
     return filtered, clusters
 
 
-def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 2, target_name: str = "", target_room: str = "") -> List[FrameSummary]:
+def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 2, target_name: str = "", target_room: str = "", natural: bool = False) -> List[FrameSummary]:
     summaries: List[FrameSummary] = []
     clusters_to_draw = {}
 
@@ -446,7 +559,14 @@ def summarise_frames(frames: Sequence[Dict[str, Any]], num_clusters_per_frame = 
 
         turn_direction = frame.get("turn_direction")
 
-        phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name, target_room)
+        # Current room is needed up-front so natural formatting can annotate only
+        # objects that lie in a DIFFERENT room than the one we're standing in.
+        current_room = frame.get("current_room", {})
+        if current_room is None:
+            current_room = {}
+        current_room_name_for_fmt = current_room.get("name", "")
+
+        phrases, selected_clusters  = select_n_clusters(clusters, num_clusters_per_frame, target_name, target_room, natural=natural, current_room=current_room_name_for_fmt)
             
         # clusters_to_draw = {"cluster_str_id": ["obj_str_id1", "obj_str_id2", ...], ...}
         current_room = frame.get("current_room", {})
@@ -509,7 +629,7 @@ def clean_text_from_ids(text: str) -> str:
     
     return cleaned_text
 
-def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visited, num_clusters_per_frame: int = 2) -> str:
+def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visited, num_clusters_per_frame: int = 2, natural: bool = False) -> str:
     
     def _to_int(x):
         try:
@@ -532,7 +652,7 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
         if last_known_floor is not None and f != last_known_floor:
             direction = "up" if f > last_known_floor else "down"
             stair_markers[last_known_idx + 1] = (
-                f"Then take the stairs {direction} to floor {f}."
+                f"Then take the stairs {direction} to the {_floor_name(f)}."
             )
         last_known_idx = idx
         last_known_floor = f
@@ -542,7 +662,7 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
         if idx in stair_markers:
             obs_lines.append(stair_markers[idx])
         obs_lines.append(
-            summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame)
+            summary.to_prompt_line(num_clusters_per_frame=num_clusters_per_frame, natural=natural)
         )
     observation_lines = "\n".join(obs_lines)
 
@@ -550,7 +670,7 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
     for room in rooms_visited:
         if not isinstance(room, dict):
             continue
-        visited_room_strings.append(f"{_strip_room_number(room.get('name'))} (floor: {room.get('floor_number')})")
+        visited_room_strings.append(f"{_strip_room_number(room.get('name'))} ({_floor_name(room.get('floor_number'))})")
 
     start_floor = _to_int(rooms_visited[0].get("floor_number")) if rooms_visited else None
     target_floor = _to_int(rooms_visited[-1].get("floor_number")) if rooms_visited else None
@@ -564,6 +684,26 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
             f"\"go {direction} the stairs to the {target_room_name}\"."
         )
 
+    if natural:
+        path_rooms = " -> ".join(
+            _strip_room_number(r.get("name"))
+            for r in rooms_visited
+            if isinstance(r, dict) and r.get("name")
+        )
+        start_name = _strip_room_number(rooms_visited[0].get("name")) if rooms_visited else ""
+        target_name_ = _strip_room_number(rooms_visited[-1].get("name")) if rooms_visited else ""
+        user_prompt = f"""
+        User question: {user_input}
+
+        Path (rooms in order): {path_rooms}
+
+        Step-by-step observations:
+        {observation_lines}
+
+        You start in the {start_name} and the target is in the {target_name_}.{floor_directive}
+        """
+        return user_prompt
+
     user_prompt = f"""
         User question: {user_input}
 
@@ -571,7 +711,7 @@ def build_prompt(summaries: Sequence[FrameSummary], user_input: str, rooms_visit
         {observation_lines}
 
         Rooms visited in order: \n{', '.join(visited_room_strings)}
-        The user is in {_strip_room_number(rooms_visited[0].get("name"))} (floor: {rooms_visited[0].get("floor_number")}) and the target is in {_strip_room_number(rooms_visited[-1].get("name"))} (floor: {rooms_visited[-1].get("floor_number")}).{floor_directive}
+        The user is in {_strip_room_number(rooms_visited[0].get("name"))} ({_floor_name(rooms_visited[0].get("floor_number"))}) and the target is in {_strip_room_number(rooms_visited[-1].get("name"))} ({_floor_name(rooms_visited[-1].get("floor_number"))}).{floor_directive}
         """
     return user_prompt
 
@@ -713,8 +853,30 @@ def few_shot_examples() -> str:
     return few_shots
 
 
-def generate_description(user_prompt: str, model = None, tokenizer = None) -> str:
-    if model is None and tokenizer is None:
+def generate_description(user_prompt: str, model = None, tokenizer = None, natural: bool = False) -> str:
+    if natural:
+        # Natural, id-free prose. Used for the base / OpenAI backends (the
+        # finetuned model keeps the structured format it was trained on).
+        system_prompt = """
+            You are a navigation assistant. You receive a short, ordered list of
+            observations along a path. Each step names the room you are in and one
+            or two visible landmarks with a rough position (e.g. "on your left").
+
+            Write ONE natural, friendly walking description from the start room to
+            the target, as a person would give directions.
+
+            Rules:
+            - Flowing prose only. Never mention frames, step numbers, coordinates,
+              or object IDs, and never use brackets.
+            - Use intuitive cues ("on your left", "ahead", "through the doorway").
+            - Mention at most one or two landmarks per room, only the useful ones.
+            - If the path uses stairs, just say "go up/down the stairs to the
+              <room>", without describing anything on the stairs.
+            - As soon as you reach the target room or object, mention it and stop.
+            - Only use landmarks that appear in the observations. Never invent
+              details. Keep it under 100 words.
+        """
+    elif model is None and tokenizer is None:
         system_prompt = """
             You are a navigation assistant helping the user locate a target object inside a building.
 
@@ -885,20 +1047,25 @@ def generate_path_description(
     target_name: str = "",
     room_name: str = "",
     floor_number: int | None = None,
+    natural: bool = False,
 ) -> str:
     """
     Full pipeline: loads frames, builds prompt, optionally queries the model, and returns description or prompt.
     Does NOT write anything to disk.
+
+    ``natural=True`` selects a more human-readable prompt + system prompt, used for
+    the base / OpenAI backends. The finetuned model keeps the structured format it
+    was trained on (``natural=False``).
     """
     #! NOTE landmarks_extraction begins
     _time_start_landmarks = time.time()
     frames = frames[:max_frames] if max_frames else frames
     num_clusters_per_frame = 2
-    summaries, clusters_to_draw, rooms_visited = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name, target_room=room_name)
+    summaries, clusters_to_draw, rooms_visited = summarise_frames(frames, num_clusters_per_frame=num_clusters_per_frame, target_name=target_name, target_room=room_name, natural=natural)
     current_room_names = [room.get("name") for room in rooms_visited if isinstance(room, dict)]
     if room_name != "" and room_name not in current_room_names:
         rooms_visited.append({"name": room_name, "floor_number": floor_number})
-    prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame)
+    prompt = build_prompt(summaries, user_input, rooms_visited, num_clusters_per_frame=num_clusters_per_frame, natural=natural)
     #! NOTE landmarks_extraction ends
     _time_landmarks = time.time() - _time_start_landmarks
 
@@ -909,9 +1076,9 @@ def generate_path_description(
         return None, clusters_to_draw
 
     if model == None or tokenizer == None:
-        description = generate_description(prompt)
+        description = generate_description(prompt, natural=natural)
     else:
-        description = generate_description(prompt, model, tokenizer)
+        description = generate_description(prompt, model, tokenizer, natural=natural)
 
     draw_all_clusters = False
     if draw_all_clusters:
@@ -957,6 +1124,14 @@ def generate_path_description(
     #! NOTE generate description ends
     _time_generation = time.time() - _time_start_generation
 
+    # Print the final answer to the terminal before it is sent to the client.
+    if DEBUG_PROMPT:
+        bar = "=" * 80
+        print("\n" + bar)
+        print("  LLM OUTPUT  —  description sent to the client")
+        print(bar)
+        print(description.strip())
+        print(bar + "\n", flush=True)
 
     return description, clusters_to_draw_final, _time_landmarks, _time_generation
 

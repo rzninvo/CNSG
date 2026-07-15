@@ -390,6 +390,8 @@ class WebViewer(NewViewer):
             self.show_all_object_bboxes = False
             self._object_bbox_colors = {}
             self.prev_objs_to_draw = None
+            # New scene -> forget the previous navigation target.
+            self._last_nav_goal = None
 
             base_path = os.path.dirname(scene_path)
             scene_name = os.path.splitext(os.path.basename(scene_path))[0]
@@ -519,9 +521,12 @@ class ConversationalNavigationServer:
         self.app.route("/key", methods=["POST"])(self.key)
         self.app.route("/action", methods=["POST"])(self.action)
         self.app.route("/chat", methods=["POST"])(self.chat)
+        self.app.route("/recalculate", methods=["POST"])(self.recalculate)
         self.app.route("/scenes", methods=["GET"])(self.scenes)
         self.app.route("/scene", methods=["POST"])(self.set_scene)
         self.app.route("/llm", methods=["POST"])(self.set_llm)
+        self.app.route("/natural", methods=["POST"])(self.set_natural)
+        self.app.route("/directions", methods=["POST"])(self.set_geometric)
 
         # Low-latency WebSocket channel: instant key input + backpressured video
         # (only the freshest frame is sent, and only once the client is ready,
@@ -568,15 +573,53 @@ class ConversationalNavigationServer:
                 "scene": os.path.basename(self.current_scene),
                 "scene_path": self.current_scene,
                 "current_room": self.viewer.current_room_name(),
+                "has_last_goal": getattr(self.viewer, "_last_nav_goal", None) is not None,
                 "overlays": {
                     "bboxes": bool(getattr(self.viewer, "show_object_bboxes", False)),
                     "all_bboxes": bool(getattr(self.viewer, "show_all_object_bboxes", False)),
                     "rooms": bool(getattr(self.viewer, "show_room_bboxes", False)),
                     "save_frames": bool(getattr(self.viewer, "save_frames", False)),
+                    "natural": self._natural_effective(),
+                    "directions_mode": getattr(mr_viewer, "_DIRECTIONS_MODE", "llm"),
                 },
                 "controls": WEB_KEY_TO_ACTION,
             }
         )
+
+    def _natural_effective(self) -> bool:
+        """Effective natural-language setting = user override, else auto choice."""
+        override = getattr(mr_viewer, "_NATURAL_OVERRIDE", None)
+        if override is not None:
+            return bool(override)
+        return (self.backend == "openai") or (not self.finetuned)
+
+    def set_natural(self):
+        """Toggle/override the natural-language prompt (Tools menu).
+
+        Body: {"enabled": true|false}  -> force on/off
+              {"enabled": null}         -> back to automatic
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        if "enabled" in data and data.get("enabled") is None:
+            mr_viewer._NATURAL_OVERRIDE = None
+        else:
+            mr_viewer._NATURAL_OVERRIDE = bool(data.get("enabled", True))
+        return jsonify({"status": "ok", "natural": self._natural_effective()})
+
+    def set_geometric(self):
+        """Set the directions mode.
+
+        Body: {"mode": "llm" | "both" | "geometric"}
+          - llm:       landmark description only (default)
+          - geometric: landmark-free turn-by-turn only (no LLM)
+          - both:      both, returned together (shown side by side)
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        mode = str(data.get("mode", "llm")).lower()
+        if mode not in ("llm", "both", "geometric"):
+            return jsonify({"error": f"invalid mode: {mode}"}), 400
+        mr_viewer._DIRECTIONS_MODE = mode
+        return jsonify({"status": "ok", "directions_mode": mode})
 
     def apply_llm_config(self, backend: str, finetuned: bool) -> str | None:
         """Switch backend (local/openai) and finetuned/base at runtime.
@@ -664,6 +707,10 @@ class ConversationalNavigationServer:
                 ),
                 500,
             )
+        self.print_ready_banner(
+            reason=f"model updated: {self.backend} / "
+            f"{'finetuned' if self.finetuned else 'base'}"
+        )
         return jsonify(
             {"status": "ok", "backend": self.backend, "finetuned": self.finetuned}
         )
@@ -775,6 +822,7 @@ class ConversationalNavigationServer:
             if err:
                 return jsonify({"error": err}), 500
             self.current_scene = scene
+        self.print_ready_banner(reason=f"scene loaded: {os.path.basename(scene)}")
         return jsonify(
             {"status": "ok", "scene": os.path.basename(scene), "scene_path": scene}
         )
@@ -900,7 +948,68 @@ class ConversationalNavigationServer:
 
         return jsonify({"response": response, "message": message})
 
+    def recalculate(self):
+        """Recompute the route to the LAST destination from the current position.
+
+        Triggered by the "From here" button in the webapp (no NLP).
+        """
+        with self._chat_lock:
+            while not self.output_q.empty():
+                try:
+                    self.output_q.get_nowait()
+                except queue.Empty:
+                    break
+            self.viewer.action_queue.put(
+                (self.viewer.recalculate_from_here, (self.output_q,), {})
+            )
+            try:
+                response = self.output_q.get(timeout=self.chat_timeout)
+            except queue.Empty:
+                return jsonify({"error": "assistant timeout"}), 504
+        return jsonify({"response": response})
+
+    def print_ready_banner(self, reason: str | None = None) -> None:
+        """Print the Local + Public access URLs to the terminal.
+
+        Called at startup and again after any big operation (scene / model
+        reload) so the URLs are always easy to find in the log.
+        """
+        host = getattr(self, "host", "0.0.0.0")
+        port = getattr(self, "port", 5001)
+        view_host = "localhost" if host in ("0.0.0.0", "::", "") else host
+        local_url = f"http://{view_host}:{port}/assistant"
+        public_url = None
+        url_file = os.environ.get("CNA_PUBLIC_URL_FILE")
+        if url_file:
+            try:
+                with open(url_file) as fh:
+                    raw = fh.read().strip()
+                if raw:
+                    public_url = raw.rstrip("/") + "/assistant"
+            except Exception:
+                pass
+        title = "Conversational Navigation Assistant - READY"
+        if reason:
+            title = f"Conversational Navigation Assistant - {reason}"
+        lines = [
+            "\n" + "=" * 66,
+            "  " + title,
+            "  Open one of these URLs:",
+            "",
+            f"      Local:   {local_url}",
+        ]
+        if public_url:
+            lines.append(f"      Public:  {public_url}")
+        else:
+            lines.append(
+                f"      Public:  (start with --public, or run:  ngrok http {port})"
+            )
+        lines.append("=" * 66 + "\n")
+        print("\n".join(lines), flush=True)
+
     def run(self, host: str = "0.0.0.0", port: int = 5001) -> None:
+        self.host = host
+        self.port = port
         print(f"[CNA] Conversational Navigation Assistant server on {host}:{port}")
         self.app.run(host=host, port=port, threaded=True)
 
@@ -1066,40 +1175,21 @@ def main() -> None:
 
     # Only announce the URL once everything is loaded AND the server is serving.
     _wait_until_serving(args.host, args.port)
-    view_host = "localhost" if args.host in ("0.0.0.0", "::", "") else args.host
-    local_url = f"http://{view_host}:{args.port}/assistant"
 
     # If a public tunnel (run_demo.sh --public) is starting in parallel, wait
-    # briefly for its URL so we can show it in this banner too.
-    public_url = None
+    # briefly for its URL so the first banner already includes it.
     url_file = os.environ.get("CNA_PUBLIC_URL_FILE")
     if url_file:
         for _ in range(40):
             try:
                 with open(url_file) as fh:
-                    raw = fh.read().strip()
-                if raw:
-                    public_url = raw.rstrip("/") + "/assistant"
-                    break
+                    if fh.read().strip():
+                        break
             except Exception:
                 pass
             time.sleep(0.25)
 
-    lines = [
-        "\n" + "=" * 66,
-        "  Conversational Navigation Assistant - READY",
-        "  Everything is loaded. Open one of these URLs:",
-        "",
-        f"      Local:   {local_url}",
-    ]
-    if public_url:
-        lines.append(f"      Public:  {public_url}")
-    else:
-        lines.append(
-            f"      Public:  (start with --public, or run:  ngrok http {args.port})"
-        )
-    lines.append("=" * 66 + "\n")
-    print("\n".join(lines), flush=True)
+    server.print_ready_banner()
 
     # Blocking Magnum render loop (owns the GL context / frame capture).
     viewer.exec()
