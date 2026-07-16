@@ -586,6 +586,13 @@ class NewViewer(BaseViewer):
         # recompute the path to the same target from the current position.
         self._last_nav_goal = (room_name, target_name)
 
+        # Capture the user's start position (before pathfinding) for logging.
+        try:
+            _sp = sim.get_agent(self.agent_id).get_state().position
+            start_pos_xyz = [round(float(_sp[0]), 3), round(float(_sp[1]), 3), round(float(_sp[2]), 3)]
+        except Exception:
+            start_pos_xyz = None
+
         goal_pos = viewer.get_object_position(object_name=target_name, room_name=room_name)
 
         if goal_pos is None:
@@ -676,6 +683,17 @@ class NewViewer(BaseViewer):
                 instructions = {
                     "llm": _with_prefix(llm_text),
                     "geometric": _with_prefix(geo_text),
+                    "meta": {
+                        "scene": os.path.basename(str(self.sim_settings.get("scene", ""))),
+                        "destination": (f"{target_name} in {room_name}" if target_name else room_name),
+                        "question": user_input or "",
+                        "user_position": start_pos_xyz,
+                        "destination_position": [
+                            round(float(goal_pos.x), 3),
+                            round(float(goal_pos.y), 3),
+                            round(float(goal_pos.z), 3),
+                        ],
+                    },
                 }
                 print(
                     "\n" + "=" * 80
@@ -797,7 +815,10 @@ class NewViewer(BaseViewer):
 
         try:
             m = utils.quat_to_magnum(initial_rotation).to_matrix()
-            fwd = mn.Vector3(m[2][0], 0.0, m[2][2])
+            # Habitat agent looks down -Z, so its actual forward is -row2. Using
+            # the real forward keeps this consistent with the segment travel
+            # direction (seg_dir), otherwise the first turn is flipped ~180deg.
+            fwd = mn.Vector3(-m[2][0], 0.0, -m[2][2])
             prev_dir = fwd.normalized() if fwd.length() > 1e-6 else None
         except Exception:
             prev_dir = None

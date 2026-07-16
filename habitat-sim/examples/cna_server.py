@@ -522,6 +522,7 @@ class ConversationalNavigationServer:
         self.app.route("/action", methods=["POST"])(self.action)
         self.app.route("/chat", methods=["POST"])(self.chat)
         self.app.route("/recalculate", methods=["POST"])(self.recalculate)
+        self.app.route("/preference", methods=["POST"])(self.preference)
         self.app.route("/scenes", methods=["GET"])(self.scenes)
         self.app.route("/scene", methods=["POST"])(self.set_scene)
         self.app.route("/llm", methods=["POST"])(self.set_llm)
@@ -967,6 +968,38 @@ class ConversationalNavigationServer:
             except queue.Empty:
                 return jsonify({"error": "assistant timeout"}), 504
         return jsonify({"response": response})
+
+    def preference(self):
+        """Append a landmark-vs-geometric preference record to the user-study log.
+
+        Body: {scene, destination, question, landmark, geometric, ratings}
+        ratings maps question keys (easier/natural/reach) to a 1-5 score where
+        1 = strongly prefers landmark, 3 = tie, 5 = strongly prefers geometric.
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "scene": data.get("scene", ""),
+            "destination": data.get("destination", ""),
+            "user_position": data.get("user_position"),
+            "destination_position": data.get("destination_position"),
+            "question": data.get("question", ""),
+            "landmark": data.get("landmark", ""),
+            "geometric": data.get("geometric", ""),
+            "ratings": data.get("ratings", {}),
+        }
+        repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        path = os.path.join(repo_root, "user_study", "landmark_vs_geometric.jsonl")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        print(f"[CNA] preference saved -> {path}", flush=True)
+        return jsonify({"status": "ok"})
 
     def print_ready_banner(self, reason: str | None = None) -> None:
         """Print the Local + Public access URLs to the terminal.

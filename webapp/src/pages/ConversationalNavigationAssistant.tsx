@@ -49,6 +49,7 @@ import {
   setDirections,
   setScene,
   recalculateFromHere,
+  savePreference,
   videoStreamUrl,
   wsUrl,
   type AssistantStatus,
@@ -61,8 +62,26 @@ type ChatMessage = {
   text: string;
   // When set, the assistant reply contains both a landmark description and
   // geometric directions, shown side by side.
-  dual?: { llm: string; geometric: string };
+  dual?: {
+    llm: string;
+    geometric: string;
+    meta?: {
+      scene?: string;
+      destination?: string;
+      question?: string;
+      user_position?: number[] | null;
+      destination_position?: number[] | null;
+    };
+  };
 };
+
+// User-study questions comparing the landmark (LLM) vs geometric answers.
+const STUDY_QUESTIONS: { key: "easier" | "natural" | "reach"; label: string }[] = [
+  { key: "easier", label: "Easier to follow" },
+  { key: "natural", label: "More natural" },
+  { key: "reach", label: "Better to reach the destination" },
+];
+type StudyKey = (typeof STUDY_QUESTIONS)[number]["key"];
 
 // Keys we forward to the simulator when the viewer has keyboard focus:
 // all letters/digits, the arrow keys, space and comma/period (viewer shortcuts).
@@ -101,6 +120,12 @@ const ConversationalNavigationAssistant = () => {
   const [currentScene, setCurrentScene] = useState<string>("");
   const [switching, setSwitching] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
+  // Which user-study questions to ask under a "both" answer (all on by default).
+  const [studyEnabled, setStudyEnabled] = useState<Record<StudyKey, boolean>>({
+    easier: true,
+    natural: true,
+    reach: true,
+  });
 
   const pressedRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -534,7 +559,7 @@ const ConversationalNavigationAssistant = () => {
               id: uid(),
               role: "assistant",
               text: llm,
-              dual: { llm, geometric },
+              dual: { llm, geometric, meta: response.meta },
             },
           ]);
           speak(llm);
@@ -574,7 +599,7 @@ const ConversationalNavigationAssistant = () => {
         const geometric = response.geometric || "(no directions)";
         setMessages((m) => [
           ...m,
-          { id: uid(), role: "assistant", text: llm, dual: { llm, geometric } },
+          { id: uid(), role: "assistant", text: llm, dual: { llm, geometric, meta: response.meta } },
         ]);
         speak(llm);
       }
@@ -590,6 +615,34 @@ const ConversationalNavigationAssistant = () => {
       setIsThinking(false);
     }
   }, [isThinking, speak]);
+
+  // Persist a landmark-vs-geometric preference for a given "both" answer.
+  const handleSavePreference = useCallback(
+    async (
+      dual: NonNullable<ChatMessage["dual"]>,
+      ratings: Record<string, number>,
+    ) => {
+      try {
+        await savePreference({
+          scene: dual.meta?.scene || status?.scene || "",
+          destination: dual.meta?.destination || "",
+          question: dual.meta?.question || "",
+          landmark: dual.llm,
+          geometric: dual.geometric,
+          ratings,
+          user_position: dual.meta?.user_position ?? null,
+          destination_position: dual.meta?.destination_position ?? null,
+        });
+        toast.success("Preference saved");
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Failed to save preference",
+        );
+        throw err;
+      }
+    },
+    [status],
+  );
 
   // ---------------------------------------------------------- speech recognition
   const toggleMic = useCallback(() => {
@@ -735,6 +788,19 @@ const ConversationalNavigationAssistant = () => {
                     </DropdownMenuRadioItem>
                   </DropdownMenuRadioGroup>
                   <DropdownMenuSeparator />
+                  <DropdownMenuLabel>User study (Both mode)</DropdownMenuLabel>
+                  {STUDY_QUESTIONS.map((q) => (
+                    <DropdownMenuCheckboxItem
+                      key={q.key}
+                      checked={studyEnabled[q.key]}
+                      onCheckedChange={(v) =>
+                        setStudyEnabled((s) => ({ ...s, [q.key]: !!v }))
+                      }
+                    >
+                      {q.label}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={clearChat}>
                     <Trash2 className="w-4 h-4 mr-2" />
                     Clear conversation
@@ -828,7 +894,7 @@ const ConversationalNavigationAssistant = () => {
       </header>
 
       {/* Main */}
-      <main className="relative z-10 flex-1 min-h-0 w-full max-w-[1600px] mx-auto p-3 sm:p-4 grid gap-4 lg:grid-cols-[1fr_340px] lg:grid-rows-1">
+      <main className="relative z-10 flex-1 min-h-0 w-full max-w-[1600px] mx-auto p-3 sm:p-4 grid gap-4 lg:grid-cols-[1fr_400px] lg:grid-rows-1">
         {/* Viewer */}
         <section className="flex flex-col gap-3 min-w-0 min-h-0">
           <div
@@ -954,19 +1020,26 @@ const ConversationalNavigationAssistant = () => {
                 )}
               >
                 {m.dual ? (
-                  <div className="max-w-[95%] w-full grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div className="rounded-2xl rounded-bl-sm bg-secondary text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
-                      <div className="text-[10px] uppercase tracking-wide text-primary/80 font-semibold mb-1">
-                        Landmark (LLM)
+                  <div className="max-w-[95%] w-full space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div className="rounded-2xl rounded-bl-sm bg-secondary text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
+                        <div className="text-[10px] uppercase tracking-wide text-primary/80 font-semibold mb-1">
+                          Landmark (LLM)
+                        </div>
+                        {m.dual.llm}
                       </div>
-                      {m.dual.llm}
-                    </div>
-                    <div className="rounded-2xl rounded-bl-sm bg-secondary/60 text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
-                      <div className="text-[10px] uppercase tracking-wide text-accent/80 font-semibold mb-1">
-                        Geometric
+                      <div className="rounded-2xl rounded-bl-sm bg-secondary/60 text-secondary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap break-words">
+                        <div className="text-[10px] uppercase tracking-wide text-accent/80 font-semibold mb-1">
+                          Geometric
+                        </div>
+                        {m.dual.geometric}
                       </div>
-                      {m.dual.geometric}
                     </div>
+                    <PreferencePanel
+                      dual={m.dual}
+                      enabled={studyEnabled}
+                      onSave={(ratings) => handleSavePreference(m.dual!, ratings)}
+                    />
                   </div>
                 ) : (
                   <div
@@ -1045,6 +1118,87 @@ const ConversationalNavigationAssistant = () => {
 };
 
 // ------------------------------------------------------------------ subcomponents
+
+const PreferencePanel = ({
+  dual,
+  enabled,
+  onSave,
+}: {
+  dual: NonNullable<ChatMessage["dual"]>;
+  enabled: Record<StudyKey, boolean>;
+  onSave: (ratings: Record<string, number>) => Promise<void>;
+}) => {
+  const questions = STUDY_QUESTIONS.filter((q) => enabled[q.key]);
+  const [ratings, setRatings] = useState<Record<string, number>>({});
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  if (questions.length === 0) return null;
+  if (saved) {
+    return (
+      <div className="text-[11px] text-muted-foreground px-1">
+        Preference saved ✓
+      </div>
+    );
+  }
+
+  const allAnswered = questions.every((q) => ratings[q.key]);
+
+  return (
+    <div className="rounded-xl border border-border/50 bg-background/40 p-2.5 space-y-2.5">
+      <div className="text-[11px] font-semibold text-muted-foreground">
+        Rate each answer (1 = Landmark · 5 = Geometric)
+      </div>
+      {questions.map((q) => (
+        <div key={q.key} className="space-y-1">
+          <div className="text-[11px]">{q.label}</div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-primary/80 w-14 shrink-0">
+              Landmark
+            </span>
+            {[1, 2, 3, 4, 5].map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setRatings((r) => ({ ...r, [q.key]: v }))}
+                className={cn(
+                  "w-6 h-6 rounded-full border text-[10px] transition-colors",
+                  ratings[q.key] === v
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "border-border/60 hover:border-primary/60",
+                )}
+                aria-label={`${q.label}: ${v}`}
+              >
+                {v}
+              </button>
+            ))}
+            <span className="text-[10px] text-accent/80 w-14 shrink-0 text-right">
+              Geometric
+            </span>
+          </div>
+        </div>
+      ))}
+      <Button
+        size="sm"
+        className="h-7 text-xs"
+        disabled={!allAnswered || saving}
+        onClick={async () => {
+          setSaving(true);
+          try {
+            await onSave(ratings);
+            setSaved(true);
+          } catch {
+            /* toast handled by caller */
+          } finally {
+            setSaving(false);
+          }
+        }}
+      >
+        Save rating
+      </Button>
+    </div>
+  );
+};
 
 const StatusBadge = ({
   ok,

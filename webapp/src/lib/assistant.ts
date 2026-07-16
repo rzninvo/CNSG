@@ -182,7 +182,19 @@ export async function sendAction(action: string): Promise<void> {
 
 /** Send a conversation / navigation message and get the assistant's reply. */
 /** A navigation reply: a plain string, or both outputs when in "both" mode. */
-export type ChatReply = string | { llm: string; geometric: string };
+export type ChatReply =
+  | string
+  | {
+      llm: string;
+      geometric: string;
+      meta?: {
+        scene?: string;
+        destination?: string;
+        question?: string;
+        user_position?: number[] | null;
+        destination_position?: number[] | null;
+      };
+    };
 
 export async function sendChat(
   message: string,
@@ -206,6 +218,30 @@ export async function sendChat(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** A landmark-vs-geometric preference record for the user study. */
+export type PreferenceRecord = {
+  scene: string;
+  destination: string;
+  question: string;
+  landmark: string;
+  geometric: string;
+  ratings: Record<string, number>;
+  user_position?: number[] | null;
+  destination_position?: number[] | null;
+};
+
+/** Append a preference record to the backend user-study log. */
+export async function savePreference(rec: PreferenceRecord): Promise<void> {
+  if (!base) throw new Error("Assistant backend URL is not configured.");
+  const res = await fetch(`${base}/preference`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rec),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Server error (${res.status})`);
 }
 
 /** Recompute the route to the last destination from the current position. */
